@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: nsa_flow
+Version: 0.1
+Summary: Nonnegative Stiefel Approximation (NSA-Flow) in PyTorch
+Author: Brian B. Avants
+Requires-Dist: torch>=2.0
+Dynamic: author
+Dynamic: requires-dist
+Dynamic: summary
