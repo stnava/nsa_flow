@@ -1,6 +1,72 @@
 import torch
+import torch_optimizer
 import time
 from typing import Optional
+
+import torch
+import warnings
+
+def get_torch_optimizer(opt_name: str, params, lr: float, **kwargs):
+    """
+    Returns a PyTorch optimizer instance based on the provided name.
+    Automatically includes supported optimizers from both torch.optim
+    and (if installed) torch_optimizer.
+
+    Args:
+        opt_name (str): Name of the optimizer (case-insensitive).
+        params: Model parameters to optimize.
+        lr (float): Learning rate.
+        **kwargs: Additional arguments to pass to the optimizer.
+
+    Returns:
+        optimizer (torch.optim.Optimizer): A PyTorch optimizer instance.
+    """
+    name = opt_name.lower()
+
+    # --- Base PyTorch optimizers ---
+    optimizers = {
+        "adam": lambda p, lr: torch.optim.Adam(p, lr=lr, **kwargs),
+        "adamw": lambda p, lr: torch.optim.AdamW(p, lr=lr, **kwargs),
+        "sgd": lambda p, lr: torch.optim.SGD(p, lr=lr, momentum=0.9, **kwargs),
+        "sgd_nesterov": lambda p, lr: torch.optim.SGD(p, lr=lr, momentum=0.9, nesterov=True, **kwargs),
+        "rmsprop": lambda p, lr: torch.optim.RMSprop(p, lr=lr, **kwargs),
+        "adagrad": lambda p, lr: torch.optim.Adagrad(p, lr=lr, **kwargs),
+        "lbfgs": lambda p, lr: torch.optim.LBFGS(p, lr=lr, max_iter=10, **kwargs),
+        "adamax": lambda p, lr: torch.optim.Adamax(p, lr=lr, **kwargs),
+        "asgd": lambda p, lr: torch.optim.ASGD(p, lr=lr, **kwargs),
+        "nadam": lambda p, lr: torch.optim.NAdam(p, lr=lr, **kwargs),
+        "radam": lambda p, lr: torch.optim.RAdam(p, lr=lr, **kwargs),
+        "rprop": lambda p, lr: torch.optim.Rprop(p, lr=lr, **kwargs),
+    }
+
+    # --- Optionally extend with torch_optimizer if available ---
+    try:
+        import torch_optimizer as optimx
+
+        extra_opts = {
+            "lars": lambda p, lr: optimx.LARS(p, lr=lr, **kwargs),
+            "yogi": lambda p, lr: optimx.Yogi(p, lr=lr, **kwargs),
+            "adabound": lambda p, lr: optimx.AdaBound(p, lr=lr, **kwargs),
+            "qhadam": lambda p, lr: optimx.QHAdam(p, lr=lr, **kwargs),
+            "pid": lambda p, lr: optimx.PID(p, lr=lr, **kwargs),
+            "qhm": lambda p, lr: optimx.QHM(p, lr=lr, **kwargs),
+            "adamp": lambda p, lr: optimx.AdamP(p, lr=lr, **kwargs),
+            "sgdp": lambda p, lr: optimx.SGDP(p, lr=lr, **kwargs),
+            "padam": lambda p, lr: optimx.PAdam(p, lr=lr, **kwargs),
+            "lookahead": lambda p, lr: optimx.Lookahead(torch.optim.Adam(p, lr=lr, **kwargs)),
+        }
+        optimizers.update(extra_opts)
+
+    except ImportError:
+        warnings.warn("torch_optimizer not installed. Skipping extra optimizers.", UserWarning)
+
+    if name not in optimizers:
+        raise ValueError(
+            f"Unsupported optimizer: '{opt_name}'. "
+            f"Supported options: {sorted(optimizers.keys())}"
+        )
+
+    return optimizers[name](params, lr)
 
 def invariant_orthogonality_defect(V):
         norm2 = torch.sum(V ** 2)
@@ -10,6 +76,9 @@ def invariant_orthogonality_defect(V):
         diagS = torch.diag(S)
         off_f2 = torch.sum(S * S) - torch.sum(diagS ** 2)
         return off_f2 / (norm2 ** 2)
+
+def defect_fast(V):
+        return invariant_orthogonality_defect(V)
 
 def _inv_sqrt_eig(A: torch.Tensor, eps: float = 1e-8, verbose: bool = False) -> torch.Tensor:
     """
@@ -279,16 +348,6 @@ def nsa_flow(Y0, X0=None, w=0.5,
             X0 = torch.clamp(X0, min=0)
         assert X0.shape == Y.shape, "X0 must match Y0 shape."
 
-    # --- Defect and gradients ---
-    def defect_fast(V):
-        norm2 = torch.sum(V ** 2)
-        if norm2 <= 1e-12:
-            return torch.tensor(0.0, device=V.device)
-        S = V.T @ V
-        diagS = torch.diag(S)
-        off_f2 = torch.sum(S * S) - torch.sum(diagS ** 2)
-        return off_f2 / (norm2 ** 2)
-
     def compute_ortho_terms(Y, c_orth=1.0):
         norm2 = torch.sum(Y ** 2)
         if norm2 <= 1e-12 or c_orth <= 0:
@@ -354,6 +413,13 @@ def nsa_flow(Y0, X0=None, w=0.5,
             e = e + 0.25 * c_orth * defect
         return e
 
+    # --- optimizer setup ---
+    if optimizer == "fast":
+        opt = None  # use manual gradient step
+    else:
+        Y.requires_grad_(True)
+        opt = get_torch_optimizer(optimizer, [Y], lr)
+
     # --- Main loop ---
     for it in range(1, max_iter + 1):
         grad_fid = -fid_eta * (Y - X0)
@@ -369,6 +435,8 @@ def nsa_flow(Y0, X0=None, w=0.5,
             if verbose:
                 print("NaN or Inf in gradient; stopping.")
             break
+
+
 
         # Simple gradient step (we can add optimizer class later)
         Y_new = Y - lr * rgrad
@@ -455,3 +523,156 @@ def nsa_flow(Y0, X0=None, w=0.5,
         "target": X0
     }
 
+
+def nsa_flow_autograd(
+    Y0, X0=None, w=0.5,
+    retraction="soft_polar",
+    max_iter=500, tol=1e-5, verbose=False, seed=42,
+    apply_nonneg=True, optimizer="adam",
+    initial_learning_rate="default",
+    record_every=1, window_size=5, c1_armijo=1e-6,
+    simplified=False,
+    device=None
+):
+    """
+    NSA-Flow (autograd-based energy minimization).
+
+    Supports standard torch.optim optimizers (Adam, SGD, LBFGS)
+    and built-in Armijo line search for energy descent.
+    """
+
+    torch.manual_seed(seed)
+    if device is None:
+        device = Y0.device
+    Y = Y0.clone().detach().to(device).requires_grad_(True)
+    p, k = Y.shape
+
+    # --- target ---
+    if X0 is None:
+        X0 = Y.clone().detach()
+    X0 = X0.to(device)
+    if apply_nonneg:
+        X0 = torch.clamp(X0, min=0.0)
+
+    # --- learning rate ---
+    if initial_learning_rate == "default":
+        lr = 5e-4 if apply_nonneg else 5e-4
+    else:
+        lr = float(initial_learning_rate)
+
+    # --- define energy ---
+    def nsa_energy(V, w=w, retraction=retraction):
+        Vp = nsa_flow_retract_auto(V, w, retraction)
+        if apply_nonneg:
+            Vp = torch.clamp(Vp, min=0.0)
+        fid = 0.5 * torch.sum((Vp - X0) ** 2)
+        orth_term = 0.25 * w * defect_fast(Vp) if w > 0 else 0.0
+        return ( fid + orth_term ) * 1.0
+
+    # --- optimizer setup ---
+    opt_name = str(optimizer).lower()
+    opt = get_torch_optimizer(opt_name, [Y], lr=lr)
+
+    # --- tracking ---
+    traces, recent_energies = [], []
+    best_Y, best_total_energy, best_Y_iteration = Y.clone(), float("inf"), 0
+    t0 = time.time()
+
+    for it in range(1, max_iter + 1):
+        if opt_name == "armijo":
+            # Manual Armijo line search
+            opt_lr = lr
+            Y.grad = None
+            E0 = nsa_energy(Y)
+            E0.backward()
+            grad = Y.grad.clone()
+            gnorm = grad.norm()
+
+            if gnorm < tol:
+                if verbose:
+                    print(f"Converged: grad norm < {tol:.2e}")
+                break
+
+            descent_dir = -grad
+            # Normalize direction for stable step size
+            descent_dir = descent_dir / (descent_dir.norm() + 1e-12)
+
+            # --- Armijo condition ---
+            with torch.no_grad():
+                step = 1.0
+                while step > 1e-8:
+                    Y_trial = Y + step * descent_dir
+                    Y_trial = nsa_flow_retract_auto(Y_trial, w, retraction)
+                    if apply_nonneg:
+                        Y_trial = torch.clamp(Y_trial, min=0.0)
+                    E_trial = nsa_energy(Y_trial)
+                    if E_trial <= E0 + c1_armijo * step * torch.sum(grad * descent_dir):
+                        Y.data.copy_(Y_trial)
+                        break
+                    step *= 0.5
+                else:
+                    if verbose:
+                        print(f"[Iter {it}] Armijo failed to find descent — stopping.")
+                    break
+
+        else:
+            # --- standard autograd optimizer ---
+            def closure():
+                opt.zero_grad(set_to_none=True)
+                E = nsa_energy(Y)
+                E.backward()
+                return E
+
+
+            torch.nn.utils.clip_grad_norm_([Y], max_norm=10.0) # FIXME
+            if isinstance(opt, torch.optim.LBFGS):
+                E0 = opt.step(closure)
+            else:
+                E0 = closure()
+                opt.step()
+
+            with torch.no_grad():
+                Y.data = nsa_flow_retract_auto(Y.data, w, retraction)
+                if apply_nonneg:
+                    Y.data = torch.clamp(Y.data, min=0.0)
+
+        # --- energy tracking ---
+        with torch.no_grad():
+            total_energy = nsa_energy(Y).item()
+            if total_energy < best_total_energy:
+                best_total_energy = total_energy
+                best_Y = Y.clone().detach()
+                best_Y_iteration = it
+
+            recent_energies.append(total_energy)
+            if len(recent_energies) > window_size:
+                recent_energies.pop(0)
+
+            dt = time.time() - t0
+            if it % record_every == 0:
+                traces.append({
+                    "iter": it,
+                    "time": dt,
+                    "total_energy": total_energy,
+                })
+
+            if verbose and (it % 10 == 0 or it == max_iter):
+                print(f"[Iter {it:4d}] Energy={total_energy:.6e} | lr={lr:.2e}")
+
+            if len(recent_energies) == window_size:
+                e_max, e_min = max(recent_energies), min(recent_energies)
+                e_avg = sum(recent_energies) / len(recent_energies)
+                rel_var = (e_max - e_min) / (abs(e_avg) + 1e-12)
+                if rel_var < tol:
+                    if verbose:
+                        print(f"Converged (energy stable < {tol:.2e}) at iter {it}")
+                    break
+
+    return {
+        "Y": best_Y.detach(),
+        "traces": traces,
+        "final_iter": len(traces),
+        "best_total_energy": best_total_energy,
+        "best_Y_iteration": best_Y_iteration,
+        "target": X0,
+    }
