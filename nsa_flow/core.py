@@ -955,7 +955,7 @@ def nsa_flow(Y0, X0=None, w=0.5,
              record_every=1, window_size=5, c1_armijo=1e-6,
              simplified=False,
              project_full_gradient=False,
-             device=None):
+             device=None, precision='float64'):
     """
     NSA-Flow optimization (PyTorch version)
 
@@ -994,6 +994,8 @@ def nsa_flow(Y0, X0=None, w=0.5,
         If False (default), only project the orthogonality gradient, keeping fidelity as Euclidean.
     device : torch.device or str or None
         Device to run on.
+    precision : str
+        Floating point precision ('float32', 'float64'). Default: 'float64' for stability.
 
     Returns
     -------
@@ -1001,6 +1003,12 @@ def nsa_flow(Y0, X0=None, w=0.5,
         'Y', 'traces', 'final_iter', 'best_total_energy', 'best_Y_iteration'
     """
 
+    if precision == 'float32':
+        dtype = torch.float32
+    elif precision == 'float64':
+        dtype = torch.float64
+    else:
+        raise ValueError(f"Unsupported precision: {precision}. Use 'float32' or 'float64'.")
     torch.manual_seed(seed)
     if device is None:
         device = Y0.device
