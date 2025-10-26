@@ -38,7 +38,7 @@ Or install the latest development version directly from GitHub:
 
 pip install git+https://github.com/stnava/nsa_flow.git
 
-
+```
 ⸻
 
 🧰 Dependencies
@@ -51,6 +51,8 @@ pip install git+https://github.com/stnava/nsa_flow.git
 
 🚀 Quick Start
 
+
+```python
 import torch
 import nsa_flow
 from nsa_flow import nsa_flow, invariant_orthogonality_defect
@@ -77,7 +79,7 @@ result = nsa_flow(
 
 print("Initial orthogonality defect:", invariant_orthogonality_defect(Y))
 print("Final orthogonality defect:", invariant_orthogonality_defect(result["Y"]))
-
+```
 
 ⸻
 
@@ -86,12 +88,18 @@ print("Final orthogonality defect:", invariant_orthogonality_defect(result["Y"])
 NSA-Flow exposes a small set of high-level functions:
 
 Function	Description
-nsa_flow()	Main optimization loop balancing fidelity and orthogonality
-nsa_flow_retract_auto()	Retraction operator enforcing manifold constraints
-invariant_orthogonality_defect()	Computes orthogonality defect measure
-defect_fast()	Fast approximate defect metric
-nsa_flow_autograd()	Autograd-compatible variant for joint optimization
-get_torch_optimizer()	Returns a configured PyTorch optimizer
+
+- nsa_flow()	Main optimization loop balancing fidelity and orthogonality
+
+- nsa_flow_retract_auto()	Retraction operator enforcing manifold constraints
+
+- invariant_orthogonality_defect()	Computes orthogonality defect measure
+
+- defect_fast()	Fast approximate defect metric
+
+- nsa_flow_autograd()	Autograd-compatible variant for joint optimization
+
+- get_torch_optimizer()	Returns a configured PyTorch optimizer
 
 
 ⸻
@@ -99,7 +107,9 @@ get_torch_optimizer()	Returns a configured PyTorch optimizer
 🧪 Validation
 
 NSA-Flow has been validated in:
+
 	•	Golub leukemia gene expression dataset
+
 	•	Alzheimer’s Disease Neuroimaging Initiative (ADNI) dataset
 
 NSA-Flow constraints maintain or improve performance while simplifying latent representations and improving interpretability.
