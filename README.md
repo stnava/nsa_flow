@@ -104,6 +104,8 @@ NSA-Flow has been validated in:
 
 NSA-Flow constraints maintain or improve performance while simplifying latent representations and improving interpretability.
 
+There is also a layer that can be included (potentially) in deep learning tools.  See `tests/test_nsaf_layer.py`. 
+This has not been used tested.
 ⸻
 
 🧑‍💻 Citation
