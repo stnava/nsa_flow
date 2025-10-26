@@ -1,11 +1,25 @@
 import torch
 import matplotlib.pyplot as plt
 import nsa_flow  # make sure your module is importable
-from nsa_flow import nsa_flow, nsa_flow_retract_auto, invariant_orthogonality_defect, defect_fast, nsa_flow_autograd
+from nsa_flow import nsa_flow,  nsa_flow_retract_auto, invariant_orthogonality_defect, defect_fast, nsa_flow_autograd
 torch.manual_seed(42)
-Y = torch.randn(12, 5)
-X0 = torch.randn(12, 5)
+Y = torch.randn(50, 10)
+X0 = torch.randn(Y.shape[0], Y.shape[1])
 retraction='soft_polar'
+###################
+result = nsa_flow(
+        Y,
+        w=0.8, 
+        retraction='soft_polar',
+        optimizer='adam',
+        max_iter=50,
+        record_every=1,
+        tol=1e-8,
+        initial_learning_rate=1e-2,
+        verbose=True,
+    )
+invariant_orthogonality_defect(Y)
+invariant_orthogonality_defect(result['Y'])
 
 def nsa_energy(V, w=0.5, retraction='soft_polar',apply_nonneg=False):
     Vp = nsa_flow_retract_auto(V, w_retract=w, retraction_type=retraction)
@@ -37,17 +51,7 @@ result = nsa_flow_autograd(
         verbose=True,
     )
 
-result = nsa_flow(
-        Y0,
-        X0,
-        w=0.5, 
-        retraction='soft_polar',
-        max_iter=50,
-        record_every=1,
-        tol=1e-8,
-        initial_learning_rate=1e-4,
-        verbose=True,
-    )
+
 def test_energy_behavior():
     # Random seed for reproducibility
     torch.manual_seed(42)

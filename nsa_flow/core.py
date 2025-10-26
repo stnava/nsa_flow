@@ -274,8 +274,6 @@ def energy_fidelity(M, Xc, w):
     return -0.5 * w * torch.sum((Xc @ M) ** 2) / n
 
 
-
-
 def nsa_flow(Y0, X0=None, w=0.5,
              retraction="soft_polar",
              max_iter=500, tol=1e-5, verbose=False, seed=42,
@@ -676,3 +674,6 @@ def nsa_flow_autograd(
         "best_Y_iteration": best_Y_iteration,
         "target": X0,
     }
+
+
+
