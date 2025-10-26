@@ -6,3 +6,4 @@ nsa_flow.egg-info/SOURCES.txt
 nsa_flow.egg-info/dependency_links.txt
 nsa_flow.egg-info/requires.txt
 nsa_flow.egg-info/top_level.txt
+tests/test_nsa_flow_extended.py

@@ -1,180 +1,457 @@
 import torch
+import time
+from typing import Optional
 
-def invariant_orthogonality_defect(Y):
-    # Normalize columns to unit-norm then compute deviation from identity
-    col_norms = torch.norm(Y, dim=0)
-    safe = torch.clamp(col_norms, min=1e-12)
-    Yn = Y / safe.unsqueeze(0)   # (p x k) with each column unit L2-norm
-    YtY = Yn.T @ Yn
-    I = torch.eye(YtY.shape[0], dtype=YtY.dtype, device=YtY.device)
-    return torch.norm(YtY - I) / YtY.shape[0]
+def invariant_orthogonality_defect(V):
+        norm2 = torch.sum(V ** 2)
+        if norm2 <= 1e-12:
+            return torch.tensor(0.0, device=V.device)
+        S = V.T @ V
+        diagS = torch.diag(S)
+        off_f2 = torch.sum(S * S) - torch.sum(diagS ** 2)
+        return off_f2 / (norm2 ** 2)
 
-def inv_sqrt_sym_adaptive(YtY, eps=1e-8, ns_iter=1, method="diag"):
-    """Compute (YtY + eps*I)^(-1/2) adaptively."""
-    k = YtY.shape[0]
-    # enforce symmetry
-    YtY = 0.5 * (YtY + YtY.T)
-    if method == "diag":
-        d = torch.diag(YtY)
-        # clamp to avoid small negative numerical noise
-        d = torch.clamp(d, min=eps)
-        d_inv_sqrt = torch.rsqrt(d + eps)
-        return torch.diag(d_inv_sqrt)
+def _inv_sqrt_eig(A: torch.Tensor, eps: float = 1e-8, verbose: bool = False) -> torch.Tensor:
+    """
+    Compute (A + eps I)^{-1/2} using symmetric eigendecomposition.
+    A must be symmetric (k x k).
+    """
+    # eigh returns eigenvalues in ascending order
+    w, V = torch.linalg.eigh(A)
+    # regularize eigenvalues
+    w_reg = w.clamp_min(eps)
+    inv_sqrt_w = (w_reg**-0.5)
+    if verbose:
+        small = (w_reg <= eps).sum().item()
+        print(f"_inv_sqrt_eig: min_eig={w_reg.min().item():.3e}, #clamped={small}")
+    return (V * inv_sqrt_w.unsqueeze(0)) @ V.transpose(-2, -1)
+
+
+def _inv_sqrt_newton_schulz(A: torch.Tensor, eps: float = 1e-8,
+                            ns_iter: int = 10, verbose: bool = False) -> torch.Tensor:
+    """
+    Newton-Schulz iteration for matrix inverse square root of (A + eps I).
+    This expects A to be positive definite and reasonably well-conditioned after eps.
+    Works best when ||I - A|| < 1 (so we scale).
+    """
+    k = A.shape[-1]
+    I = torch.eye(k, device=A.device, dtype=A.dtype)
+    A_reg = A + eps * I
+
+    # compute norm for scaling
+    normA = torch.linalg.norm(A_reg)
+    if normA == 0:
+        return I  # fallback
+    Y = A_reg / normA
+    Z = I.clone()
+
+    if verbose:
+        print(f"_inv_sqrt_newton_schulz: normA={normA.item():.3e}, ns_iter={ns_iter}")
+
+    for i in range(ns_iter):
+        T = 0.5 * (3.0 * I - Z @ Y)
+        Y = Y @ T
+        Z = T @ Z
+    # Z approximates A^{-1/2} * sqrt(normA)
+    return Z / torch.sqrt(normA)
+
+
+def _inv_sqrt_diag(A: torch.Tensor, eps: float = 1e-8, verbose: bool = False) -> torch.Tensor:
+    """
+    Diagonal approximation: invert sqrt of diagonal entries only.
+    Useful when matrix is approximately diagonal or to cheaply approximate.
+    """
+    diag = torch.diagonal(A, 0)
+    diag_reg = diag.clamp_min(eps)
+    inv_sqrt = (diag_reg**-0.5)
+    if verbose:
+        print(f"_inv_sqrt_diag: min_diag={diag_reg.min().item():.3e}")
+    return torch.diag(inv_sqrt)
+
+
+def inv_sqrt_sym_adaptive(YtY: torch.Tensor,
+                          epsilon: float = 1e-8,
+                          method: str = "eig",
+                          ns_iter: int = 4,
+                          eig_thresh: int = 128,
+                          verbose: bool = False) -> torch.Tensor:
+    """
+    Adaptive inverse-square-root for symmetric positive-definite matrix YtY.
+    method: "eig" | "ns" | "diag" | "auto"
+     - "eig": eigendecomposition
+     - "ns": Newton-Schulz
+     - "diag": diagonal fallback
+     - "auto": choose based on dimension heuristics (k <= eig_thresh => eig, else ns)
+    """
+    k = YtY.shape[-1]
+    if method == "auto":
+        if k <= eig_thresh:
+            method_use = "eig"
+        else:
+            method_use = "ns"
     else:
-        eigvals, eigvecs = torch.linalg.eigh(YtY + eps * torch.eye(k, device=YtY.device))
-        eigvals_inv_sqrt = torch.rsqrt(torch.clamp(eigvals, min=eps))
-        return eigvecs @ torch.diag(eigvals_inv_sqrt) @ eigvecs.T
+        method_use = method
+
+    if method_use == "eig":
+        return _inv_sqrt_eig(YtY, eps=epsilon, verbose=verbose)
+    elif method_use == "ns":
+        # try Newton-Schulz; if it fails (e.g. nan/inf), fallback to eig
+        try:
+            T = _inv_sqrt_newton_schulz(YtY, eps=epsilon, ns_iter=ns_iter, verbose=verbose)
+            if torch.isfinite(T).all():
+                return T
+            else:
+                if verbose:
+                    print("Newton-Schulz produced non-finite entries; falling back to eig.")
+                return _inv_sqrt_eig(YtY, eps=epsilon, verbose=verbose)
+        except Exception as e:
+            if verbose:
+                print(f"Newton-Schulz error: {e}; falling back to eig.")
+            return _inv_sqrt_eig(YtY, eps=epsilon, verbose=verbose)
+    elif method_use == "diag":
+        return _inv_sqrt_diag(YtY, eps=epsilon, verbose=verbose)
+    else:
+        raise ValueError(f"Unknown inv sqrt method: {method}")
 
 
-import torch
-
-def nsa_flow_retract_auto(Y_cand, w_retract=1.0,
-                          retraction_type="soft_polar",
-                          eps_rf=1e-8, verbose=False):
+def nsa_flow_retract_auto(Y_cand: torch.Tensor,
+                          w_retract: float = 1.0,
+                          retraction_type: str = "soft_polar",
+                          eps_rf: float = 1e-8,
+                          inv_method: str = "auto",
+                          ns_iter: int = 4,
+                          eig_thresh: int = 128,
+                          diag_thresh: int = 8192,
+                          verbose: bool = False) -> torch.Tensor:
     """
-    Weighted polar blend retraction.
-    - returns (1-w)*Y + w*Q where Q = polar(Y) = U V^T.
-    - preserves Frobenius norm via re-scaling (optional/preserving).
+    Retraction onto Stiefel manifold (matches R nsa_flow_retract_auto behaviour).
+    Y_cand: (p, k) torch tensor
+    retraction_type: "polar" | "soft_polar" | "none"
+    w_retract: blend weight in [0,1] where result = (1-w)*Y + w * retraction_operator(Y)
+    inv_method: "eig" | "ns" | "diag" | "auto"
+    ns_iter, eig_thresh, diag_thresh: heuristics from R version
     """
-    p, k = Y_cand.shape
-    normY = torch.norm(Y_cand)
-    if normY < 1e-12 or retraction_type == "none" or w_retract <= 0.0:
+    if not torch.is_tensor(Y_cand):
+        raise TypeError("Y_cand must be a torch.Tensor")
+    if retraction_type is None or retraction_type == "none" or w_retract <= 0.0:
         return Y_cand.clone()
 
-    # compute polar factor Q via thin SVD (stable)
-    U, _, Vh = torch.linalg.svd(Y_cand, full_matrices=False)
-    Q = U @ Vh  # shape (p, k) with Q^T Q = I_k (up to numeric error)
+    p, k = Y_cand.shape
+    device = Y_cand.device
+    dtype = Y_cand.dtype
 
-    # weighted polar blend in ambient space
-    Y_blend = (1.0 - w_retract) * Y_cand + w_retract * Q
+    normY = torch.norm(Y_cand)
+    if normY < 1e-12:
+        # trivial zero input -> just return copy (no retraction meaningful)
+        return Y_cand.clone()
 
-    # preserve Frobenius norm of original Y (optional; matches previous R behaviour)
-    cur_norm = torch.norm(Y_blend)
-    if cur_norm > 1e-12:
-        Y_blend = Y_blend / cur_norm * normY
+    retraction_type = retraction_type.lower()
+    if retraction_type == "polar":
+        # economy SVD
+        U, S, Vh = torch.linalg.svd(Y_cand, full_matrices=False)
+        Q = U @ Vh
+        # preserve Frobenius norm optionally
+        cur_norm = torch.norm(Q)
+        if cur_norm > 1e-12:
+            Q = Q / cur_norm * normY
+        return Q.to(device=device, dtype=dtype).clone()
 
-    return Y_blend
+    if retraction_type == "soft_polar":
+        # Decide whether to use additive SVD fallback (R's heuristic)
+        use_additive_svd_fallback = False
+        if (k > diag_thresh) and (p < k):
+            use_additive_svd_fallback = True
+
+        # (R code had an override that forced fallback; default behaviour should be heuristic-driven)
+        if not use_additive_svd_fallback:
+            # compute small k x k Gram matrix Y^T Y
+            # crossprod in R is t(Y) %*% Y
+            YtY = Y_cand.T @ Y_cand
+            # compute inverse sqrt of (YtY + eps I)
+            I_k = torch.eye(k, device=device, dtype=dtype)
+            YtY = YtY + eps_rf * I_k
+
+            T = inv_sqrt_sym_adaptive(YtY, epsilon=eps_rf, method=inv_method,
+                                      ns_iter=ns_iter, eig_thresh=eig_thresh, verbose=verbose)
+
+            # multiplicative soft-polar: T_w = (1-w) I + w * T
+            T_w = (1.0 - w_retract) * I_k + w_retract * T
+            Ytilde = Y_cand @ T_w
+
+            # preserve Frobenius norm
+            cur_norm = torch.norm(Ytilde)
+            if cur_norm > 1e-12:
+                Ytilde = Ytilde / cur_norm * normY
+
+            return Ytilde.clone()
+        else:
+            # fallback: economy SVD additive blend
+            U, S, Vh = torch.linalg.svd(Y_cand, full_matrices=False)
+            Q = U @ Vh
+            Ytilde = (1.0 - w_retract) * Y_cand + w_retract * Q
+            cur_norm = torch.norm(Ytilde)
+            if cur_norm > 1e-12:
+                Ytilde = Ytilde / cur_norm * normY
+            return Ytilde.clone()
+
+    raise ValueError(f"unsupported retraction_type: {retraction_type}")
 
 
-def soft_threshold(M, thresh):
-    """Elementwise soft-thresholding (proximal for L1)."""
-    # M: tensor
-    return torch.sign(M) * torch.clamp(torch.abs(M) - thresh, min=0.0)
 
-
-def energy_fidelity(M, Xc, w_pca):
+def energy_fidelity(M, Xc, w):
     """Smooth fidelity energy used for autograd (no prox)."""
     n = Xc.shape[0]
     # negative sign to match original formulation (we minimize energy = -fid + prox)
-    return -0.5 * w_pca * torch.sum((Xc @ M) ** 2) / n
+    return -0.5 * w * torch.sum((Xc @ M) ** 2) / n
 
 
-def energy_total(M, Xc, w_pca, lambda_):
-    """Full energy used for Armijo/backtracking (includes prox)."""
-    return energy_fidelity(M, Xc, w_pca) + lambda_ * torch.sum(torch.abs(M))
 
 
-def nsa_flow_py(Y, Xc, w_pca=1.0, lambda_=0.01, lr=1e-2, max_iter=100, retraction_type="soft_polar",
-                armijo_beta=0.5, armijo_c=1e-4, tol=1e-6, verbose=False, max_grad_norm=1e6):
+def nsa_flow(Y0, X0=None, w=0.5,
+             retraction="soft_polar",
+             max_iter=500, tol=1e-5, verbose=False, seed=42,
+             apply_nonneg=True, optimizer="fast",
+             initial_learning_rate="default",
+             record_every=1, window_size=5, c1_armijo=1e-6,
+             simplified=False,
+             device=None):
     """
-    NSA-Flow with corrected Riemannian Armijo backtracking and proximal L1 handling.
-    - Uses fidelity term for gradients (autograd).
-    - Uses full energy (fidelity + L1 prox) for Armijo/backtracking checks.
-    - Applies proximal soft-threshold AFTER retraction (matching R code).
+    NSA-Flow optimization (PyTorch version)
+
+    Parameters
+    ----------
+    Y0 : torch.Tensor
+        Initial matrix (p x k).
+    X0 : torch.Tensor or None
+        Target matrix for fidelity.
+    w : float
+        Weight for orthogonality penalty (0..1).
+    retraction : str
+        Retraction method ('soft_polar', 'polar', 'none').
+    max_iter : int
+        Maximum iterations.
+    tol : float
+        Convergence tolerance.
+    verbose : bool
+        Print progress if True.
+    seed : int
+        Random seed.
+    apply_nonneg : bool
+        Enforce nonnegativity after each retraction if True.
+    optimizer : str
+        Only 'fast' is supported currently (simple gradient step).
+    initial_learning_rate : float or str
+        Learning rate or 'default' for auto-estimate.
+    record_every : int
+        Iteration interval for recording traces.
+    window_size : int
+        Energy stability window for convergence check.
+    simplified : bool
+        Use simplified orthogonality objective.
+    device : torch.device or str or None
+        Device to run on.
+
+    Returns
+    -------
+    dict with keys:
+        'Y', 'traces', 'final_iter', 'best_total_energy', 'best_Y_iteration'
     """
-    # ensure tensors are float
-    Y = Y.clone().detach().to(dtype=torch.get_default_dtype())
-    Xc = Xc.clone().detach().to(dtype=torch.get_default_dtype())
 
-    # make Y a leaf with grad
-    Y.requires_grad_(True)
+    torch.manual_seed(seed)
+    if device is None:
+        device = Y0.device
 
+    Y = Y0.clone().detach().to(device)
     p, k = Y.shape
-    n = Xc.shape[0]
 
-    # compute E_total_old for Armijo baseline
-    Y_detached = Y.detach()
-    E_total_old = energy_total(Y_detached, Xc, w_pca, lambda_).item()
+    if X0 is None:
+        if apply_nonneg:
+            X0 = torch.clamp(Y, min=0)
+        else:
+            X0 = Y.clone()
+        perturb_scale = torch.norm(Y) / (Y.numel() ** 0.5) * 0.05
+        Y = Y + perturb_scale * torch.randn_like(Y)
+        if verbose:
+            print("Added perturbation to Y0.")
+    else:
+        X0 = X0.to(device)
+        if apply_nonneg:
+            X0 = torch.clamp(X0, min=0)
+        assert X0.shape == Y.shape, "X0 must match Y0 shape."
 
-    for t in range(max_iter):
-        # zero accumulated gradients
-        if Y.grad is not None:
-            Y.grad.zero_()
+    # --- Defect and gradients ---
+    def defect_fast(V):
+        norm2 = torch.sum(V ** 2)
+        if norm2 <= 1e-12:
+            return torch.tensor(0.0, device=V.device)
+        S = V.T @ V
+        diagS = torch.diag(S)
+        off_f2 = torch.sum(S * S) - torch.sum(diagS ** 2)
+        return off_f2 / (norm2 ** 2)
 
-        # compute smooth fidelity energy and gradient
-        E_fid = energy_fidelity(Y, Xc, w_pca)
-        E_fid.backward()
-        grad = Y.grad.detach().clone()   # gradient w.r.t Y for smooth part
-        # gradient clipping to avoid explosion
-        grad_norm = torch.norm(grad)
-        if not torch.isfinite(grad_norm):
-            raise RuntimeError(f"Non-finite gradient at iteration {t}")
-        if grad_norm > max_grad_norm:
-            grad = grad * (max_grad_norm / grad_norm)
-            grad_norm = torch.norm(grad)
+    def compute_ortho_terms(Y, c_orth=1.0):
+        norm2 = torch.sum(Y ** 2)
+        if norm2 <= 1e-12 or c_orth <= 0:
+            grad_orth = torch.zeros_like(Y)
+            return grad_orth, torch.tensor(0.0, device=Y.device), norm2
 
-        # search direction (Riemannian projection would be applied if orth term present)
-        Y_dir = -grad
+        S = Y.T @ Y
+        diagS = torch.diag(S)
+        off_f2 = torch.sum(S * S) - torch.sum(diagS ** 2)
+        defect = off_f2 / (norm2 ** 2)
 
-        # Backtracking Armijo: use total energy (with prox) for comparisons.
-        step = lr
-        E_old_total = energy_total(Y.detach(), Xc, w_pca, lambda_).item()
-        # directional derivative (inner product grad * search dir), should be negative
-        dir_deriv = torch.sum(grad * Y_dir).item()   # = -||grad||^2 (<=0)
+        if simplified:
+            grad_orth = -2 * c_orth * (Y @ (S - torch.diag(torch.diag(S))))
+        else:
+            Y_S = Y @ S
+            Y_diag_scale = Y * diagS
+            term1 = (Y_S - Y_diag_scale) / (norm2 ** 2)
+            term2 = (defect / norm2) * Y
+            grad_orth = c_orth * (term1 - term2)
+        return grad_orth, defect, norm2
 
-        # backtracking loop
-        bt_count = 0
-        max_bt = 50
-        accepted = False
-        while bt_count < max_bt:
-            # candidate: gradient step (explicit), then retraction, then proximal
-            with torch.no_grad():
-                Y_cand = Y + step * Y_dir
-            Y_cand = nsa_flow_retract_auto(Y_cand, w_retract=1.0, retraction_type=retraction_type)
-            # proximal soft-threshold with threshold = step * lambda_
-            thresh = step * lambda_
-            Y_cand_prox = soft_threshold(Y_cand, thresh)
+    def symm(A):
+        return 0.5 * (A + A.T)
 
-            # compute total energy for Armijo test
-            E_new_total = energy_total(Y_cand_prox, Xc, w_pca, lambda_).item()
+    # --- Scaling constants ---
+    g0 = 0.5 * torch.sum((Y - X0) ** 2) / (p * k)
+    g0 = torch.clamp(g0, min=1e-8)
+    d0 = torch.clamp(defect_fast(Y), min=1e-8)
+    fid_eta = (1 - w) / (g0 * p * k)
+    c_orth = 4 * w / d0
 
-            # Armijo condition: E_new <= E_old + c * step * dir_deriv
-            rhs = E_old_total + armijo_c * step * dir_deriv
-            if not (torch.isfinite(torch.tensor(E_new_total))):
-                # shrink step and retry
-                step *= armijo_beta
-                bt_count += 1
-                continue
+    # --- Learning rate ---
+    if initial_learning_rate == "default":
+        lr = 1e-3 if apply_nonneg else 1.0
+    else:
+        lr = float(initial_learning_rate)
 
-            if E_new_total <= rhs:
-                accepted = True
-                break
+    traces = []
+    recent_energies = []
+    t0 = time.time()
 
-            # otherwise shrink
-            step *= armijo_beta
-            bt_count += 1
+    best_Y = Y.clone()
+    best_total_energy = float("inf")
+    best_Y_iteration = 0
 
-        # Apply accepted candidate (or best fallback) to Y
-        with torch.no_grad():
-            if accepted:
-                Y[:] = Y_cand_prox
-            else:
-                # if never accepted, apply the best candidate computed (safe fallback)
-                Y[:] = Y_cand_prox
+    # --- Initial gradient for relative norm ---
+    grad_fid_init = -fid_eta * (Y - X0)
+    grad_orth_init, _, _ = compute_ortho_terms(Y, c_orth)
+    sym_term_orth_init = symm(Y.T @ grad_orth_init)
+    rgrad_orth_init = grad_orth_init - Y @ sym_term_orth_init
+    rgrad_init = grad_fid_init + rgrad_orth_init
+    init_grad_norm = torch.norm(rgrad_init) + 1e-8
 
-        # clear gradient for next iter
-        if Y.grad is not None:
-            Y.grad.zero_()
+    # --- Energy ---
+    def nsa_energy(Vp):
+        Vp = nsa_flow_retract_auto(Vp, w, retraction)
+        if apply_nonneg:
+            Vp = torch.clamp(Vp, min=0)
+        e = 0.5 * fid_eta * torch.sum((Vp - X0) ** 2)
+        norm2_V = torch.sum(Vp ** 2)
+        if c_orth > 0 and norm2_V > 0:
+            defect = defect_fast(Vp)
+            e = e + 0.25 * c_orth * defect
+        return e
 
-        # diagnostics
-        E_now_total = energy_total(Y.detach(), Xc, w_pca, lambda_).item()
-        if verbose and (t % 10 == 0 or t == 0):
-            print(f"iter {t:3d} | E_total={E_now_total:.6e} | grad_norm={grad_norm:.3e} | step={step:.3e} | bt={bt_count}")
+    # --- Main loop ---
+    for it in range(1, max_iter + 1):
+        grad_fid = -fid_eta * (Y - X0)
+        grad_orth, defect_val, _ = compute_ortho_terms(Y, c_orth)
+        if c_orth > 0:
+            sym_term_orth = symm(Y.T @ grad_orth)
+            rgrad_orth = grad_orth - Y @ sym_term_orth
+        else:
+            rgrad_orth = grad_orth
+        rgrad = grad_fid + rgrad_orth
 
-        # convergence
-        if abs(E_old_total - E_now_total) < tol:
+        if torch.isnan(rgrad).any() or torch.isinf(rgrad).any():
             if verbose:
-                print(f"Converged at iter {t} (ΔE < {tol})")
+                print("NaN or Inf in gradient; stopping.")
             break
 
-    return {"Y": Y.detach(), "energy": E_now_total, "iter": t + 1}
+        # Simple gradient step (we can add optimizer class later)
+        Y_new = Y - lr * rgrad
+        Y_new = nsa_flow_retract_auto(Y_new, w, retraction)
+        if apply_nonneg:
+            Y_new = torch.clamp(Y_new, min=0)
+
+        current_energy = nsa_energy(Y_new)
+
+        # --- Backtracking line search ---
+        alpha = 1.0
+        count = 0
+        max_bt = 20
+        while current_energy > best_total_energy and count < max_bt:
+            alpha *= 0.5
+            Y_try = best_Y + alpha * (Y_new - best_Y)
+            current_energy = nsa_energy(Y_try)
+            count += 1
+            if current_energy < best_total_energy:
+                Y_new = nsa_flow_retract_auto(Y_try, w, retraction)
+                break
+
+        if count == max_bt:
+            if verbose:
+                print("Backtracking failed; reverting to best Y.")
+            Y_new = best_Y.clone()
+
+        if count > 2:
+            lr *= 0.95
+        elif count == 0 and it % 5 == 0:
+            lr *= 1.01
+
+        Y = Y_new
+
+        fidelity = 0.5 * fid_eta * torch.sum((Y - X0) ** 2)
+        orthogonality = defect_fast(Y)
+        total_energy = fidelity + 0.25 * c_orth * orthogonality
+        dt = time.time() - t0
+
+        if total_energy < best_total_energy:
+            best_total_energy = total_energy
+            best_Y = Y.clone()
+            best_Y_iteration = it
+
+        recent_energies.append(total_energy.item())
+        if len(recent_energies) > window_size:
+            recent_energies.pop(0)
+
+        if it % record_every == 0:
+            traces.append({
+                "iter": it,
+                "time": dt,
+                "fidelity": fidelity.item(),
+                "orthogonality": orthogonality.item(),
+                "total_energy": total_energy.item()
+            })
+
+        if verbose:
+            print(f"[Iter {it:3d}] Total: {total_energy.item():.6e} | "
+                  f"Fid: {fidelity.item():.6e} | Orth: {orthogonality.item():.6e}")
+
+        # --- Convergence ---
+        grad_norm = torch.norm(rgrad)
+        rel_grad_norm = grad_norm / init_grad_norm
+        if rel_grad_norm < tol:
+            if verbose:
+                print(f"Converged at iter {it} (grad norm < {tol:.2e})")
+            break
+        if len(recent_energies) == window_size:
+            e_max, e_min = max(recent_energies), min(recent_energies)
+            e_avg = sum(recent_energies) / len(recent_energies)
+            rel_var = (e_max - e_min) / (abs(e_avg) + 1e-12)
+            if rel_var < tol:
+                if verbose:
+                    print(f"Converged at iter {it} (energy stable < {tol:.2e})")
+                break
+
+    return {
+        "Y": best_Y,
+        "traces": traces,
+        "final_iter": len(traces),
+        "best_total_energy": best_total_energy.item(),
+        "best_Y_iteration": best_Y_iteration,
+        "target": X0
+    }
+

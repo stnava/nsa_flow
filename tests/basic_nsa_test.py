@@ -1,7 +1,6 @@
 import torch
 import pytest
-from nsa_flow import nsa_flow_py, nsa_flow_retract_auto
-from nsa_flow.core import invariant_orthogonality_defect
+from nsa_flow import nsa_flow, nsa_flow_retract_auto, invariant_orthogonality_defect
 
 torch.set_default_dtype(torch.float64)
 
@@ -24,15 +23,13 @@ def synthetic_data(seed=123):
 # -----------------------------------------------------
 def test_retraction_soft_polar_stability():
     Y = torch.randn(10, 3)
-    Y_retracted = nsa_flow_retract_auto(Y, w_retract=0.9, retraction_type="soft_polar")
+    Y_retracted = nsa_flow_retract_auto(Y, w_retract=0.99, retraction_type="soft_polar")
     assert Y_retracted.shape == Y.shape
     assert torch.isfinite(Y_retracted).all()
 
     # Columns should be approximately orthogonal
-    YtY = Y_retracted.T @ Y_retracted
-    I = torch.eye(YtY.shape[0])
-    ortho_error = torch.norm(YtY / torch.norm(YtY) - I)
-    assert ortho_error < 1.0, f"Too far from orthogonal, error={ortho_error:.3f}"
+    ortho_error = invariant_orthogonality_defect(Y_retracted)
+    assert ortho_error < 0.05, f"Too far from orthogonal, error={ortho_error:.3f}"
 
     # Scale preservation test
     ratio = torch.norm(Y_retracted) / torch.norm(Y)
@@ -44,16 +41,16 @@ def test_retraction_soft_polar_stability():
 # -----------------------------------------------------
 def test_energy_monotonic_decrease(synthetic_data):
     Xc, _ = synthetic_data
-    p, k = 20, 3
+    p, k = Xc.shape
     Y0 = torch.randn(p, k)
-    res = nsa_flow_py(Y0, Xc, w_pca=1.0, lambda_=0.01, lr=5e-3, max_iter=50, verbose=False)
+    res = nsa_flow(Y0, Xc, w=0.5,  max_iter=50, verbose=False)
 
     # Ensure outputs are finite and stable
     assert torch.isfinite(res["Y"]).all()
-    assert res["iter"] > 0
+    assert res["final_iter"] > 0
 
     # Energy should not increase drastically — allow small numerical jitter
-    E_final = res["energy"]
+    E_final = res["best_total_energy"]
     assert abs(E_final) < 1e9, f"Energy exploded: {E_final}"
 
 
@@ -62,14 +59,14 @@ def test_energy_monotonic_decrease(synthetic_data):
 # -----------------------------------------------------
 def test_convergence_consistency(synthetic_data):
     Xc, _ = synthetic_data
-    Y0 = torch.randn(20, 3)
-
-    out1 = nsa_flow_py(Y0, Xc, max_iter=10)
-    out2 = nsa_flow_py(Y0, Xc, max_iter=30)
+    p, k = Xc.shape
+    Y0 = torch.randn(p, k)
+    out1 = nsa_flow(Y0, Xc, w=0.5, max_iter=10)
+    out2 = nsa_flow(Y0, Xc, w=0.5, max_iter=30)
 
     # Later energy should be smaller or roughly equal
-    assert out2["energy"] <= out1["energy"] * 1.05, (
-        f"Energy did not improve: {out1['energy']} -> {out2['energy']}"
+    assert out2["best_total_energy"] <= out1["best_total_energy"] * 1.05, (
+        f"Energy did not improve: {out1['best_total_energy']} -> {out2['best_total_energy']}"
     )
 
 
@@ -203,9 +200,10 @@ def test_energy_scale_behavior(synthetic_data):
 def test_flow_energy_strict_decrease(synthetic_data):
     """Ensure NSA flow always decreases energy in each Armijo step."""
     Xc, _ = synthetic_data
-    Y0 = torch.randn(20, 4)
-    out = nsa_flow_py(Y0, Xc, w_pca=1.0, lambda_=0.01, lr=5e-3, max_iter=80, verbose=False)
-    E_final = out["energy"]
+    p, k = Xc.shape
+    Y0 = torch.randn(p, k)
+    out = nsa_flow(Y0, Xc, w=0.5,  max_iter=80, verbose=False)
+    E_final = out["best_total_energy"]
     assert torch.isfinite(torch.tensor(E_final)), "Energy is NaN or inf"
     assert E_final < 1e6, f"Energy too large, likely divergence: {E_final}"
 
@@ -213,9 +211,10 @@ def test_flow_energy_strict_decrease(synthetic_data):
 def test_flow_directional_consistency(synthetic_data):
     """Compare two identical runs — results should match closely."""
     Xc, _ = synthetic_data
-    Y0 = torch.randn(20, 4)
-    out1 = nsa_flow_py(Y0, Xc, lr=1e-2, max_iter=10)
-    out2 = nsa_flow_py(Y0, Xc, lr=1e-2, max_iter=10)
+    p, k = Xc.shape
+    Y0 = torch.randn(p, k)
+    out1 = nsa_flow(Y0, Xc, w=0.5, max_iter=10)
+    out2 = nsa_flow(Y0, Xc, w=0.5, max_iter=10)
     err = relative_error(out1["Y"], out2["Y"])
     assert err < 1e-5, f"Nondeterministic behavior detected: rel_err={err:.2e}"
 
