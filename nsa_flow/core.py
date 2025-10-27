@@ -1,4 +1,5 @@
 import os
+import copy
 import math
 import time
 import torch
@@ -316,66 +317,37 @@ def estimate_learning_rate_for_nsa_flow(
     lr_min=1e-6,
     lr_max=1e2,
     num_steps=120,
-    strategy="adaptive",
+    strategy="exponential",
     smoothing=0.9,
     stop_factor=10,
     device=None,
     plot=True,
+    max_recoveries=3,
+    gradient_clip_norm=5.0,
 ):
     """
-    Empirically estimates a good learning rate for NSA-Flow optimization.
+    Estimate a safe learning rate, with recovery from exploding loss.
+    Adds backtracking and optional gradient clipping.
 
-    This function reuses internal package utilities such as:
-      - nsa_flow_retract_auto
-      - defect_fast
-      - apply_nonnegativity
-      - get_torch_optimizer
-
-    Args:
-        Y0, X0 : torch.Tensor
-            Input data and initial state.
-        w : float
-            Orthogonality weighting parameter.
-        retraction : str
-            Retraction type (e.g., "soft_polar", "polar").
-        optimizer : str
-            Name of optimizer to test (e.g., "adam", "sgd").
-        apply_nonneg : str | bool
-            Nonnegativity mode: 'none', False, 'softplus', or True.
-        strategy : str
-            LR search strategy: 'exponential', 'linear', 'random', or 'adaptive'.
-        plot : bool
-            Whether to display a diagnostic LR-loss curve.
-
-    Returns:
-        dict with:
-            - best_lr : float
-            - lr_curve : list of (lr, loss)
-            - strategy : str
-            - elapsed_sec : float
+    New arguments:
+      max_recoveries: how many times to recover from explosion
+      gradient_clip_norm: float or None — if set, clip gradients by this norm
     """
 
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # --- Prepare tensors ---
     Y = Y0.clone().detach().to(device).requires_grad_(True)
     X0 = X0.to(device)
 
-    # --- Define energy function consistent with NSA-Flow ---
     def energy_fn(Y):
-        Y_re = nsa_flow_retract_auto(Y, w, retraction_type=retraction)
+        Y_re = nsa_flow_retract_auto(Y, w, retraction)
         Y_re = apply_nonnegativity(Y_re, apply_nonneg)
-
-        # Fidelity term
         fidelity = 0.5 * fid_eta * torch.sum((Y_re - X0) ** 2)
-
-        # Orthogonality defect
         orth = 0.25 * c_orth * defect_fast(Y_re)
-
         return fidelity + orth
 
-    # --- Generate LR schedule ---
+    # Prepare learning rate values
     if strategy == "exponential":
         lrs = torch.logspace(math.log10(lr_min), math.log10(lr_max), num_steps)
     elif strategy == "linear":
@@ -389,14 +361,20 @@ def estimate_learning_rate_for_nsa_flow(
     else:
         raise ValueError(f"Unknown strategy '{strategy}'")
 
-    # --- Initialize optimizer ---
-    opt = get_torch_optimizer(optimizer, [Y], lr=lr_min)
+    opt = get_torch_optimizer(optimizer, [Y], lr=float(lrs[0]) if hasattr(lrs, "__getitem__") else lr_min)
 
     losses = []
-    smoothed, best_loss, best_lr = None, float("inf"), lr_min
-    start = time.time()
+    smoothed = None
+    best_loss = float("inf")
+    best_lr = lr_min
 
-    # --- Main loop ---
+    # For recovery, keep safe snapshot
+    safe_Y = Y.clone().detach()
+    safe_opt_state = None
+
+    start = time.time()
+    recoveries = 0
+
     for i in range(num_steps):
         lr = lrs[i] if strategy != "adaptive" else lrs[-1]
         for g in opt.param_groups:
@@ -405,31 +383,57 @@ def estimate_learning_rate_for_nsa_flow(
         opt.zero_grad(set_to_none=True)
         loss = energy_fn(Y)
         loss.backward()
+
+        # Clip gradients if requested
+        if gradient_clip_norm is not None:
+            torch.nn.utils.clip_grad_norm_([Y], gradient_clip_norm)
+
+        # Perform the step
         opt.step()
 
+        # Evaluate
         val = loss.item()
         smoothed = val if smoothed is None else smoothing * smoothed + (1 - smoothing) * val
         losses.append(smoothed)
 
+        # Update best if improved
         if smoothed < best_loss:
-            best_loss, best_lr = smoothed, float(lr)
+            best_loss = smoothed
+            best_lr = float(lr)
+            safe_Y = Y.clone().detach()
+            safe_opt_state = copy.deepcopy(opt.state_dict())
 
+        # Detect explosion
         if smoothed > stop_factor * best_loss:
-            print(f"[NSA-Flow] Early stop: loss exploded at step {i}.")
-            break
+            print(f"[NSA-Flow LR Finder] Loss exploded at step {i} (lr={lr:.2e}, loss={smoothed:.2e})")
+            if recoveries < max_recoveries:
+                recoveries += 1
+                print(f"  -> Recovery attempt {recoveries}/{max_recoveries}")
+                # restore state
+                with torch.no_grad():
+                    Y.data = safe_Y.data.clone()
+                if safe_opt_state is not None:
+                    opt.load_state_dict(safe_opt_state)
+                # reduce lr and continue
+                lr_reduced = best_lr * 0.5
+                for g in opt.param_groups:
+                    g["lr"] = float(lr_reduced)
+                # continue to next iteration (skip increasing step)
+                continue
+            else:
+                print("  -> Max recoveries reached, terminating LR search.")
+                break
 
         if strategy == "adaptive" and i > 0:
             lrs.append(min(lrs[-1] * growth, lr_max))
 
     elapsed = time.time() - start
-    if not torch.is_tensor(lrs):
-        lrs = torch.tensor(lrs[:len(losses)], dtype=torch.float64)
-    else:
-        lrs = lrs[:len(losses)].detach().clone().to(dtype=torch.float64)    
-    # --- Optional plot ---
+    # Convert lrs to tensor safely:
+    lrs_tensor = torch.as_tensor(lrs[: len(losses)], dtype=torch.float64)
+
     if plot:
         plt.figure(figsize=(8, 5))
-        plt.plot(lrs.cpu(), losses, marker="o", alpha=0.8)
+        plt.plot(lrs_tensor.cpu().numpy(), losses, marker="o", alpha=0.8)
         plt.xscale("log")
         plt.yscale("log")
         plt.xlabel("Learning Rate")
@@ -442,12 +446,11 @@ def estimate_learning_rate_for_nsa_flow(
 
     result = {
         "best_lr": best_lr,
-        "lr_curve": list(zip(lrs.cpu().numpy().tolist(), [float(l) for l in losses])),
+        "lr_curve": list(zip(lrs_tensor.cpu().numpy().tolist(), [float(l) for l in losses])),
         "strategy": strategy,
         "elapsed_sec": elapsed,
     }
-
-    print(f"[NSA-Flow] Best estimated LR = {best_lr:.3e} ({strategy}, {elapsed:.2f}s)")
+    print(f"[NSA-Flow] Best estimated LR = {best_lr:.3e} ({strategy}, {elapsed:.3f}s)")
 
     return result
 
