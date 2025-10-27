@@ -277,7 +277,7 @@ def estimate_learning_rate(
             break
         prev_loss = smoothed
 
-    lrs = torch.tensor(lrs[:len(losses)], dtype=torch.float64)
+    lrs = lrs[:len(losses)].detach().clone().to(dtype=torch.float64)
 
     # --- Plot ---
     if plot:

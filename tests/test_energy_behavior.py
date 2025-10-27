@@ -16,6 +16,7 @@ result = nsa_flow_autograd(
         max_iter=50,
         record_every=1,
         tol=1e-8,
+        initial_learning_rate=1.,
         lr_strategy="auto",
         apply_nonneg=True,
         verbose=True,
