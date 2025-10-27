@@ -9,11 +9,11 @@ retraction='soft_polar'
 o='lars'
 ###################
 result = nsa_flow_autograd(
-        Y,
+        Y * 1e4,
         w=0.5, 
         retraction=retraction,
         optimizer=o,
-        max_iter=50,
+        max_iter=500,
         record_every=1,
         tol=1e-8,
         initial_learning_rate=None,

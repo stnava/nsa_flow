@@ -17,7 +17,8 @@ dependencies = [
   "numpy>=1.23",
   "matplotlib>=3.7",
   "pandas>=1.5",
-  "torch-optimizer>=0.3.0"
+  "torch-optimizer>=0.3.0",
+  "numpy>=1.23"
 ]
 
 [project.urls]
