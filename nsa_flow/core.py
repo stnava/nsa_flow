@@ -277,7 +277,10 @@ def estimate_learning_rate(
             break
         prev_loss = smoothed
 
-    lrs = lrs[:len(losses)].detach().clone().to(dtype=torch.float64)
+    if not torch.is_tensor(lrs):
+        lrs = torch.tensor(lrs[:len(losses)], dtype=torch.float64)
+    else:
+        lrs = lrs[:len(losses)].detach().clone().to(dtype=torch.float64)
 
     # --- Plot ---
     if plot:
@@ -301,12 +304,6 @@ def estimate_learning_rate(
     }
 
 
-import math
-import time
-import torch
-import matplotlib.pyplot as plt
-
-
 def estimate_learning_rate_for_nsa_flow(
     Y0,
     X0,
@@ -319,7 +316,7 @@ def estimate_learning_rate_for_nsa_flow(
     lr_min=1e-6,
     lr_max=1e2,
     num_steps=120,
-    strategy="exponential",
+    strategy="adaptive",
     smoothing=0.9,
     stop_factor=10,
     device=None,
@@ -425,8 +422,10 @@ def estimate_learning_rate_for_nsa_flow(
             lrs.append(min(lrs[-1] * growth, lr_max))
 
     elapsed = time.time() - start
-    lrs = torch.tensor(lrs[:len(losses)], dtype=torch.float64)
-
+    if not torch.is_tensor(lrs):
+        lrs = torch.tensor(lrs[:len(losses)], dtype=torch.float64)
+    else:
+        lrs = lrs[:len(losses)].detach().clone().to(dtype=torch.float64)    
     # --- Optional plot ---
     if plot:
         plt.figure(figsize=(8, 5))
@@ -971,7 +970,7 @@ def nsa_flow_autograd(
 
 
         # --- Optional LR auto-tuning ---
-    if isinstance(lr_strategy, str) and lr_strategy.lower() in ["auto", "exponential", "linear", "random", "adaptive"]:
+    if initial_learning_rate is None and isinstance(lr_strategy, str) and lr_strategy.lower() in ["auto", "exponential", "linear", "random", "adaptive"]:
         print(f"[NSA-Flow] Estimating learning rate ({lr_strategy}) ...")
 
         lr_result = estimate_learning_rate_for_nsa_flow(
@@ -983,7 +982,7 @@ def nsa_flow_autograd(
             fid_eta=fid_eta,
             c_orth=c_orth,
             apply_nonneg=apply_nonneg,
-            strategy="exponential" if lr_strategy == "auto" else lr_strategy,
+            strategy="adaptive" if lr_strategy == "auto" else lr_strategy,
             plot=False,
         )
         lr = lr_result["best_lr"]
