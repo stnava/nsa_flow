@@ -1,11 +1,16 @@
+import os
+import math
+import time
 import torch
 import torch_optimizer
-import time
 from typing import Optional
 import warnings
 import torch.nn.functional as F
 import pandas as pd
 import matplotlib.pyplot as plt
+import json
+import hashlib
+from pathlib import Path
 
 def traces_to_dataframe(traces):
     """
@@ -163,6 +168,290 @@ def get_torch_optimizer(opt_name: str = None, params=None, lr: float = 1e-3, ret
         )
 
     return optimizers[name](params, lr)
+
+
+
+def estimate_learning_rate(
+    objective_fn,
+    params_init,
+    optimizer_class,
+    lr_min=1e-6,
+    lr_max=1e2,
+    num_steps=150,
+    strategy="exponential",
+    smoothing=0.9,
+    stop_factor=10,
+    device=None,
+    plot=True,
+):
+    """
+    Empirically estimates an optimal learning rate by exploring the loss landscape
+    across a wide LR range (default 1e-6 → 1e2).
+
+    Strategies:
+        - 'exponential' : LR increases exponentially each step (Leslie Smith-style)
+        - 'linear'      : LR increases linearly
+        - 'random'      : Samples LRs log-uniformly from [lr_min, lr_max]
+        - 'adaptive'    : Explores adaptively, slowing down where loss decreases fastest
+
+    Args:
+        objective_fn (callable): Function taking params (Tensor) -> scalar loss (Tensor).
+        params_init (torch.Tensor): Initial parameters, requires_grad=True.
+        optimizer_class (callable): e.g. lambda p: torch.optim.Adam(p, lr=1e-3)
+        lr_min (float): Minimum learning rate.
+        lr_max (float): Maximum learning rate.
+        num_steps (int): Number of test steps.
+        strategy (str): One of {'exponential', 'linear', 'random', 'adaptive'}.
+        smoothing (float): EWMA factor for smoothed loss (for 'exponential' mode).
+        stop_factor (float): Stop if loss > stop_factor × best_loss so far.
+        device (torch.device or str): Target device.
+        plot (bool): Whether to plot LR vs loss (log-log).
+
+    Returns:
+        dict with:
+            'lr_curve' : list of (lr, loss)
+            'best_lr'  : float (suggested LR)
+            'losses'   : list of float
+            'strategy' : strategy used
+    """
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # --- Prepare ---
+    params = params_init.clone().detach().to(device).requires_grad_(True)
+    optimizer = optimizer_class([params])
+
+    # --- Generate LR schedule ---
+    if strategy == "exponential":
+        lrs = torch.logspace(math.log10(lr_min), math.log10(lr_max), num_steps)
+    elif strategy == "linear":
+        lrs = torch.linspace(lr_min, lr_max, num_steps)
+    elif strategy == "random":
+        lrs = torch.pow(10, torch.rand(num_steps) * (math.log10(lr_max) - math.log10(lr_min)) + math.log10(lr_min))
+    elif strategy == "adaptive":
+        # Start exponential, adapt step size dynamically
+        lrs = [lr_min]
+        growth = (lr_max / lr_min) ** (1.0 / num_steps)
+    else:
+        raise ValueError(f"Unknown strategy '{strategy}'. Choose from exponential, linear, random, adaptive.")
+
+    losses = []
+    smoothed = None
+    best_loss = float("inf")
+    best_lr = lr_min
+    prev_loss = None
+
+    for i in range(num_steps):
+        if strategy == "adaptive" and i > 0:
+            lrs.append(min(lrs[-1] * growth, lr_max))
+        lr = lrs[i] if strategy != "adaptive" else lrs[-1]
+
+        for g in optimizer.param_groups:
+            g["lr"] = lr.item() if torch.is_tensor(lr) else lr
+
+        optimizer.zero_grad(set_to_none=True)
+        loss = objective_fn(params)
+
+        if not torch.isfinite(loss):
+            print(f"Non-finite loss at step {i}, stopping.")
+            break
+
+        loss.backward()
+        optimizer.step()
+
+        loss_val = loss.item()
+        if smoothed is None:
+            smoothed = loss_val
+        else:
+            smoothed = smoothing * smoothed + (1 - smoothing) * loss_val
+
+        losses.append(smoothed)
+
+        if smoothed < best_loss:
+            best_loss = smoothed
+            best_lr = lr.item() if torch.is_tensor(lr) else lr
+
+        if prev_loss is not None and smoothed > stop_factor * best_loss:
+            print(f"Stopping early: loss exploded by >{stop_factor}× at step {i}.")
+            break
+        prev_loss = smoothed
+
+    lrs = torch.tensor(lrs[:len(losses)], dtype=torch.float64)
+
+    # --- Plot ---
+    if plot:
+        plt.figure(figsize=(8, 5))
+        plt.plot(lrs.cpu(), losses, marker='o', alpha=0.8)
+        plt.xscale("log")
+        plt.yscale("log")
+        plt.xlabel("Learning Rate")
+        plt.ylabel("Smoothed Loss")
+        plt.title(f"Learning Rate Finder ({strategy.capitalize()} Sweep)")
+        plt.grid(True, which="both", ls="--", alpha=0.4)
+        plt.axvline(best_lr, color="red", linestyle="--", label=f"Suggested LR = {best_lr:.2e}")
+        plt.legend()
+        plt.show()
+
+    return {
+        "lr_curve": list(zip(lrs.cpu().numpy(), losses)),
+        "best_lr": best_lr,
+        "losses": losses,
+        "strategy": strategy,
+    }
+
+
+import math
+import time
+import torch
+import matplotlib.pyplot as plt
+
+
+def estimate_learning_rate_for_nsa_flow(
+    Y0,
+    X0,
+    w,
+    retraction="soft_polar",
+    optimizer="adam",
+    fid_eta=1.0,
+    c_orth=1.0,
+    apply_nonneg=True,
+    lr_min=1e-6,
+    lr_max=1e2,
+    num_steps=120,
+    strategy="exponential",
+    smoothing=0.9,
+    stop_factor=10,
+    device=None,
+    plot=True,
+):
+    """
+    Empirically estimates a good learning rate for NSA-Flow optimization.
+
+    This function reuses internal package utilities such as:
+      - nsa_flow_retract_auto
+      - defect_fast
+      - apply_nonnegativity
+      - get_torch_optimizer
+
+    Args:
+        Y0, X0 : torch.Tensor
+            Input data and initial state.
+        w : float
+            Orthogonality weighting parameter.
+        retraction : str
+            Retraction type (e.g., "soft_polar", "polar").
+        optimizer : str
+            Name of optimizer to test (e.g., "adam", "sgd").
+        apply_nonneg : str | bool
+            Nonnegativity mode: 'none', False, 'softplus', or True.
+        strategy : str
+            LR search strategy: 'exponential', 'linear', 'random', or 'adaptive'.
+        plot : bool
+            Whether to display a diagnostic LR-loss curve.
+
+    Returns:
+        dict with:
+            - best_lr : float
+            - lr_curve : list of (lr, loss)
+            - strategy : str
+            - elapsed_sec : float
+    """
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # --- Prepare tensors ---
+    Y = Y0.clone().detach().to(device).requires_grad_(True)
+    X0 = X0.to(device)
+
+    # --- Define energy function consistent with NSA-Flow ---
+    def energy_fn(Y):
+        Y_re = nsa_flow_retract_auto(Y, w, retraction_type=retraction)
+        Y_re = apply_nonnegativity(Y_re, apply_nonneg)
+
+        # Fidelity term
+        fidelity = 0.5 * fid_eta * torch.sum((Y_re - X0) ** 2)
+
+        # Orthogonality defect
+        orth = 0.25 * c_orth * defect_fast(Y_re)
+
+        return fidelity + orth
+
+    # --- Generate LR schedule ---
+    if strategy == "exponential":
+        lrs = torch.logspace(math.log10(lr_min), math.log10(lr_max), num_steps)
+    elif strategy == "linear":
+        lrs = torch.linspace(lr_min, lr_max, num_steps)
+    elif strategy == "random":
+        lrs = torch.pow(10, torch.rand(num_steps) *
+                        (math.log10(lr_max / lr_min)) + math.log10(lr_min))
+    elif strategy == "adaptive":
+        lrs = [lr_min]
+        growth = (lr_max / lr_min) ** (1.0 / num_steps)
+    else:
+        raise ValueError(f"Unknown strategy '{strategy}'")
+
+    # --- Initialize optimizer ---
+    opt = get_torch_optimizer(optimizer, [Y], lr=lr_min)
+
+    losses = []
+    smoothed, best_loss, best_lr = None, float("inf"), lr_min
+    start = time.time()
+
+    # --- Main loop ---
+    for i in range(num_steps):
+        lr = lrs[i] if strategy != "adaptive" else lrs[-1]
+        for g in opt.param_groups:
+            g["lr"] = float(lr)
+
+        opt.zero_grad(set_to_none=True)
+        loss = energy_fn(Y)
+        loss.backward()
+        opt.step()
+
+        val = loss.item()
+        smoothed = val if smoothed is None else smoothing * smoothed + (1 - smoothing) * val
+        losses.append(smoothed)
+
+        if smoothed < best_loss:
+            best_loss, best_lr = smoothed, float(lr)
+
+        if smoothed > stop_factor * best_loss:
+            print(f"[NSA-Flow] Early stop: loss exploded at step {i}.")
+            break
+
+        if strategy == "adaptive" and i > 0:
+            lrs.append(min(lrs[-1] * growth, lr_max))
+
+    elapsed = time.time() - start
+    lrs = torch.tensor(lrs[:len(losses)], dtype=torch.float64)
+
+    # --- Optional plot ---
+    if plot:
+        plt.figure(figsize=(8, 5))
+        plt.plot(lrs.cpu(), losses, marker="o", alpha=0.8)
+        plt.xscale("log")
+        plt.yscale("log")
+        plt.xlabel("Learning Rate")
+        plt.ylabel("Smoothed Loss")
+        plt.title(f"NSA-Flow LR Finder ({strategy})")
+        plt.axvline(best_lr, color="red", linestyle="--", label=f"Best LR = {best_lr:.2e}")
+        plt.grid(True, which="both", ls="--", alpha=0.4)
+        plt.legend()
+        plt.show()
+
+    result = {
+        "best_lr": best_lr,
+        "lr_curve": list(zip(lrs.cpu().numpy().tolist(), [float(l) for l in losses])),
+        "strategy": strategy,
+        "elapsed_sec": elapsed,
+    }
+
+    print(f"[NSA-Flow] Best estimated LR = {best_lr:.3e} ({strategy}, {elapsed:.2f}s)")
+
+    return result
+
 
 def invariant_orthogonality_defect(V):
         norm2 = torch.sum(V ** 2)
@@ -622,31 +911,15 @@ def nsa_flow_old(Y0, X0=None, w=0.5,
     }
 
 
-import time
-import torch
-import torch.nn.functional as F
-
-# NOTE: this code assumes functions `defect_fast` and `symm` exist (symm defined below).
-# It also assumes torch>=1.8 with torch.linalg.svd (for autograd through SVD).
-# get_torch_optimizer should return a torch.optim.Optimizer given param list and lr.
-
-def symm(A):
-    return 0.5 * (A + A.T)
-
-
-import time
-import torch
-import torch.nn.functional as F
-
-def symm(A):
-    return 0.5 * (A + A.T)
 
 def nsa_flow_autograd(
     Y0, X0=None, w=0.5,
     retraction="soft_polar",           # keep your default
     max_iter=500, tol=1e-6, verbose=False, seed=42,
     apply_nonneg=True, optimizer="Adam",
-    initial_learning_rate=1e-3, record_every=1, window_size=5,
+    initial_learning_rate=1e-3, 
+    lr_strategy = 'auto',          # new: 'auto', 'exponential', 'linear', 'random', 'adaptive', or float
+    record_every=1, window_size=5,
     simplified=False, project_full_gradient=False,
     device=None, precision='float64'
 ):
@@ -696,7 +969,29 @@ def nsa_flow_autograd(
     # Parameterize optimization variable as Z for unconstrained optimization
     Z = torch.nn.Parameter(Y.clone().detach().requires_grad_(True))
 
-    opt = get_torch_optimizer(optimizer, [Z], lr=initial_learning_rate)
+
+        # --- Optional LR auto-tuning ---
+    if isinstance(lr_strategy, str) and lr_strategy.lower() in ["auto", "exponential", "linear", "random", "adaptive"]:
+        print(f"[NSA-Flow] Estimating learning rate ({lr_strategy}) ...")
+
+        lr_result = estimate_learning_rate_for_nsa_flow(
+            Y0=torch.randn_like(X0),
+            X0=X0,
+            w=w,
+            retraction=retraction,
+            optimizer=optimizer,
+            fid_eta=fid_eta,
+            c_orth=c_orth,
+            apply_nonneg=apply_nonneg,
+            strategy="exponential" if lr_strategy == "auto" else lr_strategy,
+            plot=False,
+        )
+        lr = lr_result["best_lr"]
+        if verbose:
+            print(f"[NSA-Flow] Selected learning rate: {lr:.2e}")
+        opt = get_torch_optimizer(optimizer, [Z], lr=lr)
+    else:
+        opt = get_torch_optimizer(optimizer, [Z], lr=initial_learning_rate)
 
     traces = []
     recent_energies = []
