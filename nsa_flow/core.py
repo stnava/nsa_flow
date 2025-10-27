@@ -351,7 +351,8 @@ def estimate_learning_rate_for_nsa_flow(
     def energy_fn(Y):
         Yr = nsa_flow_retract_auto(Y, w, retraction)
         Yr = apply_nonnegativity(Yr, apply_nonneg)
-        e_norm = 0.5 * (torch.sum(X0**2) + torch.sum(Yr**2))
+#        e_norm = 0.5 * (torch.sum(X0**2) + torch.sum(Yr**2))
+        e_norm = 0.5 * (torch.sum(X0**2))
         fidelity = 0.5 * fid_eta * torch.sum((Yr - X0) ** 2) / (e_norm + 1e-12)
         orth = 0.25 * c_orth * defect_fast(Yr)
         return (fidelity + orth)
@@ -1284,7 +1285,8 @@ def nsa_flow_autograd(
         Y_retracted = apply_nonnegativity(Y_retracted, apply_nonneg)
 
         # --- Energy computation (scale-invariant) ---
-        e_norm = 0.5 * (torch.sum(X0 ** 2).item() + torch.sum(Y_retracted ** 2).item())
+#        e_norm = 0.5 * (torch.sum(X0 ** 2).item() + torch.sum(Y_retracted ** 2).item())
+        e_norm = 0.5 * (torch.sum(X0 ** 2).item() )
         fidelity = (0.5 * fid_eta * torch.sum((Y_retracted - X0) ** 2)) / (e_norm + 1e-12)
         orth_term = 0.25 * c_orth * defect_fast(Y_retracted)
         total_energy = fidelity + orth_term
@@ -1296,7 +1298,8 @@ def nsa_flow_autograd(
         with torch.no_grad():
             Y_eval = nsa_flow_retract_auto(Z, w, retraction)
             Y_eval = apply_nonnegativity(Y_eval, apply_nonneg)
-            e_norm = 0.5 * (torch.sum(X0 ** 2).item() + torch.sum(Y_eval ** 2).item())
+#            e_norm = 0.5 * (torch.sum(X0 ** 2).item() + torch.sum(Y_eval ** 2).item())
+            e_norm = 0.5 * (torch.sum(X0 ** 2).item() )
             fidelity = (0.5 * fid_eta * torch.sum((Y_eval - X0) ** 2).item()) / (e_norm + 1e-12)
             orth_val = defect_fast(Y_eval).item()
             total_val = fidelity + 0.25 * c_orth * orth_val
