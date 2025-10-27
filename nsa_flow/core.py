@@ -2,9 +2,93 @@ import torch
 import torch_optimizer
 import time
 from typing import Optional
-
-import torch
 import warnings
+import torch.nn.functional as F
+import pandas as pd
+import matplotlib.pyplot as plt
+
+def traces_to_dataframe(traces):
+    """
+    Convert list of trace dictionaries into a clean pandas DataFrame.
+    """
+    clean = []
+    for t in traces:
+        clean.append({
+            "iter": t["iter"],
+            "time": float(t["time"]),
+            "fidelity": float(t["fidelity"].detach().cpu().item() if isinstance(t["fidelity"], torch.Tensor) else t["fidelity"]),
+            "orthogonality": float(t["orthogonality"]),
+            "total_energy": float(t["total_energy"].detach().cpu().item() if isinstance(t["total_energy"], torch.Tensor) else t["total_energy"]),
+        })
+    return pd.DataFrame(clean)
+
+
+
+def plot_nsa_trace(trace_df, retraction="soft_polar", figsize=(8,5)):
+    fig, ax1 = plt.subplots(figsize=figsize)
+
+    color_fid = "#1f78b4"      # Fidelity (blue)
+    color_orth = "#33a02c"     # Orthogonality (green)
+
+    # Compute ratio for scaling the secondary y-axis
+    max_fid = trace_df["fidelity"].max()
+    max_orth = trace_df["orthogonality"].max()
+    ratio = max_fid / max_orth if max_orth > 0 else 1.0
+
+    # Left axis: fidelity
+    ax1.plot(trace_df["iter"], trace_df["fidelity"], color=color_fid, label="Fidelity", linewidth=2)
+    ax1.scatter(trace_df["iter"], trace_df["fidelity"], color=color_fid, s=20, alpha=0.7)
+    ax1.set_xlabel("Iteration")
+    ax1.set_ylabel("Fidelity Energy", color=color_fid)
+    ax1.tick_params(axis='y', labelcolor=color_fid)
+
+    # Right axis: orthogonality (scaled)
+    ax2 = ax1.twinx()
+    ax2.plot(trace_df["iter"], trace_df["orthogonality"], color=color_orth, label="Orthogonality", linewidth=2)
+    ax2.scatter(trace_df["iter"], trace_df["orthogonality"], color=color_orth, s=20, alpha=0.7)
+    ax2.set_ylabel("Orthogonality Defect", color=color_orth)
+    ax2.tick_params(axis='y', labelcolor=color_orth)
+
+    # Title and grid
+    plt.title(f"NSA-Flow Optimization Trace: {retraction}\nFidelity and Orthogonality (Dual Scales)", fontsize=13, weight="bold")
+    ax1.grid(True, linestyle="--", alpha=0.6)
+
+    # Combine legends from both axes
+    lines, labels = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines + lines2, labels + labels2, loc="upper right", frameon=False)
+
+    plt.tight_layout()
+    plt.show()
+
+def apply_nonnegativity(Y, mode="softplus"):
+    """
+    Apply nonnegativity transformation to a tensor.
+
+    Parameters
+    ----------
+    Y : torch.Tensor
+        Input tensor.
+    mode : str or bool
+        Nonnegativity mode:
+        - 'none' or False : no constraint
+        - 'softplus'      : smooth differentiable mapping (soft nonnegativity)
+        - True or 'hard'  : hard projection via clamping
+
+    Returns
+    -------
+    torch.Tensor
+        Transformed tensor according to the specified mode.
+    """
+    if mode in [False, "none", None]:
+        return Y
+    elif mode == "softplus":
+        return F.softplus(Y)
+    elif mode in [True, "hard", "Hard"]:
+        return torch.clamp(Y, min=0.0)
+    else:
+        raise ValueError(f"Invalid apply_nonneg mode: {mode}. "
+                         "Use 'none', 'softplus', or True/'hard'.")
 
 def get_torch_optimizer(opt_name: str, params, lr: float, **kwargs):
     """
@@ -514,229 +598,64 @@ def nsa_flow_old(Y0, X0=None, w=0.5,
                     print(f"Converged at iter {it} (energy stable < {tol:.2e})")
                 break
 
+    zz = len(traces)
+    traces = traces_to_dataframe(traces)
     return {
         "Y": best_Y,
         "traces": traces,
-        "final_iter": len(traces),
+        "final_iter": zz,
         "best_total_energy": best_total_energy.item(),
         "best_Y_iteration": best_Y_iteration,
         "target": X0
     }
 
 
+import time
+import torch
+import torch.nn.functional as F
+
+# NOTE: this code assumes functions `defect_fast` and `symm` exist (symm defined below).
+# It also assumes torch>=1.8 with torch.linalg.svd (for autograd through SVD).
+# get_torch_optimizer should return a torch.optim.Optimizer given param list and lr.
+
+def symm(A):
+    return 0.5 * (A + A.T)
+
+
+import time
+import torch
+import torch.nn.functional as F
+
+def symm(A):
+    return 0.5 * (A + A.T)
+
 def nsa_flow_autograd(
     Y0, X0=None, w=0.5,
-    retraction="soft_polar",
-    max_iter=500, tol=1e-5, verbose=False, seed=42,
-    apply_nonneg=True, optimizer="adam",
-    initial_learning_rate="default",
-    record_every=1, window_size=5, c1_armijo=1e-6,
-    simplified=False,
-    device=None
+    retraction="soft_polar",           # keep your default
+    max_iter=500, tol=1e-6, verbose=False, seed=42,
+    apply_nonneg=True, optimizer="Adam",
+    initial_learning_rate=1e-3, record_every=1, window_size=5,
+    simplified=False, project_full_gradient=False,
+    device=None, precision='float64'
 ):
     """
-    NSA-Flow (autograd-based energy minimization).
-
-    Supports standard torch.optim optimizers (Adam, SGD, LBFGS)
-    and built-in Armijo line search for energy descent.
+    Autograd-compatible NSA-Flow using your differentiable nsa_flow_retract_auto
+    and the same random perturbation initialization as the original routine.
     """
 
-    torch.manual_seed(seed)
-    if device is None:
-        device = Y0.device
-    Y = Y0.clone().detach().to(device).requires_grad_(True)
-    p, k = Y.shape
-
-    # --- target ---
-    if X0 is None:
-        X0 = Y.clone().detach()
-    X0 = X0.to(device)
-    if apply_nonneg:
-        X0 = torch.clamp(X0, min=0.0)
-
-    # --- learning rate ---
-    if initial_learning_rate == "default":
-        lr = 5e-4 if apply_nonneg else 5e-4
+    if precision == 'float32':
+        dtype = torch.float32
+    elif precision == 'float64':
+        dtype = torch.float64
     else:
-        lr = float(initial_learning_rate)
-
-    # --- define energy ---
-    def nsa_energy(V, w=w, retraction=retraction):
-        Vp = nsa_flow_retract_auto(V, w, retraction)
-        if apply_nonneg:
-            Vp = torch.clamp(Vp, min=0.0)
-        fid = 0.5 * torch.sum((Vp - X0) ** 2)
-        orth_term = 0.25 * w * defect_fast(Vp) if w > 0 else 0.0
-        return ( fid + orth_term ) * 1.0
-
-    # --- optimizer setup ---
-    opt_name = str(optimizer).lower()
-    opt = get_torch_optimizer(opt_name, [Y], lr=lr)
-
-    # --- tracking ---
-    traces, recent_energies = [], []
-    best_Y, best_total_energy, best_Y_iteration = Y.clone(), float("inf"), 0
-    t0 = time.time()
-
-    for it in range(1, max_iter + 1):
-        if opt_name == "armijo":
-            # Manual Armijo line search
-            opt_lr = lr
-            Y.grad = None
-            E0 = nsa_energy(Y)
-            E0.backward()
-            grad = Y.grad.clone()
-            gnorm = grad.norm()
-
-            if gnorm < tol:
-                if verbose:
-                    print(f"Converged: grad norm < {tol:.2e}")
-                break
-
-            descent_dir = -grad
-            # Normalize direction for stable step size
-            descent_dir = descent_dir / (descent_dir.norm() + 1e-12)
-
-            # --- Armijo condition ---
-            with torch.no_grad():
-                step = 1.0
-                while step > 1e-8:
-                    Y_trial = Y + step * descent_dir
-                    Y_trial = nsa_flow_retract_auto(Y_trial, w, retraction)
-                    if apply_nonneg:
-                        Y_trial = torch.clamp(Y_trial, min=0.0)
-                    E_trial = nsa_energy(Y_trial)
-                    if E_trial <= E0 + c1_armijo * step * torch.sum(grad * descent_dir):
-                        Y.data.copy_(Y_trial)
-                        break
-                    step *= 0.5
-                else:
-                    if verbose:
-                        print(f"[Iter {it}] Armijo failed to find descent — stopping.")
-                    break
-
-        else:
-            # --- standard autograd optimizer ---
-            def closure():
-                opt.zero_grad(set_to_none=True)
-                E = nsa_energy(Y)
-                E.backward()
-                return E
-
-
-            torch.nn.utils.clip_grad_norm_([Y], max_norm=10.0) # FIXME
-            if isinstance(opt, torch.optim.LBFGS):
-                E0 = opt.step(closure)
-            else:
-                E0 = closure()
-                opt.step()
-
-            with torch.no_grad():
-                Y.data = nsa_flow_retract_auto(Y.data, w, retraction)
-                if apply_nonneg:
-                    Y.data = torch.clamp(Y.data, min=0.0)
-
-        # --- energy tracking ---
-        with torch.no_grad():
-            total_energy = nsa_energy(Y).item()
-            if total_energy < best_total_energy:
-                best_total_energy = total_energy
-                best_Y = Y.clone().detach()
-                best_Y_iteration = it
-
-            recent_energies.append(total_energy)
-            if len(recent_energies) > window_size:
-                recent_energies.pop(0)
-
-            dt = time.time() - t0
-            if it % record_every == 0:
-                traces.append({
-                    "iter": it,
-                    "time": dt,
-                    "total_energy": total_energy,
-                })
-
-            if verbose and (it % 10 == 0 or it == max_iter):
-                print(f"[Iter {it:4d}] Energy={total_energy:.6e} | lr={lr:.2e}")
-
-            if len(recent_energies) == window_size:
-                e_max, e_min = max(recent_energies), min(recent_energies)
-                e_avg = sum(recent_energies) / len(recent_energies)
-                rel_var = (e_max - e_min) / (abs(e_avg) + 1e-12)
-                if rel_var < tol:
-                    if verbose:
-                        print(f"Converged (energy stable < {tol:.2e}) at iter {it}")
-                    break
-
-    return {
-        "Y": best_Y.detach(),
-        "traces": traces,
-        "final_iter": len(traces),
-        "best_total_energy": best_total_energy,
-        "best_Y_iteration": best_Y_iteration,
-        "target": X0,
-    }
-
-
-
-
-
-
-def nsa_flow(Y0, X0=None, w=0.5,
-             retraction="soft_polar",
-             max_iter=500, tol=1e-5, verbose=False, seed=42,
-             apply_nonneg=True, optimizer="fast",
-             initial_learning_rate="default",
-             record_every=1, window_size=5, c1_armijo=1e-6,
-             simplified=False,
-             device=None):
-    """
-    NSA-Flow optimization (PyTorch version)
-
-    Parameters
-    ----------
-    Y0 : torch.Tensor
-        Initial matrix (p x k).
-    X0 : torch.Tensor or None
-        Target matrix for fidelity.
-    w : float
-        Weight for orthogonality penalty (0..1).
-    retraction : str
-        Retraction method ('soft_polar', 'polar', 'none').
-    max_iter : int
-        Maximum iterations.
-    tol : float
-        Convergence tolerance.
-    verbose : bool
-        Print progress if True.
-    seed : int
-        Random seed.
-    apply_nonneg : bool
-        Enforce nonnegativity after each retraction if True.
-    optimizer : str
-        Optimizer to use ('fast' for simple gradient step, or PyTorch optimizers like 'Adam').
-    initial_learning_rate : float or str
-        Learning rate or 'default' for auto-estimate.
-    record_every : int
-        Iteration interval for recording traces.
-    window_size : int
-        Energy stability window for convergence check.
-    simplified : bool
-        Use simplified orthogonality objective.
-    device : torch.device or str or None
-        Device to run on.
-
-    Returns
-    -------
-    dict with keys:
-        'Y', 'traces', 'final_iter', 'best_total_energy', 'best_Y_iteration'
-    """
+        raise ValueError("precision must be 'float32' or 'float64'")
 
     torch.manual_seed(seed)
     if device is None:
         device = Y0.device
 
-    Y = Y0.clone().detach().to(device)
+    # Initialize and perturb
+    Y = Y0.clone().detach().to(device).to(dtype)
     p, k = Y.shape
 
     if X0 is None:
@@ -744,207 +663,104 @@ def nsa_flow(Y0, X0=None, w=0.5,
             X0 = torch.clamp(Y, min=0)
         else:
             X0 = Y.clone()
+        # Add small noise perturbation as in your original version
         perturb_scale = torch.norm(Y) / (Y.numel() ** 0.5) * 0.05
         Y = Y + perturb_scale * torch.randn_like(Y)
         if verbose:
             print("Added perturbation to Y0.")
     else:
-        X0 = X0.to(device)
+        X0 = X0.to(device).to(dtype)
         if apply_nonneg:
             X0 = torch.clamp(X0, min=0)
         assert X0.shape == Y.shape, "X0 must match Y0 shape."
 
-    def compute_ortho_terms(Y, c_orth=1.0):
-        norm2 = torch.sum(Y ** 2)
-        if norm2 <= 1e-12 or c_orth <= 0:
-            grad_orth = torch.zeros_like(Y)
-            return grad_orth, torch.tensor(0.0, device=Y.device), norm2
-
-        S = Y.T @ Y
-        diagS = torch.diag(S)
-        off_f2 = torch.sum(S * S) - torch.sum(diagS ** 2)
-        defect = off_f2 / (norm2 ** 2)
-
-        if simplified:
-            grad_orth = -2 * c_orth * (Y @ (S - torch.diag(torch.diag(S))))
-        else:
-            Y_S = Y @ S
-            Y_diag_scale = Y * diagS
-            term1 = (Y_S - Y_diag_scale) / (norm2 ** 2)
-            term2 = (defect / norm2) * Y
-            grad_orth = c_orth * (term1 - term2)
-        return grad_orth, defect, norm2
-
-    def symm(A):
-        return 0.5 * (A + A.T)
-
-    # --- Scaling constants ---
+    # Energy scaling (same as before)
     g0 = 0.5 * torch.sum((Y - X0) ** 2) / (p * k)
     g0 = torch.clamp(g0, min=1e-8)
     d0 = torch.clamp(defect_fast(Y), min=1e-8)
     fid_eta = (1 - w) / (g0 * p * k)
     c_orth = 4 * w / d0
 
-    # --- Learning rate ---
-    if initial_learning_rate == "default":
-        lr = 1e-3 if apply_nonneg else 1.0
-    else:
-        lr = float(initial_learning_rate)
+    # Parameterize optimization variable as Z for unconstrained optimization
+    Z = torch.nn.Parameter(Y.clone().detach().requires_grad_(True))
+
+    opt = get_torch_optimizer(optimizer, [Z], lr=initial_learning_rate)
 
     traces = []
     recent_energies = []
     t0 = time.time()
+    best_Y = None
+    best_energy = float("inf")
+    best_iter = 0
 
-    best_Y = Y.clone()
-    best_total_energy = float("inf")
-    best_Y_iteration = 0
-
-    # --- Initial gradient for relative norm ---
-    grad_fid_init = -fid_eta * (Y - X0)
-    grad_orth_init, _, _ = compute_ortho_terms(Y, c_orth)
-    sym_term_orth_init = symm(Y.T @ grad_orth_init)
-    rgrad_orth_init = grad_orth_init - Y @ sym_term_orth_init
-    rgrad_init = grad_fid_init + rgrad_orth_init
-    init_grad_norm = torch.norm(rgrad_init) + 1e-8
-
-    # --- Energy ---
-    def nsa_energy(Vp):
-        Vp = nsa_flow_retract_auto(Vp, w, retraction)
-        if apply_nonneg:
-            Vp = torch.clamp(Vp, min=0)
-        e = 0.5 * fid_eta * torch.sum((Vp - X0) ** 2)
-        norm2_V = torch.sum(Vp ** 2)
-        if c_orth > 0 and norm2_V > 0:
-            defect = defect_fast(Vp)
-            e = e + 0.25 * c_orth * defect
-        return e
-
-    # --- optimizer setup ---
-    if optimizer == "fast":
-        opt = None  # use manual gradient step
-    else:
-        Y.requires_grad_(True)
-        opt = get_torch_optimizer(optimizer, [Y], lr)
-
-    # --- Main loop ---
     for it in range(1, max_iter + 1):
-        grad_fid = -fid_eta * (Y - X0)
-        grad_orth, defect_val, _ = compute_ortho_terms(Y, c_orth)
+        opt.zero_grad()
+
+        # --- Differentiable retraction ---
+        # Use your function (assumed autograd-safe)
+        Y_retracted = nsa_flow_retract_auto(Z, w, retraction)
+        Y_retracted = apply_nonnegativity(Y_retracted, apply_nonneg)
+        # --- Energy computation ---
+        fidelity = 0.5 * fid_eta * torch.sum((Y_retracted - X0) ** 2)
+        orth_term = 0.0
         if c_orth > 0:
-            sym_term_orth = symm(Y.T @ grad_orth)
-            rgrad_orth = grad_orth - Y @ sym_term_orth
-        else:
-            rgrad_orth = grad_orth
-        rgrad = grad_fid + rgrad_orth
+            orth_term = 0.25 * c_orth * defect_fast(Y_retracted)
+        total_energy = fidelity + orth_term
 
-        if torch.isnan(rgrad).any() or torch.isinf(rgrad).any():
-            if verbose:
-                print("NaN or Inf in gradient; stopping.")
-            break
+        # --- Backpropagate through full computation ---
+        total_energy.backward()
 
-        # Compute proposed update before retraction
-        if optimizer == "fast":
-            Y_proposed = Y + lr * rgrad  # Corrected sign assuming rgrad is descent direction
-        else:
-            Y_old = Y.clone()
-            opt.zero_grad()
-            Y.grad = -rgrad  # Set to ascent gradient for optimizer
-            opt.step()
-            Y_proposed = Y.clone()
-            Y.data = Y_old.data  # Reset Y to old value (optimizer state remains updated)
+        # --- Optimizer step ---
+        opt.step()
 
-        Y_new = nsa_flow_retract_auto(Y_proposed, w, retraction)
+        # --- Bookkeeping ---
+        with torch.no_grad():
+            Y_eval = nsa_flow_retract_auto(Z, w, retraction)
+            Y_eval = apply_nonnegativity(Y_eval, apply_nonneg)
+            fidelity_val = 0.5 * fid_eta * torch.sum((Y_eval - X0) ** 2).item()
+            orth_val = defect_fast(Y_eval).item() if c_orth > 0 else 0.0
+            total_val = fidelity_val + 0.25 * c_orth * orth_val
 
-        current_energy = nsa_energy(Y_new)
+            if total_val < best_energy:
+                best_energy = total_val
+                best_Y = Y_eval.clone()
+                best_iter = it
 
-        # --- Backtracking line search ---
-        alpha = 1.0
-        count = 0
-        max_bt = 20
-        while current_energy > best_total_energy and count < max_bt:
-            alpha *= 0.5
-            Y_try = best_Y + alpha * (Y_new - best_Y)
-            current_energy = nsa_energy(Y_try)
-            count += 1
-            if current_energy < best_total_energy:
-                Y_new = nsa_flow_retract_auto(Y_try, w, retraction)
-                break
+            if it % record_every == 0:
+                traces.append({
+                    "iter": it,
+                    "time": time.time() - t0,
+                    "fidelity": fidelity_val,
+                    "orthogonality": orth_val,
+                    "total_energy": total_val
+                })
 
-        if count == max_bt:
-            if verbose:
-                print("Backtracking failed; reverting to best Y.")
-            Y_new = best_Y.clone()
+            recent_energies.append(total_val)
+            if len(recent_energies) > window_size:
+                recent_energies.pop(0)
 
-        # Apply nonnegativity after backtracking (to ensure consistency)
-        if apply_nonneg:
-            Y_new = torch.clamp(Y_new, min=0)
+            if verbose and (it % record_every == 0 or it < 10):
+                print(f"[Iter {it:3d}] Total={total_val:.6e} | Fid={fidelity_val:.6e} | Orth={orth_val:.6e}")
 
-        if count > 2:
-            if optimizer == "fast":
-                lr *= 0.95
-            else:
-                opt.param_groups[0]['lr'] *= 0.95
-        elif count == 0 and it % 5 == 0:
-            if optimizer == "fast":
-                lr *= 1.01
-            else:
-                opt.param_groups[0]['lr'] *= 1.01
+            # --- Convergence ---
+            if len(recent_energies) == window_size:
+                e_max, e_min = max(recent_energies), min(recent_energies)
+                e_avg = sum(recent_energies) / len(recent_energies)
+                rel_var = (e_max - e_min) / (abs(e_avg) + 1e-12)
+                if rel_var < tol:
+                    if verbose:
+                        print(f"Converged at iter {it} (energy stable < {tol:.2e})")
+                    break
 
-        Y = Y_new
-
-        fidelity = 0.5 * fid_eta * torch.sum((Y - X0) ** 2)
-        orthogonality = defect_fast(Y)
-        total_energy = fidelity + 0.25 * c_orth * orthogonality
-        dt = time.time() - t0
-
-        if total_energy < best_total_energy:
-            best_total_energy = total_energy
-            best_Y = Y.clone()
-            best_Y_iteration = it
-
-        recent_energies.append(total_energy.item())
-        if len(recent_energies) > window_size:
-            recent_energies.pop(0)
-
-        if it % record_every == 0:
-            traces.append({
-                "iter": it,
-                "time": dt,
-                "fidelity": fidelity.item(),
-                "orthogonality": orthogonality.item(),
-                "total_energy": total_energy.item()
-            })
-
-        if verbose:
-            print(f"[Iter {it:3d}] Total: {total_energy.item():.6e} | "
-                  f"Fid: {fidelity.item():.6e} | Orth: {orthogonality.item():.6e}")
-
-        # --- Convergence ---
-        grad_norm = torch.norm(rgrad)
-        rel_grad_norm = grad_norm / init_grad_norm
-        if rel_grad_norm < tol:
-            if verbose:
-                print(f"Converged at iter {it} (grad norm < {tol:.2e})")
-            break
-        if len(recent_energies) == window_size:
-            e_max, e_min = max(recent_energies), min(recent_energies)
-            e_avg = sum(recent_energies) / len(recent_energies)
-            rel_var = (e_max - e_min) / (abs(e_avg) + 1e-12)
-            if rel_var < tol:
-                if verbose:
-                    print(f"Converged at iter {it} (energy stable < {tol:.2e})")
-                break
-
+    traces = traces_to_dataframe(traces)
     return {
         "Y": best_Y,
         "traces": traces,
-        "final_iter": len(traces),
-        "best_total_energy": best_total_energy.item(),
-        "best_Y_iteration": best_Y_iteration,
+        "final_iter": best_iter,
+        "best_total_energy": best_energy,
+        "best_Y_iteration": best_iter,
         "target": X0
     }
-
-
 
 
 def nsa_flow(Y0, X0=None, w=0.5,
@@ -1227,10 +1043,12 @@ def nsa_flow(Y0, X0=None, w=0.5,
                     print(f"Converged at iter {it} (energy stable < {tol:.2e})")
                 break
 
+    zz = len(traces)
+    traces = traces_to_dataframe(traces)
     return {
         "Y": best_Y,
         "traces": traces,
-        "final_iter": len(traces),
+        "final_iter": zz,
         "best_total_energy": best_total_energy.item(),
         "best_Y_iteration": best_Y_iteration,
         "target": X0
