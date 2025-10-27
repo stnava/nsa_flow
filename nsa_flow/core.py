@@ -322,7 +322,7 @@ def estimate_learning_rate_for_nsa_flow(
     stop_factor=10,
     device=None,
     plot=True,
-    max_recoveries=3,
+    max_recoveries=10,
     gradient_clip_norm=5.0,
 ):
     """
