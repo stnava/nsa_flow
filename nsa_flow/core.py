@@ -324,16 +324,21 @@ def estimate_learning_rate_for_nsa_flow(
     plot=True,
     max_recoveries=10,
     gradient_clip_norm=5.0,
+    verbose=False,
 ):
     """
-    Estimate a safe learning rate, with recovery from exploding loss.
-    Adds backtracking and optional gradient clipping.
+    Estimate a safe learning rate for NSA-Flow optimization.
 
-    New arguments:
-      max_recoveries: how many times to recover from explosion
-      gradient_clip_norm: float or None — if set, clip gradients by this norm
+    Strategies:
+      - 'exponential': log-spaced LR scan between lr_min and lr_max
+      - 'linear': evenly spaced LR scan
+      - 'random': random sampling in log-space
+      - 'adaptive': growing LR until explosion
+      - 'armijo': curvature-based upward search with refinement
+
+    Handles loss explosions, gradient clipping, and adaptive recovery.
     """
-
+    import numpy as np
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -347,7 +352,105 @@ def estimate_learning_rate_for_nsa_flow(
         orth = 0.25 * c_orth * defect_fast(Y_re)
         return fidelity + orth
 
-    # Prepare learning rate values
+    # ============================================================
+    # Armijo curvature-based LR estimation (new default)
+    # ============================================================
+    if strategy == "armijo":
+        # --- Conservative Armijo LR finder ---
+        c_armijo = 1e-4
+        growth_factor = 5.0     # was 10.0 — slower growth for smoother search
+        refine_steps = 3
+        quantile_level = 0.8  # <-- conservative selection, between 0.5 and 0.9 works well
+
+        lr = lr_min
+        results = []
+        satisfied_lrs = []
+
+        Y_test = Y.clone().detach().requires_grad_(True)
+        f0 = energy_fn(Y_test)
+        f0.backward()
+
+        grad = Y_test.grad.detach()
+        grad_norm_sq = float(torch.sum(grad * grad).cpu().item())
+        f0_val = float(f0.cpu().item())
+
+        while lr <= lr_max:
+            with torch.no_grad():
+                Y_try = Y_test - lr * grad
+            f_new = float(energy_fn(Y_try).cpu().item())
+            armijo_ok = f_new <= f0_val - c_armijo * lr * grad_norm_sq
+            results.append((float(lr), f_new, armijo_ok))
+
+            if armijo_ok:
+                satisfied_lrs.append(float(lr))
+                lr *= growth_factor
+            else:
+                break
+
+        if len(satisfied_lrs) == 0:
+            # No satisfying lr → fallback to min-loss
+            best_lr = min(results, key=lambda r: r[1])[0]
+            if verbose:
+                print(f"[NSA-Flow] No Armijo-satisfying lr found; using min-loss lr={best_lr:.2e}")
+        else:
+            # Conservative: median of successful LRs
+            best_lr = float(np.quantile(satisfied_lrs, quantile_level))
+            if verbose:
+                print(f"[NSA-Flow] Armijo satisfied {len(satisfied_lrs)} times; "
+                      f"quantile({quantile_level:.2f}) lr={best_lr:.2e}")
+
+            # Refinement around median
+            lr_low = best_lr / 2
+            lr_high = best_lr * 2
+            for _ in range(refine_steps):
+                lr_mid = (lr_low * lr_high) ** 0.5
+                with torch.no_grad():
+                    Y_try = Y_test - lr_mid * grad
+                f_mid = float(energy_fn(Y_try).cpu().item())
+                ok = f_mid <= f0_val - c_armijo * lr_mid * grad_norm_sq
+                results.append((lr_mid, f_mid, ok))
+                if ok:
+                    best_lr = lr_mid
+                    lr_low = lr_mid
+                else:
+                    lr_high = lr_mid
+
+            if verbose:
+                print(f"[NSA-Flow] Refined conservative best_lr={best_lr:.2e}")
+
+        # For plotting
+        lrs = torch.as_tensor([r[0] for r in results], dtype=torch.float64)
+        losses = [r[1] for r in results]
+
+        if plot:
+            plt.figure(figsize=(7, 4.5))
+            plt.plot(lrs.cpu().numpy(), losses, marker="o", alpha=0.8)
+            plt.xscale("log")
+            plt.yscale("log")
+            plt.xlabel("Learning Rate")
+            plt.ylabel("Loss")
+            plt.title("NSA-Flow LR Finder (Armijo, Conservative Median)")
+            plt.axvline(best_lr, color="red", linestyle="--", label=f"best_lr={best_lr:.2e}")
+            sat_x = [r[0] for r in results if r[2]]
+            sat_y = [r[1] for r in results if r[2]]
+            if len(sat_x) > 0:
+                plt.scatter(sat_x, sat_y, color="green", s=70, edgecolors="k", label="Armijo OK")
+            plt.legend()
+            plt.grid(True, which="both", ls="--", alpha=0.4)
+            plt.tight_layout()
+            plt.show()
+
+        return {
+            "best_lr": best_lr,
+            "lr_curve": list(zip(lrs.cpu().numpy().tolist(), [float(x) for x in losses])),
+            "strategy": "armijo",
+            "elapsed_sec": 0.0,
+        }
+
+    # ============================================================
+    # Other LR search strategies (exponential / adaptive, etc.)
+    # ============================================================
+
     if strategy == "exponential":
         lrs = torch.logspace(math.log10(lr_min), math.log10(lr_max), num_steps)
     elif strategy == "linear":
@@ -367,8 +470,6 @@ def estimate_learning_rate_for_nsa_flow(
     smoothed = None
     best_loss = float("inf")
     best_lr = lr_min
-
-    # For recovery, keep safe snapshot
     safe_Y = Y.clone().detach()
     safe_opt_state = None
 
@@ -384,41 +485,32 @@ def estimate_learning_rate_for_nsa_flow(
         loss = energy_fn(Y)
         loss.backward()
 
-        # Clip gradients if requested
         if gradient_clip_norm is not None:
             torch.nn.utils.clip_grad_norm_([Y], gradient_clip_norm)
 
-        # Perform the step
         opt.step()
-
-        # Evaluate
         val = loss.item()
         smoothed = val if smoothed is None else smoothing * smoothed + (1 - smoothing) * val
         losses.append(smoothed)
 
-        # Update best if improved
         if smoothed < best_loss:
             best_loss = smoothed
             best_lr = float(lr)
             safe_Y = Y.clone().detach()
             safe_opt_state = copy.deepcopy(opt.state_dict())
 
-        # Detect explosion
         if smoothed > stop_factor * best_loss:
-            print(f"[NSA-Flow LR Finder] Loss exploded at step {i} (lr={lr:.2e}, loss={smoothed:.2e})")
+            if verbose:
+                print(f"[NSA-Flow LR Finder] Loss exploded at step {i} (lr={lr:.2e}, loss={smoothed:.2e})")
             if recoveries < max_recoveries:
                 recoveries += 1
-                print(f"  -> Recovery attempt {recoveries}/{max_recoveries}")
-                # restore state
                 with torch.no_grad():
                     Y.data = safe_Y.data.clone()
                 if safe_opt_state is not None:
                     opt.load_state_dict(safe_opt_state)
-                # reduce lr and continue
                 lr_reduced = best_lr * 0.5
                 for g in opt.param_groups:
                     g["lr"] = float(lr_reduced)
-                # continue to next iteration (skip increasing step)
                 continue
             else:
                 print("  -> Max recoveries reached, terminating LR search.")
@@ -428,7 +520,6 @@ def estimate_learning_rate_for_nsa_flow(
             lrs.append(min(lrs[-1] * growth, lr_max))
 
     elapsed = time.time() - start
-    # Convert lrs to tensor safely:
     lrs_tensor = torch.as_tensor(lrs[: len(losses)], dtype=torch.float64)
 
     if plot:
@@ -450,8 +541,8 @@ def estimate_learning_rate_for_nsa_flow(
         "strategy": strategy,
         "elapsed_sec": elapsed,
     }
-    print(f"[NSA-Flow] Best estimated LR = {best_lr:.3e} ({strategy}, {elapsed:.3f}s)")
-
+    if verbose:
+        print(f"[NSA-Flow] Best estimated LR = {best_lr:.3e} ({strategy}, {elapsed:.3f}s)")
     return result
 
 
@@ -985,7 +1076,7 @@ def nsa_flow_autograd(
             fid_eta=fid_eta,
             c_orth=c_orth,
             apply_nonneg=apply_nonneg,
-            strategy="adaptive" if lr_strategy == "auto" else lr_strategy,
+            strategy="armijo" if lr_strategy == "auto" else lr_strategy,
             plot=False,
         )
         lr = lr_result["best_lr"]
