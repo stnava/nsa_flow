@@ -90,23 +90,26 @@ def apply_nonnegativity(Y, mode="softplus"):
         raise ValueError(f"Invalid apply_nonneg mode: {mode}. "
                          "Use 'none', 'softplus', or True/'hard'.")
 
-def get_torch_optimizer(opt_name: str, params, lr: float, **kwargs):
+
+def get_torch_optimizer(opt_name: str = None, params=None, lr: float = 1e-3, return_list: bool = False, **kwargs):
     """
-    Returns a PyTorch optimizer instance based on the provided name.
-    Automatically includes supported optimizers from both torch.optim
-    and (if installed) torch_optimizer.
+    Returns a PyTorch optimizer instance based on the provided name,
+    or lists all available optimizers if return_list=True.
+
+    Supports optimizers from both torch.optim and (optionally) torch_optimizer.
 
     Args:
-        opt_name (str): Name of the optimizer (case-insensitive).
+        opt_name (str, optional): Name of the optimizer (case-insensitive).
         params: Model parameters to optimize.
         lr (float): Learning rate.
+        return_list (bool): If True, return a list of available optimizer names.
         **kwargs: Additional arguments to pass to the optimizer.
 
     Returns:
-        optimizer (torch.optim.Optimizer): A PyTorch optimizer instance.
+        optimizer (torch.optim.Optimizer) or list[str]:
+            - If return_list=False (default): an optimizer instance.
+            - If return_list=True: sorted list of available optimizer names.
     """
-    name = opt_name.lower()
-
     # --- Base PyTorch optimizers ---
     optimizers = {
         "adam": lambda p, lr: torch.optim.Adam(p, lr=lr, **kwargs),
@@ -144,6 +147,15 @@ def get_torch_optimizer(opt_name: str, params, lr: float, **kwargs):
     except ImportError:
         warnings.warn("torch_optimizer not installed. Skipping extra optimizers.", UserWarning)
 
+    # --- Return the list of available optimizers if requested ---
+    if return_list:
+        return sorted(optimizers.keys())
+
+    # --- Otherwise, construct the requested optimizer ---
+    if opt_name is None:
+        raise ValueError("You must specify `opt_name` unless `return_list=True`.")
+
+    name = opt_name.lower()
     if name not in optimizers:
         raise ValueError(
             f"Unsupported optimizer: '{opt_name}'. "
