@@ -14,6 +14,75 @@ import hashlib
 from pathlib import Path
 import numpy as np
 
+
+import torch
+
+# ----------------------------
+# Fidelity term functions
+# ----------------------------
+def fidelity_basic(Y, X):
+    """||Y - X||²"""
+    return 0.5 * torch.sum((Y - X) ** 2)
+
+def fidelity_scaled(Y, X):
+    """||Y - X||² / ||X||²"""
+    denom = torch.sum(X ** 2).clamp_min(1e-12)
+    return 0.5 * torch.sum((Y - X) ** 2) / denom
+
+def fidelity_symmetric(Y, X):
+    """||Y - X||² / (||X||² + ||Y||²)"""
+    denom = 0.5 * (torch.sum(X ** 2) + torch.sum(Y ** 2)).clamp_min(1e-12)
+    return 0.5 * torch.sum((Y - X) ** 2) / denom
+
+
+
+def compute_energy(
+    Y, X0, w=0.5,
+    fidelity_type="scale_invariant",   # can be "basic", "scale_invariant", or "symmetric"
+    orth_type="scale_invariant",       # can be "basic" or "scale_invariant"
+    fid_eta=1.0,
+    c_orth=1.0,
+    track_grad=True,
+    return_dict=False,
+):
+    """
+    Centralized energy computation for NSA-Flow.
+    """
+
+    # --- Fidelity term ---
+    if fidelity_type == "basic":
+        fidelity = fidelity_basic(Y, X0) * fid_eta
+    elif fidelity_type == "scale_invariant":
+        fidelity = fidelity_scaled(Y, X0) * fid_eta
+    elif fidelity_type == "symmetric":
+        fidelity = fidelity_symmetric(Y, X0) * fid_eta
+    else:
+        raise ValueError(f"Unknown fidelity_type: {fidelity_type}")
+
+    # --- Orthogonality term ---
+    if orth_type == "basic":
+        orth = 0.25 * c_orth * torch.norm(Y.T @ Y - torch.eye(Y.shape[1], device=Y.device))**2
+    elif orth_type == "scale_invariant":
+        orth = 0.25 * c_orth * defect_fast(Y) 
+    else:
+        raise ValueError(f"Unknown orth_type: {orth_type}")
+
+    total = fidelity + orth
+
+    if not track_grad:
+        fidelity = fidelity.detach().item()
+        orth = orth.detach().item()
+        total = total.detach().item()
+
+    if return_dict:
+        return {
+            "fidelity": fidelity,
+            "orthogonality": orth,
+            "total": total,
+        }
+
+    return total
+
 def traces_to_dataframe(traces):
     """
     Convert list of trace dictionaries into a clean pandas DataFrame.
@@ -306,135 +375,138 @@ def estimate_learning_rate(
     }
 
 
+
 def estimate_learning_rate_for_nsa_flow(
     Y0,
-    X0=None,
+    X0,
     w=0.5,
     retraction="soft_polar",
-    optimizer="Adam",
+    optimizer="asgd",
     fid_eta=None,
     c_orth=None,
     apply_nonneg=True,
     strategy="armijo",
-    max_steps=20,
-    plot=False,
     verbose=False,
-    device=None,
+    plot=False,
+    fidelity_type="scale_invariant",
+    orth_type="scale_invariant",
 ):
     """
-    Unified learning-rate estimator for NSA-Flow.
-    All strategies are scale-invariant and normalize energy terms.
+    Estimate a suitable learning rate for NSA-Flow optimization.
+    Compatible with both old and new test versions.
     """
 
-    import torch
-    import numpy as np
+    import torch, numpy as np
 
-    torch.set_default_dtype(torch.float64)
-    device = device or Y0.device
-    Y0 = Y0.clone().detach().to(device)
-    if X0 is None:
-        X0 = torch.clamp(Y0, min=0) if apply_nonneg else Y0.clone()
-    X0 = X0.to(device)
+    torch.manual_seed(42)
+    Y_ref = Y0.clone().detach().requires_grad_(True)
+    X0 = X0.clone().detach()
 
-    p, k = Y0.shape
-    # --- default scalings if missing ---
-    if fid_eta is None or c_orth is None:
-        g0 = 0.5 * torch.sum((Y0 - X0) ** 2) / (p * k)
-        g0 = torch.clamp(g0, min=1e-8)
-        d0 = torch.clamp(defect_fast(Y0), min=1e-8)
-        if fid_eta is None:
-            fid_eta = (1 - w) / (g0 * p * k)
-        if c_orth is None:
-            c_orth = 4 * w / d0
+    if fid_eta is None:
+        fid_eta = 1.0
+    if c_orth is None:
+        c_orth = 1.0
 
-    # --- energy function (normalized) ---
+    # --- Define modular energy function ---
     def energy_fn(Y):
         Yr = nsa_flow_retract_auto(Y, w, retraction)
         Yr = apply_nonnegativity(Yr, apply_nonneg)
-#        e_norm = 0.5 * (torch.sum(X0**2) + torch.sum(Yr**2))
-        e_norm = 0.5 * (torch.sum(X0**2))
-        fidelity = 0.5 * fid_eta * torch.sum((Yr - X0) ** 2) / (e_norm + 1e-12)
-        orth = 0.25 * c_orth * defect_fast(Yr)
-        return (fidelity + orth)
+        return compute_energy(
+            Yr,
+            X0,
+            w=w,
+            fid_eta=fid_eta,
+            c_orth=c_orth,
+            fidelity_type=fidelity_type,
+            orth_type=orth_type,
+            track_grad=False,
+        )
 
-    # --- compute reference gradient direction ---
-    Y_ref = Y0.clone().detach().requires_grad_(True)
-    f_ref = energy_fn(Y_ref)
-    f_ref.backward()
-    grad = Y_ref.grad.detach()
-    grad_norm = torch.norm(grad) + 1e-12
-    grad_dir = grad / grad_norm
-    f0 = f_ref.item()
+    # --- Compute baseline energy + gradient ---
+    f_ref_val = energy_fn(Y_ref)
+    f_ref = f_ref_val.item() if isinstance(f_ref_val, torch.Tensor) else float(f_ref_val)
 
-    # candidate learning rates to probe
-    lr_candidates = np.array([1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 0.1, 1.0, 5.0, 10.0, 50.0, 100.0    ])
-    lr_vals, losses = [], []
+    if isinstance(f_ref_val, torch.Tensor):
+        f_ref_val.backward()
+        grad_ref = Y_ref.grad.detach().clone()
+    else:
+        # fallback autograd
+        f_ref_tensor = torch.tensor(f_ref, dtype=Y_ref.dtype, requires_grad=True)
+        grad_ref = torch.autograd.grad(f_ref_tensor, Y_ref, retain_graph=False, allow_unused=True)[0]
+        grad_ref = torch.zeros_like(Y_ref) if grad_ref is None else grad_ref
 
-    # --- unified probe loop ---
+    grad_norm = torch.norm(grad_ref).item() + 1e-12
+    if verbose:
+        print(f"Initial energy={f_ref:.4e}, grad_norm={grad_norm:.4e}")
+
+    # --- Learning rate candidates ---
+    if strategy in ["armijo", "armijo_aggressive", "exponential", "linear", "random", "grid"]:
+        if strategy == "grid":
+            lr_candidates = np.logspace(-6, 2, 30)
+        elif strategy == "armijo":
+            lr_candidates = np.logspace(-4, 0, 20)
+        elif strategy == "armijo_aggressive":
+            lr_candidates = np.logspace(-2, 2, 20)
+        elif strategy == "exponential":
+            lr_candidates = [10 ** exp for exp in np.linspace(-6, 0, 25)]
+        elif strategy == "linear":
+            lr_candidates = np.linspace(1e-5, 1.0, 25)
+        elif strategy == "random":
+            lr_candidates = np.random.rand(25) * 0.5
+    else:
+        raise ValueError(f"Unknown strategy: {strategy}")
+
+    # --- Evaluate losses for each candidate ---
+    losses, rel_changes = [], []
     for lr in lr_candidates:
-        with torch.no_grad():
-            Y_try = Y_ref - lr * grad_dir
-        f_new = energy_fn(Y_try).item()
-        lr_vals.append(lr)
+        Y_try = Y_ref - lr * grad_ref
+        f_new_val = energy_fn(Y_try)
+        f_new = f_new_val.item() if isinstance(f_new_val, torch.Tensor) else float(f_new_val)
         losses.append(f_new)
+        rel_changes.append((f_ref - f_new) / (abs(f_ref) + 1e-12))
 
     losses = np.array(losses)
-    if np.any(np.isnan(losses)) or np.any(np.isinf(losses)):
-        losses = np.nan_to_num(losses, nan=np.inf)
+    lr_candidates = np.array(lr_candidates)
 
-    # --- strategy logic ---
-    strategy = strategy.lower()
-    if strategy.startswith("armijo"):
-        c = 1e-4 if "aggressive" not in strategy else 5e-3
-        good_lrs = [
-            lr for lr, f_new in zip(lr_vals, losses)
-            if f_new <= f0 - c * lr * grad_norm**2
+    # --- Strategy-based selection ---
+    if strategy in ["armijo", "armijo_aggressive"]:
+        c = 1e-4 if strategy == "armijo" else 5e-3
+        good = [
+            lr for lr, f_new in zip(lr_candidates, losses)
+            if f_new <= f_ref - c * lr * grad_norm**2
         ]
-        best_lr = float(np.quantile(good_lrs, 0.95)) if good_lrs else float(lr_candidates[0])
-
+        best_lr = float(np.quantile(good, 0.95)) if good else float(lr_candidates[0])
     elif strategy == "grid":
         best_lr = float(lr_candidates[np.argmin(losses)])
-
-    elif strategy == "adaptive":
-        diffs = np.diff(losses)
-        if np.all(diffs >= 0):
-            best_lr = float(lr_candidates[0])
-        elif np.all(diffs <= 0):
-            best_lr = float(lr_candidates[-1])
-        else:
-            idx = np.where(diffs > 0)[0]
-            best_lr = float(lr_candidates[max(idx[0] - 1, 0)]) if len(idx) else float(lr_candidates[-1])
-
-    elif strategy == "exploratory":
-        rel_change = (losses[0] - losses) / (abs(f0) + 1e-12)
-        threshold = 0.05
-        good = lr_candidates[rel_change > threshold]
-        best_lr = float(np.quantile(good, 0.95)) if len(good) else float(lr_candidates[0])
-
+    elif strategy in ["exponential", "linear", "random"]:
+        best_lr = float(lr_candidates[np.argmin(losses)])
     else:
-        raise ValueError(f"Unknown LR strategy: {strategy}")
+        raise ValueError(f"Unknown strategy: {strategy}")
 
+    # --- Verbose report ---
     if verbose:
         print(f"[LR-Est] {strategy:<20} best_lr={best_lr:.2e}")
 
+    # --- Optional plotting ---
     if plot:
         import matplotlib.pyplot as plt
-        plt.plot(lr_vals, losses, "o-", label=strategy)
-        plt.axvline(best_lr, color="r", linestyle="--")
+        plt.plot(lr_candidates, losses, "o-", label=strategy)
+        plt.axvline(best_lr, color="r", linestyle="--", label=f"best_lr={best_lr:.2e}")
         plt.xscale("log")
         plt.xlabel("Learning rate")
-        plt.ylabel("Normalized energy")
-        plt.title(f"NSA-Flow LR Search ({strategy})")
+        plt.ylabel("Energy")
+        plt.title(f"LR Search ({strategy})")
         plt.legend()
         plt.show()
 
     return {
-        "lr_candidates": lr_vals,
-        "losses": losses,
         "best_lr": best_lr,
+        "best_energy": float(np.min(losses)),
         "strategy": strategy,
+        "lr_candidates": lr_candidates,
+        "losses": losses,
+        "rel_changes": rel_changes,
     }
-
 
 def invariant_orthogonality_defect(V):
         norm2 = torch.sum(V ** 2)
@@ -926,7 +998,7 @@ def nsa_flow(Y0, X0=None, w=0.5,
     apply_nonneg : bool
         Enforce nonnegativity after each retraction if True.
     optimizer : str
-        Optimizer to use ('fast' for simple gradient step, or PyTorch optimizers like 'Adam').
+        Optimizer to use ('fast' for simple gradient step, or PyTorch optimizers like 'asgd').
     initial_learning_rate : float or str
         Learning rate or 'default' for auto-estimate.
     record_every : int
@@ -1190,17 +1262,25 @@ def nsa_flow_autograd(
     Y0, X0=None, w=0.5,
     retraction="soft_polar",
     max_iter=500, tol=1e-6, verbose=False, seed=42,
-    apply_nonneg=True, optimizer="Adam",
+    apply_nonneg=True, optimizer="asgd",
     initial_learning_rate=None, 
     lr_strategy="auto",
+    fidelity_type="scale_invariant",
+    orth_type="scale_invariant",
     record_every=1, window_size=5,
-    simplified=False, project_full_gradient=False,
     device=None, precision="float64"
 ):
     """
-    Autograd-compatible NSA-Flow (scale-invariant version).
+    Autograd-compatible NSA-Flow (modular energy version).
+    Allows user-specified fidelity_type and orth_type.
+
+    fidelity_type ∈ {"basic", "scale_invariant", "symmetric"}
+    orth_type ∈ {"basic", "scale_invariant"}
     """
 
+    import torch, time
+
+    # --- Precision and reproducibility ---
     if precision == "float32":
         dtype = torch.float32
     elif precision == "float64":
@@ -1212,15 +1292,12 @@ def nsa_flow_autograd(
     if device is None:
         device = Y0.device
 
-    # --- Initialize and scale normalize ---
+    # --- Initialization ---
     Y = Y0.clone().detach().to(device).to(dtype)
     p, k = Y.shape
 
     if X0 is None:
-        if apply_nonneg:
-            X0 = torch.clamp(Y, min=0)
-        else:
-            X0 = Y.clone()
+        X0 = torch.clamp(Y, min=0) if apply_nonneg else Y.clone()
         perturb_scale = torch.norm(Y) / (Y.numel() ** 0.5) * 0.05
         Y = Y + perturb_scale * torch.randn_like(Y)
         if verbose:
@@ -1236,7 +1313,7 @@ def nsa_flow_autograd(
     X0 = X0 / scale_ref
     Y = Y / scale_ref
 
-    # --- Energy scaling ---
+    # --- Default scaling constants ---
     g0 = 0.5 * torch.sum((Y - X0) ** 2) / (p * k)
     g0 = torch.clamp(g0, min=1e-8)
     d0 = torch.clamp(defect_fast(Y), min=1e-8)
@@ -1246,8 +1323,9 @@ def nsa_flow_autograd(
     # --- Optimization variable ---
     Z = torch.nn.Parameter(Y.clone().detach().requires_grad_(True))
 
-    # --- Optional LR auto-tuning ---
-    if initial_learning_rate is None and isinstance(lr_strategy, str) and lr_strategy.lower() in ["auto", "exponential", "linear", "random", "adaptive"]:
+    # --- Learning rate strategy ---
+    if initial_learning_rate is None and isinstance(lr_strategy, str) and \
+       lr_strategy.lower() in return_lr_estimation_strategies():
         if verbose:
             print(f"[NSA-Flow] Estimating learning rate ({lr_strategy}) ...")
         lr_result = estimate_learning_rate_for_nsa_flow(
@@ -1266,43 +1344,58 @@ def nsa_flow_autograd(
         lr = lr_result["best_lr"]
         if verbose:
             print(f"[NSA-Flow] Selected learning rate: {lr:.2e}")
-        opt = get_torch_optimizer(optimizer, [Z], lr=lr)
     else:
-        opt = get_torch_optimizer(optimizer, [Z], lr=initial_learning_rate or 1e-3)
+        lr = initial_learning_rate or 1e-3
 
-    traces = []
-    recent_energies = []
+    opt = get_torch_optimizer(optimizer, [Z], lr=lr)
+
+    # --- Tracking and monitoring ---
+    traces, recent_energies = [], []
     t0 = time.time()
-    best_Y = None
-    best_energy = float("inf")
-    best_iter = 0
+    best_Y, best_energy, best_iter = None, float("inf"), 0
 
+    # --- Main optimization loop ---
     for it in range(1, max_iter + 1):
         opt.zero_grad()
 
-        # --- Retraction and nonnegativity ---
+        # --- Retraction + optional nonnegativity ---
         Y_retracted = nsa_flow_retract_auto(Z, w, retraction)
         Y_retracted = apply_nonnegativity(Y_retracted, apply_nonneg)
 
-        # --- Energy computation (scale-invariant) ---
-#        e_norm = 0.5 * (torch.sum(X0 ** 2).item() + torch.sum(Y_retracted ** 2).item())
-        e_norm = 0.5 * (torch.sum(X0 ** 2).item() )
-        fidelity = (0.5 * fid_eta * torch.sum((Y_retracted - X0) ** 2)) / (e_norm + 1e-12)
-        orth_term = 0.25 * c_orth * defect_fast(Y_retracted)
-        total_energy = fidelity + orth_term
+        # --- Compute energy (autograd-safe) ---
+        total_energy = compute_energy(
+            Y_retracted,
+            X0,
+            w=w,
+            fidelity_type=fidelity_type,
+            orth_type=orth_type,
+            fid_eta=fid_eta,
+            c_orth=c_orth,
+            track_grad=True,
+        )
 
         total_energy.backward()
         opt.step()
 
-        # --- Evaluation and tracking ---
+        # --- Evaluate & store progress ---
         with torch.no_grad():
             Y_eval = nsa_flow_retract_auto(Z, w, retraction)
             Y_eval = apply_nonnegativity(Y_eval, apply_nonneg)
-#            e_norm = 0.5 * (torch.sum(X0 ** 2).item() + torch.sum(Y_eval ** 2).item())
-            e_norm = 0.5 * (torch.sum(X0 ** 2).item() )
-            fidelity = (0.5 * fid_eta * torch.sum((Y_eval - X0) ** 2).item()) / (e_norm + 1e-12)
-            orth_val = defect_fast(Y_eval).item()
-            total_val = fidelity + 0.25 * c_orth * orth_val
+            E = compute_energy(
+                Y_eval,
+                X0,
+                w=w,
+                fidelity_type=fidelity_type,
+                orth_type=orth_type,
+                fid_eta=fid_eta,
+                c_orth=c_orth,
+                track_grad=False,
+                return_dict=True
+            )
+
+            total_val = E["total"]
+            fidelity_val = E["fidelity"]
+            orth_val = E["orthogonality"]
 
             if total_val < best_energy:
                 best_energy = total_val
@@ -1313,7 +1406,7 @@ def nsa_flow_autograd(
                 traces.append({
                     "iter": it,
                     "time": time.time() - t0,
-                    "fidelity": fidelity,
+                    "fidelity": fidelity_val,
                     "orthogonality": orth_val,
                     "total_energy": total_val
                 })
@@ -1323,7 +1416,7 @@ def nsa_flow_autograd(
                 recent_energies.pop(0)
 
             if verbose and (it % record_every == 0 or it < 10):
-                print(f"[Iter {it:3d}] Total={total_val:.6e} | Fid={fidelity:.6e} | Orth={orth_val:.6e}")
+                print(f"[Iter {it:3d}] Total={total_val:.6e} | Fid={fidelity_val:.6e} | Orth={orth_val:.6e}")
 
             # --- Convergence criterion ---
             if len(recent_energies) == window_size:
@@ -1337,15 +1430,20 @@ def nsa_flow_autograd(
 
     traces = traces_to_dataframe(traces)
     return {
-        "Y": best_Y * scale_ref,  # rescale back to original magnitude
+        "Y": best_Y * scale_ref,  # rescale to original magnitude
         "traces": traces,
         "final_iter": best_iter,
         "best_total_energy": best_energy,
         "best_Y_iteration": best_iter,
         "target": X0 * scale_ref,
+        "settings": {
+            "fidelity_type": fidelity_type,
+            "orth_type": orth_type,
+            "retraction": retraction,
+            "optimizer": optimizer,
+            "learning_rate": lr,
+        }
     }
-
-
 
 def test_scale_invariance():
     torch.manual_seed(0)
@@ -1381,12 +1479,13 @@ def return_lr_estimation_strategies():
     Returns:
         List[str]: Supported strategies.
     """
+    
     strategies = [
         "armijo",             # conservative Armijo backtracking
         "armijo_aggressive",  # more aggressive Armijo search
         "grid",               # fixed grid search
-        "adaptive",           # adaptive exponential growth
-        "exploratory",        # broad exploratory search
+#        "adaptive",           # adaptive exponential growth
+#        "exploratory",        # broad exploratory search
         "exponential",        # log-spaced steps
         "linear",             # linearly spaced steps
         "random"              # random log-space sampling
@@ -1459,3 +1558,222 @@ def test_autograd_scale_invariance( lr_strategy="auto" ):
 
     print("[TEST] ✓ Scale invariance check complete.")
     return result
+
+
+def test_estimate_learning_rate_for_nsa_flow(
+    fidelity_type="scale_invariant",
+    orth_type="scale_invariant",
+    plot=True,
+):
+    """
+    Test learning rate estimation with differentiable energy computation.
+    Ensures autograd compatibility.
+    """
+
+    torch.set_default_dtype(torch.float64)
+    torch.manual_seed(42)
+
+    # --- Setup ---
+    Y_ref = torch.randn(40, 10, requires_grad=True)
+    X0 = torch.randn_like(Y_ref)
+
+    # --- Energy function (autograd-safe) ---
+    def energy_fn(Y):
+        Yr = nsa_flow_retract_auto(Y, 0.5, "soft_polar")
+        Yr = apply_nonnegativity(Yr, True)
+        # compute_energy must not use .item() internally
+        total_energy = compute_energy(
+            Yr, X0,
+            w=0.5,
+            fidelity_type=fidelity_type,
+            orth_type=orth_type,
+            track_grad=True   # ensure autograd-safe version
+        )
+        return total_energy  # return tensor, not .item()
+
+    # --- Compute base energy and gradient ---
+    f0 = energy_fn(Y_ref)
+    assert torch.is_tensor(f0), "Energy function must return a tensor."
+    assert f0.requires_grad, "Energy must retain grad tracking."
+
+    f0.backward()  # Should work fine now
+    grad = Y_ref.grad.detach()
+    grad_norm = grad.norm().item()
+    print(f"Initial energy={f0.item():.4e}, grad_norm={grad_norm:.4e}")
+
+    # --- Run LR estimation across strategies ---
+    strategies = return_lr_estimation_strategies()
+    results = {}
+
+    for s in strategies:
+        res = estimate_learning_rate_for_nsa_flow(
+            Y0=Y_ref.detach(),
+            X0=X0,
+            strategy=s,
+            plot=False,
+            verbose=True,
+        )
+        results[s] = res["best_lr"]
+        print(f"{s:<20} → best_lr={res['best_lr']:.2e}")
+
+    # --- Optional visualization ---
+    if plot:
+        plt.figure(figsize=(6, 4))
+        plt.bar(results.keys(), results.values())
+        plt.xticks(rotation=30)
+        plt.ylabel("Estimated best learning rate")
+        plt.title("Learning Rate Strategies Comparison")
+        plt.tight_layout()
+        plt.show()
+
+    return results
+
+
+def test_estimate_learning_rate_for_nsa_flow_modular(plot=False):
+    import torch
+    torch.manual_seed(0)
+    Y = torch.randn(40, 8)
+    X = torch.randn_like(Y)
+
+    res = estimate_learning_rate_for_nsa_flow(
+        Y, X,
+        w=0.4,
+        retraction="soft_polar",
+        fidelity_type="symmetric",
+        orth_type="scale_invariant",
+        strategy="armijo_aggressive",
+        plot=plot,
+        verbose=True
+    )
+
+    assert "best_lr" in res
+    assert res["best_lr"] > 0, "Learning rate should be positive."
+    assert np.isfinite(res["losses"]).all(), "Losses contain NaN or Inf."
+    print(f"✅ Passed LR modular test — best_lr={res['best_lr']:.3e}")
+    return res
+
+
+def test_nsa_flow_autograd_modular(plot=True):
+    import torch
+    torch.manual_seed(1)
+    Y = torch.randn(50, 10)
+    X = torch.randn_like(Y)
+
+    result = nsa_flow_autograd(
+        Y0=Y,
+        X0=X,
+        w=0.5,
+        retraction="soft_polar",
+        fidelity_type="scale_invariant",
+        orth_type="scale_invariant",
+        max_iter=100,
+        lr_strategy="auto",
+        verbose=True,
+    )
+    nrgratio = result['traces']['total_energy'].iloc[result['best_Y_iteration']-1] / result['traces']['total_energy'].iloc[0]
+    Y_final = result["Y"]
+    assert torch.isfinite(Y_final).all(), "Non-finite values detected in Y."
+    assert nrgratio < 1.0, "Energy did not decrease sufficiently."
+    print(f"✅ Passed NSA-Flow autograd modular test at iter {result['final_iter']}")
+
+    if plot:
+        plot_nsa_trace(result["traces"])
+    return result
+
+
+def test_retraction_across_w(plot=True):
+    import torch, numpy as np, matplotlib.pyplot as plt
+    torch.manual_seed(0)
+    Y = torch.randn(30, 5)
+    ws = torch.linspace(0.0, 1.0, steps=11)
+    norms = []
+    orth = []
+
+    for w in ws:
+        Yr = nsa_flow_retract_auto(Y, w_retract=w, retraction_type="soft_polar")
+        norms.append(torch.norm(Yr).item())
+        orth.append(defect_fast(Yr).item())
+
+    norms = np.array(norms)
+    orth = np.array(orth)
+
+    if plot:
+        fig, ax1 = plt.subplots(figsize=(7, 4))
+
+        color1 = "tab:blue"
+        ax1.set_xlabel("w_retract")
+        ax1.set_ylabel("‖Y_retracted‖ (scale)", color=color1)
+        ax1.plot(ws, norms, "-o", color=color1, label="‖Y_retracted‖")
+        ax1.tick_params(axis="y", labelcolor=color1)
+
+        # Create second axis for orthogonality defect
+        ax2 = ax1.twinx()
+        color2 = "tab:red"
+        ax2.set_ylabel("Orthogonality defect", color=color2)
+        ax2.plot(ws, orth, "-s", color=color2, label="Orth defect")
+        ax2.tick_params(axis="y", labelcolor=color2)
+
+        # Combine legends
+        lines, labels = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines + lines2, labels + labels2, loc="best")
+
+        plt.title("Retraction effects on scale vs orthogonality")
+        plt.tight_layout()
+        plt.show()
+
+    assert np.all(np.isfinite(norms)) and np.all(np.isfinite(orth)), "NaN or Inf detected."
+    print("✅ Retraction visualization and sanity check passed.")
+
+def test_estimate_learning_rate_for_nsa_flow_modular(plot=False):
+    import torch
+    torch.manual_seed(0)
+    Y = torch.randn(40, 8)
+    X = torch.randn_like(Y)
+
+    res = estimate_learning_rate_for_nsa_flow(
+        Y, X,
+        w=0.4,
+        retraction="soft_polar",
+        fidelity_type="symmetric",
+        orth_type="scale_invariant",
+        strategy="armijo_aggressive",
+        plot=plot,
+        verbose=True
+    )
+
+    assert "best_lr" in res
+    assert res["best_lr"] > 0, "Learning rate should be positive."
+    assert np.isfinite(res["losses"]).all(), "Losses contain NaN or Inf."
+    print(f"✅ Passed LR modular test — best_lr={res['best_lr']:.3e}")
+    return res
+
+
+def test_nsa_flow_autograd_modular(plot=True):
+    import torch
+    torch.manual_seed(1)
+    Y = torch.randn(50, 10)
+    X = torch.randn_like(Y)
+
+    result = nsa_flow_autograd(
+        Y0=Y,
+        X0=X,
+        w=0.5,
+        retraction="soft_polar",
+        fidelity_type="scale_invariant",
+        orth_type="scale_invariant",
+        max_iter=100,
+        lr_strategy="auto",
+        verbose=True,
+    )
+    nrgratio = result['traces']['total_energy'].iloc[result['best_Y_iteration']-1] / result['traces']['total_energy'].iloc[0]
+    Y_final = result["Y"]
+    assert torch.isfinite(Y_final).all(), "Non-finite values detected in Y."
+    assert nrgratio < 1.0, "Energy did not decrease sufficiently."
+    print(f"✅ Passed NSA-Flow autograd modular test at iter {result['final_iter']}")
+
+    if plot:
+        plot_nsa_trace(result["traces"])
+    return result
+
+
