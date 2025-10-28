@@ -242,140 +242,6 @@ def get_torch_optimizer(opt_name: str = None, params=None, lr: float = 1e-3, ret
 
 
 
-def estimate_learning_rate(
-    objective_fn,
-    params_init,
-    optimizer_class,
-    lr_min=1e-6,
-    lr_max=1e2,
-    num_steps=150,
-    strategy="exponential",
-    smoothing=0.9,
-    stop_factor=10,
-    device=None,
-    plot=True,
-):
-    """
-    Empirically estimates an optimal learning rate by exploring the loss landscape
-    across a wide LR range (default 1e-6 → 1e2).
-
-    Strategies:
-        - 'exponential' : LR increases exponentially each step (Leslie Smith-style)
-        - 'linear'      : LR increases linearly
-        - 'random'      : Samples LRs log-uniformly from [lr_min, lr_max]
-        - 'adaptive'    : Explores adaptively, slowing down where loss decreases fastest
-
-    Args:
-        objective_fn (callable): Function taking params (Tensor) -> scalar loss (Tensor).
-        params_init (torch.Tensor): Initial parameters, requires_grad=True.
-        optimizer_class (callable): e.g. lambda p: torch.optim.Adam(p, lr=1e-3)
-        lr_min (float): Minimum learning rate.
-        lr_max (float): Maximum learning rate.
-        num_steps (int): Number of test steps.
-        strategy (str): One of {'exponential', 'linear', 'random', 'adaptive'}.
-        smoothing (float): EWMA factor for smoothed loss (for 'exponential' mode).
-        stop_factor (float): Stop if loss > stop_factor × best_loss so far.
-        device (torch.device or str): Target device.
-        plot (bool): Whether to plot LR vs loss (log-log).
-
-    Returns:
-        dict with:
-            'lr_curve' : list of (lr, loss)
-            'best_lr'  : float (suggested LR)
-            'losses'   : list of float
-            'strategy' : strategy used
-    """
-
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # --- Prepare ---
-    params = params_init.clone().detach().to(device).requires_grad_(True)
-    optimizer = optimizer_class([params])
-
-    # --- Generate LR schedule ---
-    if strategy == "exponential":
-        lrs = torch.logspace(math.log10(lr_min), math.log10(lr_max), num_steps)
-    elif strategy == "linear":
-        lrs = torch.linspace(lr_min, lr_max, num_steps)
-    elif strategy == "random":
-        lrs = torch.pow(10, torch.rand(num_steps) * (math.log10(lr_max) - math.log10(lr_min)) + math.log10(lr_min))
-    elif strategy == "adaptive":
-        # Start exponential, adapt step size dynamically
-        lrs = [lr_min]
-        growth = (lr_max / lr_min) ** (1.0 / num_steps)
-    else:
-        raise ValueError(f"Unknown strategy '{strategy}'. Choose from exponential, linear, random, adaptive.")
-
-    losses = []
-    smoothed = None
-    best_loss = float("inf")
-    best_lr = lr_min
-    prev_loss = None
-
-    for i in range(num_steps):
-        if strategy == "adaptive" and i > 0:
-            lrs.append(min(lrs[-1] * growth, lr_max))
-        lr = lrs[i] if strategy != "adaptive" else lrs[-1]
-
-        for g in optimizer.param_groups:
-            g["lr"] = lr.item() if torch.is_tensor(lr) else lr
-
-        optimizer.zero_grad(set_to_none=True)
-        loss = objective_fn(params)
-
-        if not torch.isfinite(loss):
-            print(f"Non-finite loss at step {i}, stopping.")
-            break
-
-        loss.backward()
-        optimizer.step()
-
-        loss_val = loss.item()
-        if smoothed is None:
-            smoothed = loss_val
-        else:
-            smoothed = smoothing * smoothed + (1 - smoothing) * loss_val
-
-        losses.append(smoothed)
-
-        if smoothed < best_loss:
-            best_loss = smoothed
-            best_lr = lr.item() if torch.is_tensor(lr) else lr
-
-        if prev_loss is not None and smoothed > stop_factor * best_loss:
-            print(f"Stopping early: loss exploded by >{stop_factor}× at step {i}.")
-            break
-        prev_loss = smoothed
-
-    if not torch.is_tensor(lrs):
-        lrs = torch.tensor(lrs[:len(losses)], dtype=torch.float64)
-    else:
-        lrs = lrs[:len(losses)].detach().clone().to(dtype=torch.float64)
-
-    # --- Plot ---
-    if plot:
-        plt.figure(figsize=(8, 5))
-        plt.plot(lrs.cpu(), losses, marker='o', alpha=0.8)
-        plt.xscale("log")
-        plt.yscale("log")
-        plt.xlabel("Learning Rate")
-        plt.ylabel("Smoothed Loss")
-        plt.title(f"Learning Rate Finder ({strategy.capitalize()} Sweep)")
-        plt.grid(True, which="both", ls="--", alpha=0.4)
-        plt.axvline(best_lr, color="red", linestyle="--", label=f"Suggested LR = {best_lr:.2e}")
-        plt.legend()
-        plt.show()
-
-    return {
-        "lr_curve": list(zip(lrs.cpu().numpy(), losses)),
-        "best_lr": best_lr,
-        "losses": losses,
-        "strategy": strategy,
-    }
-
-
-
 def estimate_learning_rate_for_nsa_flow(
     Y0,
     X0,
@@ -386,26 +252,31 @@ def estimate_learning_rate_for_nsa_flow(
     c_orth=None,
     apply_nonneg=True,
     strategy="armijo",
+    aggression=0.5,
     verbose=False,
     plot=False,
     fidelity_type="scale_invariant",
     orth_type="scale_invariant",
 ):
     """
-    Estimate a suitable learning rate for NSA-Flow optimization.
-    Compatible with both old and new test versions.
+    Estimate a suitable learning rate for NSA-Flow optimization, 
+    with a continuous `aggression` knob in [0,1].
+
+    aggression:
+        - 0.0 → very conservative (prefers stability over speed)
+        - 0.5 → balanced (default)
+        - 1.0 → very aggressive (favors bold step sizes)
     """
 
     import torch, numpy as np
+    assert 0.0 <= aggression <= 1.0, "aggression must be between 0 and 1"
 
     torch.manual_seed(42)
     Y_ref = Y0.clone().detach().requires_grad_(True)
     X0 = X0.clone().detach()
 
-    if fid_eta is None:
-        fid_eta = 1.0
-    if c_orth is None:
-        c_orth = 1.0
+    fid_eta = 1.0 if fid_eta is None else fid_eta
+    c_orth = 1.0 if c_orth is None else c_orth
 
     # --- Define modular energy function ---
     def energy_fn(Y):
@@ -430,7 +301,6 @@ def estimate_learning_rate_for_nsa_flow(
         f_ref_val.backward()
         grad_ref = Y_ref.grad.detach().clone()
     else:
-        # fallback autograd
         f_ref_tensor = torch.tensor(f_ref, dtype=Y_ref.dtype, requires_grad=True)
         grad_ref = torch.autograd.grad(f_ref_tensor, Y_ref, retain_graph=False, allow_unused=True)[0]
         grad_ref = torch.zeros_like(Y_ref) if grad_ref is None else grad_ref
@@ -439,24 +309,28 @@ def estimate_learning_rate_for_nsa_flow(
     if verbose:
         print(f"Initial energy={f_ref:.4e}, grad_norm={grad_norm:.4e}")
 
-    # --- Learning rate candidates ---
+    # --- Construct learning rate candidates dynamically ---
     if strategy in ["armijo", "armijo_aggressive", "exponential", "linear", "random", "grid"]:
         if strategy == "grid":
             lr_candidates = np.logspace(-6, 2, 30)
-        elif strategy == "armijo":
-            lr_candidates = np.logspace(-4, 0, 20)
-        elif strategy == "armijo_aggressive":
-            lr_candidates = np.logspace(-2, 2, 20)
+        elif strategy in ["armijo", "armijo_aggressive"]:
+            # Adjust search space based on aggression
+            low_exp = -5 + 3 * aggression       # e.g. aggression=0 → 1e-5; 1 → 1e-2
+            high_exp = 0 + 2 * aggression       # e.g. aggression=0 → 1; 1 → 1e2
+            lr_candidates = np.logspace(low_exp, high_exp, 25)
         elif strategy == "exponential":
-            lr_candidates = [10 ** exp for exp in np.linspace(-6, 0, 25)]
+            base_low = -6 + 5 * aggression
+            base_high = 0 + 2 * aggression
+            lr_candidates = [10 ** exp for exp in np.linspace(base_low, base_high, 25)]
         elif strategy == "linear":
-            lr_candidates = np.linspace(1e-5, 1.0, 25)
+            upper = 0.1 + 2.0 * aggression
+            lr_candidates = np.linspace(1e-5, upper, 25)
         elif strategy == "random":
-            lr_candidates = np.random.rand(25) * 0.5
+            lr_candidates = np.random.rand(25) * (0.1 + 0.9 * aggression)
     else:
         raise ValueError(f"Unknown strategy: {strategy}")
 
-    # --- Evaluate losses for each candidate ---
+    # --- Evaluate losses ---
     losses, rel_changes = [], []
     for lr in lr_candidates:
         Y_try = Y_ref - lr * grad_ref
@@ -468,45 +342,61 @@ def estimate_learning_rate_for_nsa_flow(
     losses = np.array(losses)
     lr_candidates = np.array(lr_candidates)
 
-    # --- Strategy-based selection ---
+    # --- Strategy-based selection with aggression weighting ---
     if strategy in ["armijo", "armijo_aggressive"]:
-        c = 1e-4 if strategy == "armijo" else 5e-3
+        # Modify acceptance threshold 'c' using aggression
+        base_c = 1e-4 if strategy == "armijo" else 5e-3
+        c = base_c * (0.1 + 5 * aggression)  # scales acceptance condition
         good = [
             lr for lr, f_new in zip(lr_candidates, losses)
             if f_new <= f_ref - c * lr * grad_norm**2
         ]
-        best_lr = float(np.quantile(good, 0.95)) if good else float(lr_candidates[0])
+
+        if good:
+            # Aggression shifts preference toward higher percentile of accepted LRs
+            q = 0.25 + 0.7 * aggression
+            best_lr = float(np.quantile(good, q))
+        else:
+            best_lr = float(lr_candidates[np.argmin(losses)])
+
     elif strategy == "grid":
         best_lr = float(lr_candidates[np.argmin(losses)])
     elif strategy in ["exponential", "linear", "random"]:
-        best_lr = float(lr_candidates[np.argmin(losses)])
+        # Aggressive strategies favor more exploratory (larger) rates
+        idx = np.argmin(losses)
+        if aggression > 0.5:
+            idx = min(idx + int(aggression * 3), len(lr_candidates) - 1)
+        best_lr = float(lr_candidates[idx])
     else:
         raise ValueError(f"Unknown strategy: {strategy}")
 
     # --- Verbose report ---
     if verbose:
-        print(f"[LR-Est] {strategy:<20} best_lr={best_lr:.2e}")
+        print(f"[LR-Est] {strategy:<20} best_lr={best_lr:.2e} (aggression={aggression:.2f})")
 
     # --- Optional plotting ---
     if plot:
         import matplotlib.pyplot as plt
-        plt.plot(lr_candidates, losses, "o-", label=strategy)
+        plt.plot(lr_candidates, losses, "o-", label=f"{strategy} (agg={aggression:.2f})")
         plt.axvline(best_lr, color="r", linestyle="--", label=f"best_lr={best_lr:.2e}")
         plt.xscale("log")
         plt.xlabel("Learning rate")
         plt.ylabel("Energy")
-        plt.title(f"LR Search ({strategy})")
+        plt.title(f"LR Search ({strategy}, aggression={aggression:.2f})")
         plt.legend()
+        plt.tight_layout()
         plt.show()
 
     return {
         "best_lr": best_lr,
         "best_energy": float(np.min(losses)),
         "strategy": strategy,
+        "aggression": aggression,
         "lr_candidates": lr_candidates,
         "losses": losses,
         "rel_changes": rel_changes,
     }
+
 
 def invariant_orthogonality_defect(V):
         norm2 = torch.sum(V ** 2)
@@ -1267,6 +1157,7 @@ def nsa_flow_autograd(
     lr_strategy="auto",
     fidelity_type="scale_invariant",
     orth_type="scale_invariant",
+    aggression=0.5,
     record_every=1, window_size=5,
     device=None, precision="float64"
 ):
@@ -1338,6 +1229,7 @@ def nsa_flow_autograd(
             c_orth=c_orth,
             apply_nonneg=apply_nonneg,
             strategy="armijo_aggressive" if lr_strategy == "auto" else lr_strategy,
+            aggression=aggression,
             plot=False,
             verbose=verbose,
         )
