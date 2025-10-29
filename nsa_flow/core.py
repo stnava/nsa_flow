@@ -194,7 +194,7 @@ def get_torch_optimizer(opt_name: str = None, params=None, lr: float = 1e-3, ret
         "sgd_nesterov": lambda p, lr: torch.optim.SGD(p, lr=lr, momentum=0.9, nesterov=True, **kwargs),
         "rmsprop": lambda p, lr: torch.optim.RMSprop(p, lr=lr, **kwargs),
         "adagrad": lambda p, lr: torch.optim.Adagrad(p, lr=lr, **kwargs),
-        "lbfgs": lambda p, lr: torch.optim.LBFGS(p, lr=lr, max_iter=10, **kwargs),
+#        "lbfgs": lambda p, lr: torch.optim.LBFGS(p, lr=lr, max_iter=10, **kwargs),
         "adamax": lambda p, lr: torch.optim.Adamax(p, lr=lr, **kwargs),
         "asgd": lambda p, lr: torch.optim.ASGD(p, lr=lr, **kwargs),
         "nadam": lambda p, lr: torch.optim.NAdam(p, lr=lr, **kwargs),
@@ -215,7 +215,6 @@ def get_torch_optimizer(opt_name: str = None, params=None, lr: float = 1e-3, ret
             "qhm": lambda p, lr: optimx.QHM(p, lr=lr, **kwargs),
             "adamp": lambda p, lr: optimx.AdamP(p, lr=lr, **kwargs),
             "sgdp": lambda p, lr: optimx.SGDP(p, lr=lr, **kwargs),
-            "padam": lambda p, lr: optimx.PAdam(p, lr=lr, **kwargs),
             "lookahead": lambda p, lr: optimx.Lookahead(torch.optim.Adam(p, lr=lr, **kwargs)),
         }
         optimizers.update(extra_opts)
@@ -260,7 +259,7 @@ def estimate_learning_rate_for_nsa_flow(
     and aggression-based scaling. Robust to NaN/Inf energies.
     """
 
-    import torch, numpy as np
+    import torch, numpy as np, warnings
 
     def _to_float(x):
         if isinstance(x, torch.Tensor):
@@ -273,14 +272,18 @@ def estimate_learning_rate_for_nsa_flow(
         except Exception:
             return np.nan
 
+    # ---------------------------------------------------------------------
+    # Setup
+    # ---------------------------------------------------------------------
     torch.manual_seed(42)
+    np.random.seed(42)
+
     Y_ref = Y0.clone().detach().requires_grad_(True)
     X0 = X0.clone().detach()
 
-    if fid_eta is None:
-        fid_eta = 1.0
-    if c_orth is None:
-        c_orth = 1.0
+    fid_eta = 1.0 if fid_eta is None else fid_eta
+    c_orth = 1.0 if c_orth is None else c_orth
+    aggression = float(np.clip(aggression, 0.0, 1.0))
 
     # --- Define energy function safely ---
     def safe_energy(Y):
@@ -301,161 +304,131 @@ def estimate_learning_rate_for_nsa_flow(
             if not np.isfinite(e_val):
                 return np.nan
             return e_val
-        except Exception:
+        except Exception as ex:
+            if verbose:
+                warnings.warn(f"safe_energy failed: {ex}")
             return np.nan
 
-    # --- Baseline energy and gradient ---
+    # ---------------------------------------------------------------------
+    # Baseline energy and gradient
+    # ---------------------------------------------------------------------
     f_ref = safe_energy(Y_ref)
-
     if np.isnan(f_ref):
         raise ValueError("Initial energy computation failed (NaN).")
 
     f_ref_tensor = torch.tensor(f_ref, dtype=Y_ref.dtype, requires_grad=True)
     f_ref_tensor.backward(retain_graph=False)
-    grad_ref = Y_ref.grad.detach().clone() if Y_ref.grad is not None else torch.zeros_like(Y_ref)
+    grad_ref = (
+        Y_ref.grad.detach().clone()
+        if Y_ref.grad is not None
+        else torch.zeros_like(Y_ref)
+    )
     grad_norm = torch.norm(grad_ref).item() + 1e-12
 
-    # --- Learning rate candidates ---
-    if strategy in [
-        "armijo", "armijo_aggressive", "exponential", "linear",'entropy',
+    # ---------------------------------------------------------------------
+    # Candidate LR generation
+    # ---------------------------------------------------------------------
+    strategies = [
+        "armijo", "armijo_aggressive", "exponential", "linear", "entropy",
         "random", "adaptive", "momentum_boost", "poly_decay", "grid", "bayes"
-    ]:
-        if strategy == "grid":
-            lr_candidates = np.logspace(-6, 2, 30)
-        # --- FIXED: entropy ---
-        # Interprets aggression as "temperature" in a softmax weighting of the search space.
-        # Low aggression = low temperature (concentrated near small LRs)
-        # High aggression = high temperature (spread toward large LRs)
-        elif strategy == "entropy":
-            base = np.logspace(-6, 2, 50)
-            # aggression acts as a temperature-like scaling factor
-            temp = 1e-3 + 5 * aggression
-            probs = np.exp(np.log(base + 1e-12) / (temp + 1e-8))
-            probs /= np.sum(probs)
-            # expected learning rate under softmax weighting
-            lr_mean = np.sum(base * probs)
-            # form a candidate distribution around that expected value
-            lr_candidates = lr_mean * np.logspace(-1, 1, 25)
-        elif strategy == "armijo":
-            lr_candidates = np.logspace(-4, 0, 20) * (1 + 3 * aggression)
-
-        elif strategy == "armijo_aggressive":
-            lr_candidates = np.logspace(-2, 2, 20) * (1 + 5 * aggression)
-
-        elif strategy == "exponential":
-            base = np.logspace(-6, 0, 25)
-            lr_candidates = base ** (1 - 0.5 * aggression) * (1 + aggression)
-
-        # --- FIXED: linear ---
-        # Smooth monotonic ramp with aggression controlling slope and upper bound.
-        elif strategy == "linear":
-            start = 1e-5
-            stop = 1.0 * (1 + 4 * aggression)
-            lr_candidates = np.linspace(start, stop, 25)
-
-        # --- FIXED: adaptive ---
-        # Adapts to gradient norm; aggression increases exploration.
-        elif strategy == "adaptive":
-            base = np.logspace(-6, -2, 25)
-            scale = np.clip(1.0 / (1.0 + grad_norm), 1e-4, 1.0)
-            # aggression ramps both scale and range
-            lr_candidates = base * (1 + 10 * aggression) * scale
-
-        # --- FIXED: momentum_boost ---
-        # Combines conservative start with acceleration based on aggression
-        elif strategy == "momentum_boost":
-            base = np.logspace(-5, -1, 25)
-            boost = np.linspace(1.0, 1.0 + 9.0 * aggression, 25)
-            lr_candidates = base * boost
-
-        # --- FIXED: poly_decay ---
-        # Polynomial *growth* instead of decay; aggression controls curvature.
-        elif strategy == "poly_decay":
-            base = np.linspace(1e-5, 1.0, 25)
-            power = 1.0 + 3.0 * aggression
-            lr_candidates = base ** power * (1 + aggression)
-
-        elif strategy == "random":
-            rng = np.random.default_rng(42)
-            lr_candidates = rng.uniform(1e-5, 1.0 * (1 + 4 * aggression), 25)
-
-        elif strategy == "bayes":
-            base = np.logspace(-3, 2, 25)
-            prior = np.linspace(0.1, 1.0, 25)
-            lr_candidates = base * (prior ** (1 - aggression)) * (1 + aggression)
-
-    else:
+    ]
+    if strategy not in strategies:
         raise ValueError(f"Unknown strategy: {strategy}")
-    # ============================================================
-    # 🔧 AGGRESSION-BASED STRATEGIC TUNING (0.0 → 1.0)
-    # ============================================================
-    aggression = float(np.clip(locals().get("aggression", 0.5), 0.0, 1.0))
 
+    # Initial LR sets per strategy (base sweep)
+    if strategy == "grid":
+        lr_candidates = np.logspace(-6, 2, 30)
+
+    elif strategy == "entropy":
+        base = np.logspace(-6, 2, 50)
+        temp = 1e-3 + 5 * aggression
+        logits = np.log(base + 1e-12) / (temp + 1e-8)
+        probs = np.exp(logits - np.max(logits))
+        probs /= np.sum(probs)
+        lr_mean = np.sum(base * probs)
+        lr_candidates = lr_mean * np.logspace(-1, 1, 25)
+
+    elif strategy == "armijo":
+        lr_candidates = np.logspace(-4, 0, 20) * (1 + 3 * aggression)
+
+    elif strategy == "armijo_aggressive":
+        lr_candidates = np.logspace(-2, 2, 20) * (1 + 5 * aggression)
+
+    elif strategy == "exponential":
+        base = np.logspace(-6, 0, 25)
+        lr_candidates = base ** (1 - 0.5 * aggression) * (1 + aggression)
+
+    elif strategy == "linear":
+        start = 1e-5
+        stop = 1.0 * (1 + 4 * aggression)
+        lr_candidates = np.linspace(start, stop, 25)
+
+    elif strategy == "adaptive":
+        base = np.logspace(-6, -2, 25)
+        scale = np.clip(1.0 / (1.0 + grad_norm), 1e-4, 1.0)
+        lr_candidates = base * (1 + 10 * aggression) * scale
+
+    elif strategy == "momentum_boost":
+        base = np.logspace(-5, -1, 25)
+        boost = np.linspace(1.0, 1.0 + 9.0 * aggression, 25)
+        lr_candidates = base * boost
+
+    elif strategy == "poly_decay":
+        base = np.linspace(1e-3, 1.0, 25)
+        power = 1.0 + 2.5 * aggression
+        lr_candidates = (base ** power) * (0.5 + aggression)
+        lr_candidates = np.clip(lr_candidates, 1e-5, None)
+
+    elif strategy == "random":
+        rng = np.random.default_rng(42)
+        lr_candidates = rng.uniform(1e-5, 1.0 * (1 + 4 * aggression), 25)
+
+    elif strategy == "bayes":
+        base = np.logspace(-3, 2, 25)
+        prior = np.linspace(0.1, 1.0, 25)
+        lr_candidates = base * (prior ** (1 - aggression)) * (1 + aggression)
+
+    # ---------------------------------------------------------------------
+    # Aggression-based fine tuning of range
+    # ---------------------------------------------------------------------
     def scale_range(base, lo_exp=-6, hi_exp=2):
-        """Generate log-scaled range influenced by aggression."""
         lo = lo_exp + aggression * (hi_exp - lo_exp) * 0.7
         hi = hi_exp + aggression * (hi_exp - lo_exp) * 0.3
         return np.logspace(lo, hi, len(base))
 
     if strategy in ["armijo", "armijo_aggressive"]:
-        # Armijo uses logspace but aggression shifts range upward
         lr_candidates = scale_range(lr_candidates, -4, 1 if strategy == "armijo" else 2)
-
     elif strategy == "grid":
         lr_candidates = scale_range(lr_candidates, -6, 1 + 2 * aggression)
-
     elif strategy == "exponential":
-        # Broaden exponential ramp with aggression
         exp_range = np.linspace(-6 + 2 * aggression, aggression, len(lr_candidates))
         lr_candidates = 10 ** exp_range
-
     elif strategy == "linear":
-        # Linearly spaced between 1e-5 and aggression-scaled max
         max_lr = 0.1 + aggression * 10.0
         lr_candidates = np.linspace(1e-5, max_lr, len(lr_candidates))
-
     elif strategy == "random":
-        # Aggression controls randomness amplitude
         rng = np.random.default_rng(42)
         lr_candidates = rng.random(len(lr_candidates)) ** (1.0 - aggression)
         lr_candidates *= 10 ** (2 * aggression - 1)
-
     elif strategy == "adaptive":
-        # Aggression *increases* learning rate proportional to gradient magnitude
         base_scale = np.clip(grad_norm / (1e-3 + abs(f_ref)), 1e-4, 1e4)
-        # Make higher aggression lead to larger step sizes
         scale_factor = (base_scale ** (0.5 + aggression)) * (10 ** (2 * aggression))
         lr_candidates = np.logspace(-6, 0, len(lr_candidates)) * scale_factor
         lr_candidates = np.clip(lr_candidates, 1e-8, 1e3)
-
     elif strategy == "momentum_boost":
-        # Base linear spacing, mild log scaling with aggression
         base_lr = np.linspace(1e-5, 1e-4, len(lr_candidates))
         lr_candidates = base_lr * (1.0 + aggression * np.linspace(0.0, 10.0, len(lr_candidates)))
-
     elif strategy == "entropy":
-        # Stable entropy proxy (normalized gradient energy)
         ent = np.log1p(grad_norm) / (np.log1p(abs(f_ref)) + 1e-12)
         ent_scale = float(np.clip(ent, 0.1, 5.0))
-
-        # Base LR schedule (mild exponential sweep)
         base_lrs = np.logspace(-5, 0, len(lr_candidates))
-
-        # Aggression controls exponential amplification in a strictly monotonic way
-        # Using smooth polynomial-exponential blend for predictable behavior
         scale_factor = (1 + aggression * ent_scale) ** (1 + aggression * 2.0)
-
-        lr_candidates = base_lrs * scale_factor
-
-        # Explicit monotonic enforcement for safety
-        lr_candidates = np.maximum.accumulate(lr_candidates)
-
+        lr_candidates = np.maximum.accumulate(base_lrs * scale_factor)
     elif strategy == "poly_decay":
-        # Polynomially increasing range
-        lr_candidates = (np.linspace(0.0, 1.0, len(lr_candidates)) ** (1.0 - aggression)) * (10 ** (2 * aggression))
-
+        lr_candidates = (
+            np.linspace(0.0, 1.0, len(lr_candidates)) ** (1.0 - aggression)
+        ) * (10 ** (2 * aggression))
     elif strategy == "bayes":
-        # Simulate Bayesian sampling by weighting low-energy LRs
         rng = np.random.default_rng(7)
         priors = np.exp(-np.linspace(0, 5, len(lr_candidates)))
         weights = priors ** (1.0 - aggression) + rng.normal(0, 0.05, len(lr_candidates))
@@ -463,35 +436,43 @@ def estimate_learning_rate_for_nsa_flow(
         weights /= np.sum(weights)
         lr_candidates = np.cumsum(weights) * (10 ** (1 + 2 * aggression))
 
-    else:
-        raise ValueError(f"Unknown strategy: {strategy}")
-    
-    losses, rel_changes = [], []
+    # --- Final safety clamp ---
+    lr_candidates = np.clip(lr_candidates, 1e-8, 1e3)
+    lr_candidates = np.unique(np.sort(lr_candidates))
 
-    # --- Evaluate all ---
+    # ---------------------------------------------------------------------
+    # Evaluate energies
+    # ---------------------------------------------------------------------
+    losses, rel_changes = [], []
     for lr in lr_candidates:
         Y_try = Y_ref - lr * grad_ref
         f_new = safe_energy(Y_try)
-        if not np.isfinite(f_new):
-            f_new = np.nan
-        losses.append(f_new)
+        losses.append(np.nan if not np.isfinite(f_new) else f_new)
         rel_changes.append((f_ref - f_new) / (abs(f_ref) + 1e-12))
 
-    losses = np.array(losses, dtype=float)
-    rel_changes = np.array(rel_changes, dtype=float)
-
-    # --- Filter out invalid entries ---
+    losses = np.array(losses)
+    rel_changes = np.array(rel_changes)
     valid_mask = np.isfinite(losses)
+
     if not np.any(valid_mask):
         if verbose:
             print("⚠️ All candidate losses invalid — defaulting to conservative LR.")
-        return {"best_lr": 1e-3, "best_energy": np.nan, "strategy": strategy, "aggression": aggression}
+        return {
+            "best_lr": 1e-3,
+            "best_energy": np.nan,
+            "strategy": strategy,
+            "aggression": aggression,
+        }
 
-    lr_candidates = lr_candidates[valid_mask]
-    losses = losses[valid_mask]
-    rel_changes = rel_changes[valid_mask]
+    lr_candidates, losses, rel_changes = (
+        lr_candidates[valid_mask],
+        losses[valid_mask],
+        rel_changes[valid_mask],
+    )
 
-    # --- Strategy selection ---
+    # ---------------------------------------------------------------------
+    # Strategy-specific best LR selection
+    # ---------------------------------------------------------------------
     best_lr = None
     if strategy in ["armijo", "armijo_aggressive"]:
         c = (1e-4 + 5e-3 * aggression) if strategy == "armijo_aggressive" else (1e-4 + 1e-3 * aggression)
@@ -505,9 +486,7 @@ def estimate_learning_rate_for_nsa_flow(
         safe_losses = np.where(np.isfinite(losses), losses, np.nanmean(losses))
         exp_vals = np.exp(-safe_losses / (np.nanstd(safe_losses) + 1e-8))
         exp_vals[np.isnan(exp_vals)] = 0
-        if exp_vals.sum() == 0:
-            exp_vals = np.ones_like(exp_vals) / len(exp_vals)
-        probs = exp_vals / exp_vals.sum()
+        probs = exp_vals / (np.sum(exp_vals) + 1e-12)
         idx = np.random.choice(len(lr_candidates), p=probs)
         best_lr = float(lr_candidates[idx])
 
@@ -518,15 +497,15 @@ def estimate_learning_rate_for_nsa_flow(
         scores = exp_improve / denom
         scores[~np.isfinite(scores)] = -np.inf
         best_lr = float(lr_candidates[np.argmax(scores)])
-
     else:
         best_lr = float(lr_candidates[np.argmin(losses)])
 
-    # --- Verbose logging ---
+    # ---------------------------------------------------------------------
+    # Reporting & plotting
+    # ---------------------------------------------------------------------
     if verbose:
         print(f"[LR-Est] {strategy:<16} | agg={aggression:.2f} | best_lr={best_lr:.3e} | minE={np.nanmin(losses):.3e}")
 
-    # --- Optional plotting ---
     if plot:
         import matplotlib.pyplot as plt
         plt.figure(figsize=(6, 4))
@@ -1931,3 +1910,477 @@ def test_lr_aggression_monotonicity(verbose=True, plot=False):
 
     print("✅ All strategies tested for monotonicity.")
     return results
+
+
+
+def run_single_experiment(
+    size=[50,10],
+    w=0.5,
+    strategy='auto',
+    optimizer_name='lars',
+    aggression=0.5,
+    fidelity_type="scale_invariant",
+    orth_type="scale_invariant",
+    device="cpu",
+    seed=42,
+    verbose=False,
+):
+    """
+    Run a single NSA-Flow optimization with given configuration and aggression level.
+    Returns summary dict of results including fidelity and orth energies.
+    """
+    import torch, numpy as np, time
+    torch.manual_seed(seed + int(aggression * 1000))
+    np.random.seed(seed + int(aggression * 1000))
+
+    p, k = size
+    X0 = torch.randn(p, k, device=device)
+    Y0 = torch.randn_like(X0)
+
+    try:
+        t0 = time.time()
+        res = nsa_flow_autograd(
+            Y0,
+            X0=X0,
+            w=w,
+            retraction="soft_polar",
+            optimizer=optimizer_name,
+            lr_strategy=strategy,
+            aggression=aggression,
+            max_iter=200,
+            tol=1e-5,
+            verbose=verbose,
+            apply_nonneg=True,
+            seed=seed,
+            record_every=10,
+            precision="float32",
+        )
+        elapsed = time.time() - t0
+
+        Y_final = res.get("Y", None)
+        if Y_final is None and "Y_final" in res:
+            Y_final = res["Y_final"]
+        if Y_final is not None:
+            energy_dict = compute_energy(
+                Y_final,
+                X0,
+                w=w,
+                fidelity_type=fidelity_type,
+                orth_type=orth_type,
+                fid_eta=1.0,
+                c_orth=1.0,
+                track_grad=False,
+                return_dict=True,
+            )
+            total_energy = energy_dict["total"]
+            fid_energy = energy_dict["fidelity"]
+            orth_energy = energy_dict["orthogonality"]
+        else:
+            total_energy = fid_energy = orth_energy = np.nan
+
+        best_iter = int(res.get("best_Y_iteration", np.nan))
+        success = True
+
+    except Exception as e:
+        total_energy = fid_energy = orth_energy = np.nan
+        best_iter = np.nan
+        elapsed = np.nan
+        success = False
+        print(f"⚠️ Failure: {strategy} / {optimizer_name} (agg={aggression:.2f}) — {e}")
+
+    return {
+        "size": f"{p}x{k}",
+        "w": w,
+        "strategy": strategy,
+        "optimizer": optimizer_name,
+        "aggression": aggression,
+        "fidelity_type": fidelity_type,
+        "orth_type": orth_type,
+        "final_energy": total_energy,
+        "total_energy": total_energy,
+        "fidelity_energy": fid_energy,
+        "orth_energy": orth_energy,
+        "best_iter": best_iter,
+        "elapsed_sec": elapsed,
+        "success": success,
+    }
+
+def evaluate(seed: int = 42, fast: bool = False, verbose: bool = True):
+    """
+    Comprehensive benchmark of NSA-Flow configurations.
+
+    Tests combinations of:
+    - learning rate estimation strategies
+    - optimizers
+    - aggression levels
+    - weighting parameter w
+    - matrix sizes
+    - fidelity and orthogonality energy types
+
+    Returns
+    -------
+    pd.DataFrame
+        Results of all experiments with metrics and rankings.
+    """
+    import time
+    import torch
+    import numpy as np
+    import pandas as pd
+    import nsa_flow
+
+    # ------------------------------------------------------------------
+    # Setup reproducibility
+    # ------------------------------------------------------------------
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    # ------------------------------------------------------------------
+    # Experimental configuration
+    # ------------------------------------------------------------------
+    strategies = nsa_flow.get_lr_estimation_strategies()
+    optimizers = nsa_flow.get_torch_optimizer(return_list=True)
+    optimizers = [opt for opt in optimizers if opt.lower() not in ["test", "none"]]
+    aggressions = [0.0, 0.25, 0.5, 0.75, 1.0]
+    ws = [0.01, 0.1, 0.25, 0.5, 0.9, 0.99]
+    matrix_sizes = [(20, 5), (50, 10), (100, 20), (200, 40), (40, 200)]
+
+    if fast == 1:
+        optimizers = ["lars", "adam"]
+        matrix_sizes = [(50, 10), (20, 50)]
+        ws = [0.02, 0.2, 0.5, 0.9]
+        aggressions = [0.25, 0.5, 0.75]
+        strategies = ["auto", "armijo_aggressive", "armijo", "bayes"]
+    elif fast == 2:
+        optimizers = ["lars" ]
+        matrix_sizes = [(50, 10)]
+        ws = [ 0.5, 0.9]
+        aggressions = [ 0.5, 0.75 ]
+        strategies = ["armijo", "bayes"]
+
+
+    fidelity_types = ["basic", "scale_invariant", "symmetric"]
+    orth_types = ["basic", "scale_invariant"]
+
+    all_results = []
+
+    # ✅ include w in total job count
+    total_jobs = (
+        len(strategies)
+        * len(optimizers)
+        * len(aggressions)
+        * len(ws)
+        * len(matrix_sizes)
+        * len(fidelity_types)
+        * len(orth_types)
+    )
+
+    print(f"🔍 Evaluating {total_jobs} configurations...\n")
+
+    job = 0
+    t0 = time.time()
+
+    # ------------------------------------------------------------------
+    # Main experiment loop
+    # ------------------------------------------------------------------
+    for size in matrix_sizes:
+        for strategy in strategies:
+            for optimizer_name in optimizers:
+                for agg in aggressions:
+                    for fid_type in fidelity_types:
+                        for orth_type in orth_types:
+                            for w in ws:
+                                job += 1
+                                if verbose:
+                                    print(
+                                        f"[{job:5d}/{total_jobs}] size={size}, strat={strategy}, "
+                                        f"opt={optimizer_name}, agg={agg:.2f}, "
+                                        f"fid={fid_type}, orth={orth_type}, w={w}"
+                                    )
+
+                                try:
+                                    # ✅ Pass w into run_single_experiment
+                                    res = run_single_experiment(
+                                        size=size,
+                                        w=w,
+                                        strategy=strategy,
+                                        optimizer_name=optimizer_name,
+                                        aggression=agg,
+                                        fidelity_type=fid_type,
+                                        orth_type=orth_type,
+                                        seed=seed,
+                                    )
+
+                                    # ✅ Ensure energies are computed if missing
+                                    if "fidelity_energy" not in res or "orth_energy" not in res:
+                                        Y_final = res.get("Y_final", None)
+                                        X0 = res.get("X0", None)
+                                        if Y_final is not None and X0 is not None:
+                                            e_total, e_fid, e_orth = nsa_flow.compute_energy_components(
+                                                Y_final,
+                                                X0,
+                                                w=w,
+                                                fid_eta=res.get("fid_eta", 1.0),
+                                                c_orth=res.get("c_orth", 1.0),
+                                                fidelity_type=fid_type,
+                                                orth_type=orth_type,
+                                            )
+                                            res["fidelity_energy"] = e_fid
+                                            res["orth_energy"] = e_orth
+                                            res["total_energy"] = e_total
+
+                                    # ✅ Record metadata cleanly
+                                    res.update(
+                                        dict(
+                                            size=size,
+                                            w=w,
+                                            strategy=strategy,
+                                            optimizer=optimizer_name,
+                                            aggression=agg,
+                                            fidelity_type=fid_type,
+                                            orth_type=orth_type,
+                                            seed=seed,
+                                        )
+                                    )
+                                    all_results.append(res)
+
+                                except Exception as e:
+                                    if verbose:
+                                        print(
+                                            f"⚠️ Failure: {strategy}/{optimizer_name} "
+                                            f"(agg={agg}, w={w}) — {e}"
+                                        )
+                                    all_results.append(
+                                        dict(
+                                            size=size,
+                                            w=w,
+                                            strategy=strategy,
+                                            optimizer=optimizer_name,
+                                            aggression=agg,
+                                            fidelity_type=fid_type,
+                                            orth_type=orth_type,
+                                            error=str(e),
+                                        )
+                                    )
+
+    # ------------------------------------------------------------------
+    # Aggregate results
+    # ------------------------------------------------------------------
+    df = pd.DataFrame(all_results)
+
+    # ✅ Compute ranking metrics safely
+    if "total_energy" in df.columns:
+        df["rank_total"] = df["total_energy"].rank(method="dense", ascending=True)
+    if "fidelity_energy" in df.columns:
+        df["rank_fid"] = df["fidelity_energy"].rank(method="dense", ascending=True)
+    if "orth_energy" in df.columns:
+        df["rank_orth"] = df["orth_energy"].rank(method="dense", ascending=True)
+
+    elapsed_total = time.time() - t0
+    print(f"\n✅ Completed all {job} experiments in {elapsed_total/60:.2f} minutes.")
+
+    # ------------------------------------------------------------------
+    # Summary ranking
+    # ------------------------------------------------------------------
+    if "rank_total" in df.columns:
+        summary = (
+            df.groupby(["strategy", "optimizer", "fidelity_type", "orth_type", "w"])
+            .agg(
+                mean_total_energy=("total_energy", "mean"),
+                mean_rank=("rank_total", "mean"),
+                std_total_energy=("total_energy", "std"),
+                n=("total_energy", "count"),
+            )
+            .sort_values("mean_rank")
+        )
+        print("\n🏆 Top Performing Configurations:\n")
+        print(summary.head(10))
+
+    return df
+
+
+def plot_evaluation_summary(df, save_dir=None, timestamp=None, show_plots=True):
+    """
+    Generate and optionally save detailed summary visualizations for NSA-Flow evaluation results.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame output from `evaluate()`, expected to include:
+        ['strategy', 'optimizer', 'aggression', 'total_energy', 'w', 'error']
+    save_dir : str, optional
+        Directory where plots and summary CSVs will be saved.
+    timestamp : str, optional
+        Timestamp to append to saved filenames.
+    show_plots : bool, default=True
+        Whether to display plots interactively.
+    """
+    import os
+    import numpy as np
+    import pandas as pd
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+
+    os.makedirs(save_dir, exist_ok=True) if save_dir else None
+
+    # ------------------------------------------------------------------
+    # Filter successful runs
+    # ------------------------------------------------------------------
+    if "error" in df.columns:
+        df_plot = df[df["error"].isna()].copy()
+    else:
+        df_plot = df.copy()
+
+    df_plot = df_plot[df_plot["total_energy"].notna() & np.isfinite(df_plot["total_energy"])]
+
+    # ------------------------------------------------------------------
+    # Summary table: Top configurations
+    # ------------------------------------------------------------------
+    summary = (
+        df_plot.groupby(["strategy", "optimizer", "w"])
+        .agg(
+            mean_total=("total_energy", "mean"),
+            std_total=("total_energy", "std"),
+            n=("total_energy", "count"),
+        )
+        .reset_index()
+        .sort_values("mean_total", ascending=True)
+    )
+    print("\n🏆 Top 10 Configurations by Mean Total Energy:\n")
+    print(summary.head(10).to_string(index=False, float_format="%.4e"))
+
+    if save_dir:
+        summary_csv = f"{save_dir}/summary_ranking_{timestamp or ''}.csv"
+        summary.to_csv(summary_csv, index=False)
+        print(f"💾 Saved ranking summary: {summary_csv}")
+
+    # ------------------------------------------------------------------
+    # Heatmap 1: Strategy × Aggression
+    # ------------------------------------------------------------------
+    plt.figure(figsize=(10, 6))
+    pivot_strat = (
+        df_plot.groupby(["strategy", "aggression"])["total_energy"].mean().unstack()
+    )
+    sns.heatmap(pivot_strat, annot=True, fmt=".2e", cmap="viridis", cbar_kws={"label": "Mean Total Energy"})
+    plt.title("NSA-Flow: Strategy vs Aggression (Mean Total Energy)")
+    plt.ylabel("Strategy")
+    plt.xlabel("Aggression Level")
+    plt.tight_layout()
+    if save_dir:
+        fname = f"{save_dir}/heatmap_strategy_vs_aggression_{timestamp or ''}.png"
+        plt.savefig(fname, dpi=300)
+        print(f"💾 Saved: {fname}")
+    if show_plots:
+        plt.show()
+    plt.close()
+
+    # ------------------------------------------------------------------
+    # Heatmap 2: Optimizer × Aggression
+    # ------------------------------------------------------------------
+    plt.figure(figsize=(10, 6))
+    pivot_opt = (
+        df_plot.groupby(["optimizer", "aggression"])["total_energy"].mean().unstack()
+    )
+    sns.heatmap(pivot_opt, annot=True, fmt=".2e", cmap="magma", cbar_kws={"label": "Mean Total Energy"})
+    plt.title("NSA-Flow: Optimizer vs Aggression (Mean Total Energy)")
+    plt.ylabel("Optimizer")
+    plt.xlabel("Aggression Level")
+    plt.tight_layout()
+    if save_dir:
+        fname = f"{save_dir}/heatmap_optimizer_vs_aggression_{timestamp or ''}.png"
+        plt.savefig(fname, dpi=300)
+        print(f"💾 Saved: {fname}")
+    if show_plots:
+        plt.show()
+    plt.close()
+
+    # ------------------------------------------------------------------
+    # Heatmap 3: Strategy × Weight (w)
+    # ------------------------------------------------------------------
+    if "w" in df_plot.columns:
+        plt.figure(figsize=(10, 6))
+        pivot_w = df_plot.groupby(["strategy", "w"])["total_energy"].mean().unstack()
+        sns.heatmap(pivot_w, annot=True, fmt=".2e", cmap="plasma", cbar_kws={"label": "Mean Total Energy"})
+        plt.title("NSA-Flow: Strategy vs Weight (w)")
+        plt.ylabel("Strategy")
+        plt.xlabel("Weight (w)")
+        plt.tight_layout()
+        if save_dir:
+            fname = f"{save_dir}/heatmap_strategy_vs_w_{timestamp or ''}.png"
+            plt.savefig(fname, dpi=300)
+            print(f"💾 Saved: {fname}")
+        if show_plots:
+            plt.show()
+        plt.close()
+
+    # ------------------------------------------------------------------
+    # Faceted plot: Energy vs Aggression (by Optimizer × Strategy)
+    # ------------------------------------------------------------------
+    g = sns.FacetGrid(df_plot, col="optimizer", row="strategy", margin_titles=True, sharey=False)
+    g.map_dataframe(sns.lineplot, x="aggression", y="total_energy", hue="w", marker="o")
+    g.add_legend(title="Weight (w)")
+    g.set_axis_labels("Aggression", "Total Energy")
+    g.fig.subplots_adjust(top=0.9)
+    g.fig.suptitle("NSA-Flow: Total Energy vs Aggression (Faceted by Optimizer × Strategy)")
+    if save_dir:
+        fname = f"{save_dir}/facet_energy_vs_aggression_{timestamp or ''}.png"
+        g.savefig(fname, dpi=300)
+        print(f"💾 Saved: {fname}")
+    if show_plots:
+        plt.show()
+    plt.close()
+
+    # ------------------------------------------------------------------
+    # Line plot: Energy vs Aggression (Top Strategies)
+    # ------------------------------------------------------------------
+    mean_energy = df_plot.groupby(["strategy", "aggression"])["total_energy"].mean().reset_index()
+    top_strats = mean_energy.groupby("strategy")["total_energy"].mean().nsmallest(5).index
+
+    plt.figure(figsize=(8, 5))
+    for strat in top_strats:
+        subset = mean_energy[mean_energy["strategy"] == strat]
+        plt.plot(subset["aggression"], subset["total_energy"], "-o", label=strat)
+    plt.xlabel("Aggression Level")
+    plt.ylabel("Mean Total Energy")
+    plt.title("Top Strategies: Energy vs Aggression")
+    plt.legend()
+    plt.tight_layout()
+    if save_dir:
+        fname = f"{save_dir}/lineplot_top_strategies_{timestamp or ''}.png"
+        plt.savefig(fname, dpi=300)
+        print(f"💾 Saved: {fname}")
+    if show_plots:
+        plt.show()
+    plt.close()
+
+    # ------------------------------------------------------------------
+    # Line plot: Energy vs Weight (Top Optimizers)
+    # ------------------------------------------------------------------
+    if "w" in df_plot.columns:
+        mean_w = df_plot.groupby(["optimizer", "w"])["total_energy"].mean().reset_index()
+        top_opts = mean_w.groupby("optimizer")["total_energy"].mean().nsmallest(5).index
+        plt.figure(figsize=(8, 5))
+        for opt in top_opts:
+            subset = mean_w[mean_w["optimizer"] == opt]
+            plt.plot(subset["w"], subset["total_energy"], "-o", label=opt)
+        plt.xlabel("Weight (w)")
+        plt.ylabel("Mean Total Energy")
+        plt.title("Top Optimizers: Energy vs Weight")
+        plt.legend()
+        plt.tight_layout()
+        if save_dir:
+            fname = f"{save_dir}/lineplot_top_optimizers_vs_w_{timestamp or ''}.png"
+            plt.savefig(fname, dpi=300)
+            print(f"💾 Saved: {fname}")
+        if show_plots:
+            plt.show()
+        plt.close()
+
+    # ------------------------------------------------------------------
+    # Save cleaned data summary
+    # ------------------------------------------------------------------
+    if save_dir:
+        clean_csv = f"{save_dir}/cleaned_results_{timestamp or ''}.csv"
+        df_plot.to_csv(clean_csv, index=False)
+        print(f"💾 Saved cleaned result data: {clean_csv}")
+
+    print("✅ All summary plots and rankings generated successfully.")

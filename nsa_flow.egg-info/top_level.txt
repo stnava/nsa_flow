@@ -1,1 +1,4 @@
+build
+dist
 nsa_flow
+tests
