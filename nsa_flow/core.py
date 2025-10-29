@@ -2039,8 +2039,8 @@ def evaluate(seed: int = 42, fast: bool = False, verbose: bool = True):
     matrix_sizes = [(20, 5), (50, 10), (100, 20), (200, 40), (40, 200)]
 
     if fast == 1:
-        optimizers = ["lars", "nadam", "asgd", "lookahead"]
-        matrix_sizes = [(50, 20), (20, 50), (100,400)]
+        optimizers = ["lars",  "asgd" ]
+        matrix_sizes = [(50, 20), (20, 50)]# , (100,400)]
         ws = [0.05, 0.25, 0.5, 0.7, 0.9]
         aggressions = [0.1,0.25, 0.5, 0.75]
         strategies = ["random", "armijo_aggressive", "armijo", "bayes"]
@@ -2548,6 +2548,10 @@ class SmallRegressor(nn.Module):
         self.use_flow = use_flow
         self.net = nn.Sequential(
             nn.Linear(in_dim, hid_dim),
+            nn.ReLU(),
+            nn.Linear(in_dim, hid_dim*2),
+            nn.ReLU(),
+            nn.Linear(hid_dim*2, hid_dim),
             nn.ReLU(),
             nn.Linear(hid_dim, out_dim)
         )
