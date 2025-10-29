@@ -1,14 +1,14 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=68.0.0,<69.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "nsa_flow"
-version = "0.7.7"
+version = "0.8.0"
 description = "Non-negative Stiefel Approximating Flow for interpretable representation learning"
 readme = "README.md"
 requires-python = ">=3.9"
-license = "MIT"
+license = { text = "MIT" }
 authors = [
   { name = "B. Avants", email = "stnava@example.com" }
 ]
