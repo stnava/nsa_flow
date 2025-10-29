@@ -64,9 +64,18 @@ def main():
     print("=" * 80)
 
     modules = discover_submodules(PACKAGE_NAME)
-    all_tests = []
+    tests = {}
     for mod in modules:
-        all_tests.extend(find_test_functions(mod))
+        for name, func in find_test_functions(mod):
+            if not isinstance(func, types.FunctionType):
+                continue  # Skip non-function callables if needed
+            key = (func.__module__, func.__name__)
+            if key not in tests:
+                # Use fully qualified name for clarity
+                qualified_name = f"{func.__module__}.{func.__name__}"
+                tests[key] = (qualified_name, func)
+
+    all_tests = list(tests.values())
 
     print(f"✅ Found {len(all_tests)} test functions.")
     print("-" * 80)

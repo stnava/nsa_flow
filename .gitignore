@@ -146,6 +146,7 @@ nsa_flow.egg-info/SOURCES.txt
 nsa_flow.egg-info/requires.txt
 nsa_flow/__pycache__/__init__.cpython-311.pyc
 nsa_flow/__pycache__/core.cpython-311.pyc
+nsa_flow.egg-info/top_level.txt
 
 # Pyre type checker
 .pyre/
