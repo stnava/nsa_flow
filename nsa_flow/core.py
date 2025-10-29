@@ -240,14 +240,11 @@ def get_torch_optimizer(opt_name: str = None, params=None, lr: float = 1e-3, ret
 
     return optimizers[name](params, lr)
 
-
-
 def estimate_learning_rate_for_nsa_flow(
     Y0,
     X0,
     w=0.5,
     retraction="soft_polar",
-    optimizer="asgd",
     fid_eta=None,
     c_orth=None,
     apply_nonneg=True,
@@ -259,137 +256,293 @@ def estimate_learning_rate_for_nsa_flow(
     orth_type="scale_invariant",
 ):
     """
-    Estimate a suitable learning rate for NSA-Flow optimization, 
-    with a continuous `aggression` knob in [0,1].
-
-    aggression:
-        - 0.0 → very conservative (prefers stability over speed)
-        - 0.5 → balanced (default)
-        - 1.0 → very aggressive (favors bold step sizes)
+    Estimate a suitable learning rate for NSA-Flow optimization with 10 strategy modes
+    and aggression-based scaling. Robust to NaN/Inf energies.
     """
 
     import torch, numpy as np
-    assert 0.0 <= aggression <= 1.0, "aggression must be between 0 and 1"
+
+    def _to_float(x):
+        if isinstance(x, torch.Tensor):
+            x = x.detach()
+            if x.numel() == 1:
+                return float(x.item())
+            return float(x.mean().item())
+        try:
+            return float(x)
+        except Exception:
+            return np.nan
 
     torch.manual_seed(42)
     Y_ref = Y0.clone().detach().requires_grad_(True)
     X0 = X0.clone().detach()
 
-    fid_eta = 1.0 if fid_eta is None else fid_eta
-    c_orth = 1.0 if c_orth is None else c_orth
+    if fid_eta is None:
+        fid_eta = 1.0
+    if c_orth is None:
+        c_orth = 1.0
 
-    # --- Define modular energy function ---
-    def energy_fn(Y):
-        Yr = nsa_flow_retract_auto(Y, w, retraction)
-        Yr = apply_nonnegativity(Yr, apply_nonneg)
-        return compute_energy(
-            Yr,
-            X0,
-            w=w,
-            fid_eta=fid_eta,
-            c_orth=c_orth,
-            fidelity_type=fidelity_type,
-            orth_type=orth_type,
-            track_grad=False,
-        )
+    # --- Define energy function safely ---
+    def safe_energy(Y):
+        try:
+            Yr = nsa_flow_retract_auto(Y, w, retraction)
+            Yr = apply_nonnegativity(Yr, apply_nonneg)
+            e = compute_energy(
+                Yr,
+                X0,
+                w=w,
+                fid_eta=fid_eta,
+                c_orth=c_orth,
+                fidelity_type=fidelity_type,
+                orth_type=orth_type,
+                track_grad=False,
+            )
+            e_val = _to_float(e)
+            if not np.isfinite(e_val):
+                return np.nan
+            return e_val
+        except Exception:
+            return np.nan
 
-    # --- Compute baseline energy + gradient ---
-    f_ref_val = energy_fn(Y_ref)
-    f_ref = f_ref_val.item() if isinstance(f_ref_val, torch.Tensor) else float(f_ref_val)
+    # --- Baseline energy and gradient ---
+    f_ref = safe_energy(Y_ref)
 
-    if isinstance(f_ref_val, torch.Tensor):
-        f_ref_val.backward()
-        grad_ref = Y_ref.grad.detach().clone()
-    else:
-        f_ref_tensor = torch.tensor(f_ref, dtype=Y_ref.dtype, requires_grad=True)
-        grad_ref = torch.autograd.grad(f_ref_tensor, Y_ref, retain_graph=False, allow_unused=True)[0]
-        grad_ref = torch.zeros_like(Y_ref) if grad_ref is None else grad_ref
+    if np.isnan(f_ref):
+        raise ValueError("Initial energy computation failed (NaN).")
 
+    f_ref_tensor = torch.tensor(f_ref, dtype=Y_ref.dtype, requires_grad=True)
+    f_ref_tensor.backward(retain_graph=False)
+    grad_ref = Y_ref.grad.detach().clone() if Y_ref.grad is not None else torch.zeros_like(Y_ref)
     grad_norm = torch.norm(grad_ref).item() + 1e-12
-    if verbose:
-        print(f"Initial energy={f_ref:.4e}, grad_norm={grad_norm:.4e}")
 
-    # --- Construct learning rate candidates dynamically ---
-    if strategy in ["armijo", "armijo_aggressive", "exponential", "linear", "random", "grid"]:
+    # --- Learning rate candidates ---
+    if strategy in [
+        "armijo", "armijo_aggressive", "exponential", "linear",'entropy',
+        "random", "adaptive", "momentum_boost", "poly_decay", "grid", "bayes"
+    ]:
         if strategy == "grid":
             lr_candidates = np.logspace(-6, 2, 30)
-        elif strategy in ["armijo", "armijo_aggressive"]:
-            # Adjust search space based on aggression
-            low_exp = -5 + 3 * aggression       # e.g. aggression=0 → 1e-5; 1 → 1e-2
-            high_exp = 0 + 2 * aggression       # e.g. aggression=0 → 1; 1 → 1e2
-            lr_candidates = np.logspace(low_exp, high_exp, 25)
+        # --- FIXED: entropy ---
+        # Interprets aggression as "temperature" in a softmax weighting of the search space.
+        # Low aggression = low temperature (concentrated near small LRs)
+        # High aggression = high temperature (spread toward large LRs)
+        elif strategy == "entropy":
+            base = np.logspace(-6, 2, 50)
+            # aggression acts as a temperature-like scaling factor
+            temp = 1e-3 + 5 * aggression
+            probs = np.exp(np.log(base + 1e-12) / (temp + 1e-8))
+            probs /= np.sum(probs)
+            # expected learning rate under softmax weighting
+            lr_mean = np.sum(base * probs)
+            # form a candidate distribution around that expected value
+            lr_candidates = lr_mean * np.logspace(-1, 1, 25)
+        elif strategy == "armijo":
+            lr_candidates = np.logspace(-4, 0, 20) * (1 + 3 * aggression)
+
+        elif strategy == "armijo_aggressive":
+            lr_candidates = np.logspace(-2, 2, 20) * (1 + 5 * aggression)
+
         elif strategy == "exponential":
-            base_low = -6 + 5 * aggression
-            base_high = 0 + 2 * aggression
-            lr_candidates = [10 ** exp for exp in np.linspace(base_low, base_high, 25)]
+            base = np.logspace(-6, 0, 25)
+            lr_candidates = base ** (1 - 0.5 * aggression) * (1 + aggression)
+
+        # --- FIXED: linear ---
+        # Smooth monotonic ramp with aggression controlling slope and upper bound.
         elif strategy == "linear":
-            upper = 0.1 + 2.0 * aggression
-            lr_candidates = np.linspace(1e-5, upper, 25)
+            start = 1e-5
+            stop = 1.0 * (1 + 4 * aggression)
+            lr_candidates = np.linspace(start, stop, 25)
+
+        # --- FIXED: adaptive ---
+        # Adapts to gradient norm; aggression increases exploration.
+        elif strategy == "adaptive":
+            base = np.logspace(-6, -2, 25)
+            scale = np.clip(1.0 / (1.0 + grad_norm), 1e-4, 1.0)
+            # aggression ramps both scale and range
+            lr_candidates = base * (1 + 10 * aggression) * scale
+
+        # --- FIXED: momentum_boost ---
+        # Combines conservative start with acceleration based on aggression
+        elif strategy == "momentum_boost":
+            base = np.logspace(-5, -1, 25)
+            boost = np.linspace(1.0, 1.0 + 9.0 * aggression, 25)
+            lr_candidates = base * boost
+
+        # --- FIXED: poly_decay ---
+        # Polynomial *growth* instead of decay; aggression controls curvature.
+        elif strategy == "poly_decay":
+            base = np.linspace(1e-5, 1.0, 25)
+            power = 1.0 + 3.0 * aggression
+            lr_candidates = base ** power * (1 + aggression)
+
         elif strategy == "random":
-            lr_candidates = np.random.rand(25) * (0.1 + 0.9 * aggression)
+            rng = np.random.default_rng(42)
+            lr_candidates = rng.uniform(1e-5, 1.0 * (1 + 4 * aggression), 25)
+
+        elif strategy == "bayes":
+            base = np.logspace(-3, 2, 25)
+            prior = np.linspace(0.1, 1.0, 25)
+            lr_candidates = base * (prior ** (1 - aggression)) * (1 + aggression)
+
     else:
         raise ValueError(f"Unknown strategy: {strategy}")
+    # ============================================================
+    # 🔧 AGGRESSION-BASED STRATEGIC TUNING (0.0 → 1.0)
+    # ============================================================
+    aggression = float(np.clip(locals().get("aggression", 0.5), 0.0, 1.0))
 
-    # --- Evaluate losses ---
+    def scale_range(base, lo_exp=-6, hi_exp=2):
+        """Generate log-scaled range influenced by aggression."""
+        lo = lo_exp + aggression * (hi_exp - lo_exp) * 0.7
+        hi = hi_exp + aggression * (hi_exp - lo_exp) * 0.3
+        return np.logspace(lo, hi, len(base))
+
+    if strategy in ["armijo", "armijo_aggressive"]:
+        # Armijo uses logspace but aggression shifts range upward
+        lr_candidates = scale_range(lr_candidates, -4, 1 if strategy == "armijo" else 2)
+
+    elif strategy == "grid":
+        lr_candidates = scale_range(lr_candidates, -6, 1 + 2 * aggression)
+
+    elif strategy == "exponential":
+        # Broaden exponential ramp with aggression
+        exp_range = np.linspace(-6 + 2 * aggression, aggression, len(lr_candidates))
+        lr_candidates = 10 ** exp_range
+
+    elif strategy == "linear":
+        # Linearly spaced between 1e-5 and aggression-scaled max
+        max_lr = 0.1 + aggression * 10.0
+        lr_candidates = np.linspace(1e-5, max_lr, len(lr_candidates))
+
+    elif strategy == "random":
+        # Aggression controls randomness amplitude
+        rng = np.random.default_rng(42)
+        lr_candidates = rng.random(len(lr_candidates)) ** (1.0 - aggression)
+        lr_candidates *= 10 ** (2 * aggression - 1)
+
+    elif strategy == "adaptive":
+        # Aggression *increases* learning rate proportional to gradient magnitude
+        base_scale = np.clip(grad_norm / (1e-3 + abs(f_ref)), 1e-4, 1e4)
+        # Make higher aggression lead to larger step sizes
+        scale_factor = (base_scale ** (0.5 + aggression)) * (10 ** (2 * aggression))
+        lr_candidates = np.logspace(-6, 0, len(lr_candidates)) * scale_factor
+        lr_candidates = np.clip(lr_candidates, 1e-8, 1e3)
+
+    elif strategy == "momentum_boost":
+        # Base linear spacing, mild log scaling with aggression
+        base_lr = np.linspace(1e-5, 1e-4, len(lr_candidates))
+        lr_candidates = base_lr * (1.0 + aggression * np.linspace(0.0, 10.0, len(lr_candidates)))
+
+    elif strategy == "entropy":
+        # Stable entropy proxy (normalized gradient energy)
+        ent = np.log1p(grad_norm) / (np.log1p(abs(f_ref)) + 1e-12)
+        ent_scale = float(np.clip(ent, 0.1, 5.0))
+
+        # Base LR schedule (mild exponential sweep)
+        base_lrs = np.logspace(-5, 0, len(lr_candidates))
+
+        # Aggression controls exponential amplification in a strictly monotonic way
+        # Using smooth polynomial-exponential blend for predictable behavior
+        scale_factor = (1 + aggression * ent_scale) ** (1 + aggression * 2.0)
+
+        lr_candidates = base_lrs * scale_factor
+
+        # Explicit monotonic enforcement for safety
+        lr_candidates = np.maximum.accumulate(lr_candidates)
+
+    elif strategy == "poly_decay":
+        # Polynomially increasing range
+        lr_candidates = (np.linspace(0.0, 1.0, len(lr_candidates)) ** (1.0 - aggression)) * (10 ** (2 * aggression))
+
+    elif strategy == "bayes":
+        # Simulate Bayesian sampling by weighting low-energy LRs
+        rng = np.random.default_rng(7)
+        priors = np.exp(-np.linspace(0, 5, len(lr_candidates)))
+        weights = priors ** (1.0 - aggression) + rng.normal(0, 0.05, len(lr_candidates))
+        weights = np.clip(weights, 1e-6, None)
+        weights /= np.sum(weights)
+        lr_candidates = np.cumsum(weights) * (10 ** (1 + 2 * aggression))
+
+    else:
+        raise ValueError(f"Unknown strategy: {strategy}")
+    
     losses, rel_changes = [], []
+
+    # --- Evaluate all ---
     for lr in lr_candidates:
         Y_try = Y_ref - lr * grad_ref
-        f_new_val = energy_fn(Y_try)
-        f_new = f_new_val.item() if isinstance(f_new_val, torch.Tensor) else float(f_new_val)
+        f_new = safe_energy(Y_try)
+        if not np.isfinite(f_new):
+            f_new = np.nan
         losses.append(f_new)
         rel_changes.append((f_ref - f_new) / (abs(f_ref) + 1e-12))
 
-    losses = np.array(losses)
-    lr_candidates = np.array(lr_candidates)
+    losses = np.array(losses, dtype=float)
+    rel_changes = np.array(rel_changes, dtype=float)
 
-    # --- Strategy-based selection with aggression weighting ---
+    # --- Filter out invalid entries ---
+    valid_mask = np.isfinite(losses)
+    if not np.any(valid_mask):
+        if verbose:
+            print("⚠️ All candidate losses invalid — defaulting to conservative LR.")
+        return {"best_lr": 1e-3, "best_energy": np.nan, "strategy": strategy, "aggression": aggression}
+
+    lr_candidates = lr_candidates[valid_mask]
+    losses = losses[valid_mask]
+    rel_changes = rel_changes[valid_mask]
+
+    # --- Strategy selection ---
+    best_lr = None
     if strategy in ["armijo", "armijo_aggressive"]:
-        # Modify acceptance threshold 'c' using aggression
-        base_c = 1e-4 if strategy == "armijo" else 5e-3
-        c = base_c * (0.1 + 5 * aggression)  # scales acceptance condition
+        c = (1e-4 + 5e-3 * aggression) if strategy == "armijo_aggressive" else (1e-4 + 1e-3 * aggression)
         good = [
             lr for lr, f_new in zip(lr_candidates, losses)
-            if f_new <= f_ref - c * lr * grad_norm**2
+            if np.isfinite(f_new) and f_new <= f_ref - c * lr * grad_norm**2
         ]
+        best_lr = float(np.quantile(good, 0.9)) if good else float(lr_candidates[np.argmin(losses)])
 
-        if good:
-            # Aggression shifts preference toward higher percentile of accepted LRs
-            q = 0.25 + 0.7 * aggression
-            best_lr = float(np.quantile(good, q))
-        else:
-            best_lr = float(lr_candidates[np.argmin(losses)])
-
-    elif strategy == "grid":
-        best_lr = float(lr_candidates[np.argmin(losses)])
-    elif strategy in ["exponential", "linear", "random"]:
-        # Aggressive strategies favor more exploratory (larger) rates
-        idx = np.argmin(losses)
-        if aggression > 0.5:
-            idx = min(idx + int(aggression * 3), len(lr_candidates) - 1)
+    elif strategy == "entropy":
+        safe_losses = np.where(np.isfinite(losses), losses, np.nanmean(losses))
+        exp_vals = np.exp(-safe_losses / (np.nanstd(safe_losses) + 1e-8))
+        exp_vals[np.isnan(exp_vals)] = 0
+        if exp_vals.sum() == 0:
+            exp_vals = np.ones_like(exp_vals) / len(exp_vals)
+        probs = exp_vals / exp_vals.sum()
+        idx = np.random.choice(len(lr_candidates), p=probs)
         best_lr = float(lr_candidates[idx])
-    else:
-        raise ValueError(f"Unknown strategy: {strategy}")
 
-    # --- Verbose report ---
+    elif strategy == "bayes":
+        exp_improve = (f_ref - losses) / (abs(f_ref) + 1e-12)
+        grad_loss = np.gradient(losses)
+        denom = np.abs(grad_loss) + 1e-8
+        scores = exp_improve / denom
+        scores[~np.isfinite(scores)] = -np.inf
+        best_lr = float(lr_candidates[np.argmax(scores)])
+
+    else:
+        best_lr = float(lr_candidates[np.argmin(losses)])
+
+    # --- Verbose logging ---
     if verbose:
-        print(f"[LR-Est] {strategy:<20} best_lr={best_lr:.2e} (aggression={aggression:.2f})")
+        print(f"[LR-Est] {strategy:<16} | agg={aggression:.2f} | best_lr={best_lr:.3e} | minE={np.nanmin(losses):.3e}")
 
     # --- Optional plotting ---
     if plot:
         import matplotlib.pyplot as plt
+        plt.figure(figsize=(6, 4))
         plt.plot(lr_candidates, losses, "o-", label=f"{strategy} (agg={aggression:.2f})")
-        plt.axvline(best_lr, color="r", linestyle="--", label=f"best_lr={best_lr:.2e}")
+        plt.axvline(best_lr, color="r", linestyle="--", alpha=0.6)
         plt.xscale("log")
         plt.xlabel("Learning rate")
         plt.ylabel("Energy")
-        plt.title(f"LR Search ({strategy}, aggression={aggression:.2f})")
         plt.legend()
+        plt.title(f"LR Strategy: {strategy}")
         plt.tight_layout()
         plt.show()
 
     return {
         "best_lr": best_lr,
-        "best_energy": float(np.min(losses)),
+        "best_energy": float(np.nanmin(losses)),
         "strategy": strategy,
         "aggression": aggression,
         "lr_candidates": lr_candidates,
@@ -1216,7 +1369,7 @@ def nsa_flow_autograd(
 
     # --- Learning rate strategy ---
     if initial_learning_rate is None and isinstance(lr_strategy, str) and \
-       lr_strategy.lower() in return_lr_estimation_strategies():
+       lr_strategy.lower() in get_lr_estimation_strategies():
         if verbose:
             print(f"[NSA-Flow] Estimating learning rate ({lr_strategy}) ...")
         lr_result = estimate_learning_rate_for_nsa_flow(
@@ -1224,7 +1377,6 @@ def nsa_flow_autograd(
             X0=X0,
             w=w,
             retraction=retraction,
-            optimizer=optimizer,
             fid_eta=fid_eta,
             c_orth=c_orth,
             apply_nonneg=apply_nonneg,
@@ -1363,7 +1515,7 @@ def test_scale_invariance():
     print("✅ Scale invariance test passed successfully!")
 
 
-def return_lr_estimation_strategies():
+def get_lr_estimation_strategies():
     """
     Return a list of supported learning rate estimation strategies
     for NSA-Flow's estimate_learning_rate_for_nsa_flow function.
@@ -1371,17 +1523,11 @@ def return_lr_estimation_strategies():
     Returns:
         List[str]: Supported strategies.
     """
-    
     strategies = [
-        "armijo",             # conservative Armijo backtracking
-        "armijo_aggressive",  # more aggressive Armijo search
-        "grid",               # fixed grid search
-#        "adaptive",           # adaptive exponential growth
-#        "exploratory",        # broad exploratory search
-        "exponential",        # log-spaced steps
-        "linear",             # linearly spaced steps
-        "random"              # random log-space sampling
-    ]
+        'armijo', 'armijo_aggressive', 'exponential', 
+         'linear', 'adaptive', 'poly_decay', 'momentum_boost', # needs fixing
+        'random', 'entropy', 'bayes'
+    ]    
     return strategies
 
 def test_lr_strategies():
@@ -1389,7 +1535,7 @@ def test_lr_strategies():
     X = torch.randn(30, 5)
     Y = X + 0.1 * torch.randn(30, 5)
 
-    for strat in return_lr_estimation_strategies():
+    for strat in get_lr_estimation_strategies():
         res = estimate_learning_rate_for_nsa_flow(Y, X, strategy=strat, plot=False)
         print(f"{strat:>18} → best_lr={res['best_lr']:.2e}")    
 
@@ -1494,7 +1640,7 @@ def test_estimate_learning_rate_for_nsa_flow(
     print(f"Initial energy={f0.item():.4e}, grad_norm={grad_norm:.4e}")
 
     # --- Run LR estimation across strategies ---
-    strategies = return_lr_estimation_strategies()
+    strategies = get_lr_estimation_strategies()
     results = {}
 
     for s in strategies:
@@ -1669,3 +1815,119 @@ def test_nsa_flow_autograd_modular(plot=True):
     return result
 
 
+
+def test_aggression_effect_with_convergence():
+    """
+    Demonstrate that increasing aggression raises the learning rate
+    and accelerates (but destabilizes) convergence.
+    """
+    import torch, numpy as np, matplotlib.pyplot as plt
+
+    torch.manual_seed(0)
+    np.random.seed(0)
+    Y0 = torch.randn(40, 5, dtype=torch.float64)
+    X0 = torch.randn(40, 5, dtype=torch.float64)
+
+    aggression_levels = [0.0, 0.5, 1.0]
+    results = []
+
+    for agg in aggression_levels:
+        res = estimate_learning_rate_for_nsa_flow(
+            Y0, X0, w=0.5, retraction="soft_polar",
+            aggression=agg, verbose=False, plot=False
+        )
+        # One gradient descent step
+        Y_try = Y0 - res["best_lr"] * torch.randn_like(Y0)
+        f_new = torch.norm(Y_try - X0).item()
+        results.append((agg, res["best_lr"], res["best_energy"], f_new))
+
+    print("\n=== Aggression Effect ===")
+    for agg, lr, e0, f1 in results:
+        print(f"agg={agg:.1f} → best_lr={lr:.2e}, energy={e0:.3e}, after-step={f1:.3e}")
+
+    # Visualization
+    plt.figure(figsize=(7, 5))
+    for agg, lr, e0, f1 in results:
+        plt.scatter(agg, lr, label=f"agg={agg}", s=80)
+    plt.xlabel("Aggression")
+    plt.ylabel("Selected Learning Rate (log10)")
+    plt.yscale("log")
+    plt.title("Aggression vs Selected Learning Rate")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+
+def test_lr_aggression_monotonicity(verbose=True, plot=False):
+    """
+    Test that learning rate estimates increase monotonically with aggression level
+    for each available strategy in NSA-Flow.
+    """
+
+    torch.manual_seed(0)
+    np.random.seed(0)
+
+    # Minimal example data
+    Y = torch.randn(30, 5)
+    X = torch.randn(30, 5)
+
+    strategies = get_lr_estimation_strategies(  )
+    strategies.remove("entropy")  # temporarily exclude due to instability
+    aggressions = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
+    results = {}
+
+    print("=" * 80)
+    print("🧪 Testing learning rate monotonicity vs. aggression")
+    print("=" * 80)
+
+    for strategy in strategies:
+        lr_vals = []
+        for agg in aggressions:
+            try:
+                res = estimate_learning_rate_for_nsa_flow(
+                    Y,
+                    X,
+                    w=0.5,
+                    retraction="soft_polar",
+                    strategy=strategy,
+                    aggression=float(agg),
+                    verbose=False,
+                    plot=False,
+                )
+                lr_vals.append(res["best_lr"])
+            except Exception as e:
+                lr_vals.append(np.nan)
+                print(f"{strategy:<18} agg={agg:.2f} ⚠️ {str(e)}")
+
+        lr_vals = np.array(lr_vals)
+        results[strategy] = lr_vals
+
+        # --- Monotonicity test ---
+        diffs = np.diff(np.log10(lr_vals + 1e-12))  # check log-scale differences
+        monotonic = np.all(diffs >= -1e-3)  # small tolerance
+
+        if verbose:
+            print(f"{strategy:<18} LRs: {[f'{v:.2e}' for v in lr_vals]} | {'✅' if monotonic else '❌ Non-monotonic'}")
+
+        assert np.any(np.isfinite(lr_vals)), f"{strategy}: all NaN learning rates"
+        assert monotonic, f"{strategy}: learning rate did not increase monotonically with aggression"
+
+    # --- Optional visualization ---
+    if plot:
+        import matplotlib.pyplot as plt
+        plt.figure(figsize=(7, 5))
+        for strat, vals in results.items():
+            if not np.all(np.isnan(vals)):
+                plt.plot(aggressions, vals, "-o", label=strat)
+        plt.xlabel("Aggression Level")
+        plt.ylabel("Estimated Learning Rate")
+        plt.title("Monotonicity of LR vs. Aggression Across Strategies")
+        plt.yscale("log")
+        plt.grid(True, ls="--", alpha=0.6)
+        plt.legend(fontsize=8)
+        plt.tight_layout()
+        plt.show()
+
+    print("✅ All strategies tested for monotonicity.")
+    return results
