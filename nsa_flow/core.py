@@ -82,6 +82,8 @@ def apply_nonnegativity(Y, mode="softplus"):
         return Y
     elif mode == "softplus":
         return F.softplus(Y)
+    elif mode == "relu":
+        return F.relu(Y)
     elif mode in [True, "hard", "Hard"]:
         return torch.clamp(Y, min=0.0)
     else:
@@ -115,13 +117,13 @@ def compute_energy(
 
     # --- Orthogonality term ---
     if orth_type == "basic":
-        orth = 0.25 * c_orth * torch.norm(Y.T @ Y - torch.eye(Y.shape[1], device=Y.device))**2
+        orth = c_orth * torch.norm(Y.T @ Y - torch.eye(Y.shape[1], device=Y.device))**2
     elif orth_type == "scale_invariant":
-        orth = 0.25 * c_orth * defect_fast(Y) 
+        orth = c_orth * defect_fast(Y) 
     else:
         raise ValueError(f"Unknown orth_type: {orth_type}")
 
-    total = fidelity + orth
+    total = fidelity * ( 1.0 - w ) + orth * w
 
     if not track_grad:
         fidelity = fidelity.detach().item()
@@ -1306,11 +1308,11 @@ def nsa_flow(Y0, X0=None, w=0.5,
 
 
 
-def nsa_flow_autograd(
+def nsa_flow_orth(
     Y0, X0=None, w=0.5,
     retraction="soft_polar",
-    max_iter=500, tol=1e-6, verbose=False, seed=42,
-    apply_nonneg=True, optimizer="asgd",
+    max_iter=500, tol=1e-4, verbose=False, seed=42,
+    apply_nonneg='hard', optimizer="asgd",
     initial_learning_rate=None, 
     lr_strategy="bayes",
     fidelity_type="scale_invariant",
@@ -1399,7 +1401,7 @@ def nsa_flow_autograd(
     opt = get_torch_optimizer(optimizer, [Z], lr=lr)
 
     # --- Tracking and monitoring ---
-    traces, recent_energies = [], []
+    traces, recent_iters, recent_totals, recent_energies = [], [], [], []
     t0 = time.time()
     best_Y, best_energy, best_iter = None, float("inf"), 0
 
@@ -1468,14 +1470,47 @@ def nsa_flow_autograd(
                 print(f"[Iter {it:3d}] Total={total_val:.6e} | Fid={fidelity_val:.6e} | Orth={orth_val:.6e}")
 
             # --- Convergence criterion ---
-            if len(recent_energies) == window_size:
-                e_max, e_min = max(recent_energies), min(recent_energies)
-                e_avg = sum(recent_energies) / len(recent_energies)
-                rel_var = (e_max - e_min) / (abs(e_avg) + 1e-12)
-                if rel_var < tol:
+            # update recent lists for slope-fit
+            recent_iters.append(it)
+            recent_totals.append(total_val)
+            if len(recent_iters) > window_size:
+                recent_iters.pop(0)
+                recent_totals.pop(0)
+
+            # slope-fit convergence check (need at least 2 points)
+            if len(recent_iters) >= (window_size-1):
+                # fit line total = slope * iter + intercept
+                xs = np.array(recent_iters, dtype=float)
+                ys = np.array(recent_totals, dtype=float)
+                # subtract mean to improve numerical stability
+                xm = xs.mean(); ym = ys.mean()
+                # slope = sum((x-xm)*(y-ym))/sum((x-xm)**2)
+                denom = np.sum((xs - xm) ** 2)
+                if denom > 0:
+                    slope = float(np.sum((xs - xm) * (ys - ym)) / denom)
+                else:
+                    slope = 0.0
+
+                # print debug if requested
+                if verbose and (it % max(1, record_every) == 0):
+                    print(f"[Iter {it:4d}] Total={total_val:.6e} | Fid={fidelity_val:.6e} | Orth={orth_val:.6e} | slope={slope:.3e}")
+
+                # slope is energy change per iteration. Negative slope => energy decreasing.
+                # Stop when improvement is very small: i.e. slope > -tol
+                if slope > -tol:
                     if verbose:
-                        print(f"Converged at iter {it} (energy stable < {tol:.2e})")
+                        print(f"Converged at iter {it} (slope {slope:.3e} > -{tol:.3e}).")
                     break
+
+            if False:
+                if len(recent_energies) == window_size:
+                    e_max, e_min = max(recent_energies), min(recent_energies)
+                    e_avg = sum(recent_energies) / len(recent_energies)
+                    rel_var = (e_max - e_min) / (abs(e_avg) + 1e-12)
+                    if rel_var < tol:
+                        if verbose:
+                            print(f"Converged at iter {it} (energy stable < {tol:.2e})")
+                        break
 
     traces = traces_to_dataframe(traces)
     return {
@@ -1491,6 +1526,306 @@ def nsa_flow_autograd(
             "retraction": retraction,
             "optimizer": optimizer,
             "learning_rate": lr,
+        }
+    }
+
+
+def nsa_flow_multi(
+    Y0, X0=None, w=0.5,
+    retraction="soft_polar",
+    max_iter=500, verbose=False, seed=42,
+    apply_nonneg=True, optimizer="asgd",
+    initial_learning_rate=None,
+    lr_strategy="bayes",
+    fidelity_type="scale_invariant",
+    orth_type="scale_invariant",
+    aggression=0.5,
+    record_every=1, window_size=5,
+    warmup_iters=20,
+    tol=1e-8,
+    device=None, precision="float64"
+):
+    """
+    Autograd-compatible NSA-Flow (modular energy version) with
+    warmup-based reweighting and full restart.
+
+    Convergence is determined by the slope of a least-squares fit to the
+    recent total energy values: if the improvement rate (negative slope)
+    is smaller than `tol` (i.e. slope > -tol) we stop.
+
+    fidelity_type ∈ {"basic", "scale_invariant", "symmetric"}
+    orth_type ∈ {"basic", "scale_invariant"}
+    """
+
+    import torch, time, numpy as np
+
+    # --- Precision and reproducibility ---
+    if precision == "float32":
+        dtype = torch.float32
+    elif precision == "float64":
+        dtype = torch.float64
+    else:
+        raise ValueError("precision must be 'float32' or 'float64'")
+
+    torch.manual_seed(seed)
+    if device is None:
+        device = Y0.device
+
+    # --- Initialization ---
+    Y = Y0.clone().detach().to(device).to(dtype)
+    p, k = Y.shape
+
+    if X0 is None:
+        X0 = torch.clamp(Y, min=0) if apply_nonneg else Y.clone()
+        perturb_scale = torch.norm(Y) / (Y.numel() ** 0.5) * 0.05
+        Y = Y + perturb_scale * torch.randn_like(Y)
+        if verbose:
+            print("Added perturbation to Y0.")
+    else:
+        X0 = X0.to(device).to(dtype)
+        if apply_nonneg:
+            X0 = torch.clamp(X0, min=0)
+        assert X0.shape == Y.shape, "X0 must match Y0 shape."
+
+    # --- Normalize for scale invariance ---
+    scale_ref = torch.sqrt(torch.sum(X0 ** 2) / X0.numel()).item() + 1e-12
+    X0 = X0 / scale_ref
+    Y = Y / scale_ref
+
+    # --- Default scaling constants ---
+    g0 = 0.5 * torch.sum((Y - X0) ** 2) / (p * k)
+    g0 = torch.clamp(g0, min=1e-8)
+    d0 = torch.clamp(defect_fast(Y), min=1e-8)
+    fid_eta = (1 - w) / (g0 * p * k)
+    c_orth = 4 * w / d0
+
+    # --- Optimization variable ---
+    Z = torch.nn.Parameter(Y.clone().detach().requires_grad_(True))
+
+    # --- Learning rate strategy ---
+    if initial_learning_rate is None and isinstance(lr_strategy, str) and \
+       lr_strategy.lower() in get_lr_estimation_strategies():
+        if verbose:
+            print(f"[NSA-Flow] Estimating learning rate ({lr_strategy}) ...")
+        lr_result = estimate_learning_rate_for_nsa_flow(
+            Y0=torch.randn_like(X0),
+            X0=X0,
+            w=w,
+            retraction=retraction,
+            fid_eta=fid_eta,
+            c_orth=c_orth,
+            apply_nonneg=apply_nonneg,
+            strategy="bayes" if lr_strategy == "auto" else lr_strategy,
+            aggression=aggression,
+            plot=False,
+            verbose=verbose,
+        )
+        lr = lr_result["best_lr"]
+        if verbose:
+            print(f"[NSA-Flow] Selected learning rate: {lr:.2e}")
+    else:
+        lr = initial_learning_rate or 1e-3
+
+    opt = get_torch_optimizer(optimizer, [Z], lr=lr)
+
+    # ---------------------------------------------------------------------
+    #  WARMUP PHASE: Estimate relative scaling between fidelity & orth terms
+    # ---------------------------------------------------------------------
+    # Use neutral scalars during warmup
+    fid_eta = 1.0
+    c_orth = 1.0
+    w_use = 0.5
+    for _round in range(3):
+        warmup_fids, warmup_orths = [], []
+        if warmup_iters > 0:
+            if verbose:
+                print(f"\n=== Warmup ({warmup_iters} iters) to estimate weights ===")
+                print(f" init fid_eta={fid_eta:.3e}, c_orth={c_orth:.3e}, lr={lr:.3e}")
+
+            for it in range(1, warmup_iters + 1):
+                opt.zero_grad()
+                Y_retracted = nsa_flow_retract_auto(Z, w_use, retraction)
+                Y_retracted = apply_nonnegativity(Y_retracted, apply_nonneg)
+                total_energy = compute_energy(
+                    Y_retracted,
+                    X0,
+                    w=w,
+                    fidelity_type=fidelity_type,
+                    orth_type=orth_type,
+                    fid_eta=fid_eta,
+                    c_orth=c_orth,
+                    track_grad=True,
+                )
+                total_energy.backward()
+                opt.step()
+
+                # --- Evaluate & store progress ---
+                with torch.no_grad():
+                    Y_eval = nsa_flow_retract_auto(Z, w_use, retraction)
+                    Y_eval = apply_nonnegativity(Y_eval, apply_nonneg)
+                    E = compute_energy(
+                        Y_eval,
+                        X0,
+                        w=w,
+                        fidelity_type=fidelity_type,
+                        orth_type=orth_type,
+                        fid_eta=fid_eta,
+                        c_orth=c_orth,
+                        track_grad=False,
+                        return_dict=True
+                    )
+
+                warmup_fids.append(E["fidelity"])
+                warmup_orths.append(E["orthogonality"])
+                if verbose and (it % max(1, warmup_iters // 5) == 0 or it == warmup_iters):
+                    print(f"[Warmup {it:3d}] Fid={E['fidelity']:.3e} Orth={E['orthogonality']:.3e}")
+
+            # Compute normalization (make E_fid ~ E_orth after rescaling)
+            mean_fid = float(np.mean(warmup_fids) + 1e-12)
+            mean_orth = float(np.mean(warmup_orths) + 1e-12)
+
+            # Avoid degenerate values
+            if mean_fid <= 0 or mean_orth <= 0:
+                if verbose:
+                    print("[Warmup] non-positive mean encountered, skipping reweight round.")
+                continue
+
+            # Choose scalar multipliers so that scaled means are roughly equal
+            # We compute base scalars inversely proportional to means, then scale
+            # them so that their weighted sum is comparable (keep magnitudes small)
+            fid_eta = 1.0 / mean_fid
+            c_orth = 1.0 / mean_orth
+
+            if verbose:
+                print(f"\n[Reweighting learned]" )
+                print(f" mean_fid={mean_fid:.3e}, mean_orth={mean_orth:.3e}")
+                print(f" → new fid_eta={fid_eta:.3e}, c_orth={c_orth:.3e}")
+                print(f"=== Restarting optimization with new weights ===\n")
+
+            # Reset optimization variable and optimizer to start cleanly
+            Z = torch.nn.Parameter(Y.clone().detach().requires_grad_(True))
+            opt = get_torch_optimizer(optimizer, [Z], lr=lr)
+
+    # ---------------------------------------------------------------------
+    #  MAIN OPTIMIZATION LOOP (with slope-fit based convergence)
+    # ---------------------------------------------------------------------
+    traces, recent_iters, recent_totals = [], [], []
+    t0 = time.time()
+    best_Y, best_energy, best_iter = None, float("inf"), 0
+
+    for it in range(1, max_iter + 1):
+        opt.zero_grad()
+
+        # --- Retraction + optional nonnegativity ---
+        Y_retracted = nsa_flow_retract_auto(Z, w_use, retraction)
+        Y_retracted = apply_nonnegativity(Y_retracted, apply_nonneg)
+
+        # --- Compute energy (autograd-safe) ---
+        total_energy = compute_energy(
+            Y_retracted,
+            X0,
+            w=w,
+            fidelity_type=fidelity_type,
+            orth_type=orth_type,
+            fid_eta=fid_eta,
+            c_orth=c_orth,
+            track_grad=True,
+        )
+
+        total_energy.backward()
+        opt.step()
+
+        # --- Evaluate & store progress ---
+        with torch.no_grad():
+            Y_eval = nsa_flow_retract_auto(Z, w_use, retraction)
+            Y_eval = apply_nonnegativity(Y_eval, apply_nonneg)
+            E = compute_energy(
+                Y_eval,
+                X0,
+                w=w,
+                fidelity_type=fidelity_type,
+                orth_type=orth_type,
+                fid_eta=fid_eta,
+                c_orth=c_orth,
+                track_grad=False,
+                return_dict=True
+            )
+
+            total_val = float(E["total"])
+            fidelity_val = float(E["fidelity"])
+            orth_val = float(E["orthogonality"])
+
+            if total_val < best_energy:
+                best_energy = total_val
+                best_Y = Y_eval.clone()
+                best_iter = it
+
+            if it % record_every == 0:
+                traces.append({
+                    "iter": it,
+                    "time": time.time() - t0,
+                    "fidelity": fidelity_val,
+                    "orthogonality": orth_val,
+                    "total_energy": total_val
+                })
+
+            # update recent lists for slope-fit
+            recent_iters.append(it)
+            recent_totals.append(total_val)
+            if len(recent_iters) > window_size:
+                recent_iters.pop(0)
+                recent_totals.pop(0)
+
+            # slope-fit convergence check (need at least 2 points)
+            if len(recent_iters) >= (window_size-1):
+                # fit line total = slope * iter + intercept
+                xs = np.array(recent_iters, dtype=float)
+                ys = np.array(recent_totals, dtype=float)
+                # subtract mean to improve numerical stability
+                xm = xs.mean(); ym = ys.mean()
+                # slope = sum((x-xm)*(y-ym))/sum((x-xm)**2)
+                denom = np.sum((xs - xm) ** 2)
+                if denom > 0:
+                    slope = float(np.sum((xs - xm) * (ys - ym)) / denom)
+                else:
+                    slope = 0.0
+
+                # print debug if requested
+                if verbose and (it % max(1, record_every) == 0):
+                    print(f"[Iter {it:4d}] Total={total_val:.6e} | Fid={fidelity_val:.6e} | Orth={orth_val:.6e} | slope={slope:.3e}")
+
+                # slope is energy change per iteration. Negative slope => energy decreasing.
+                # Stop when improvement is very small: i.e. slope > -tol
+                if slope > -tol:
+                    if verbose:
+                        print(f"Converged at iter {it} (slope {slope:.3e} > -{tol:.3e}).")
+                    break
+
+            # Also keep previous simple criterion as safety: tiny absolute change
+#            if len(recent_totals) >= 2 and abs(recent_totals[-1] - recent_totals[-2]) < (tol * max(1.0, abs(recent_totals[-2]))):
+#                if verbose:
+#                    print(f"Converged at iter {it} (abs change < tol).")
+#                break
+
+    traces = traces_to_dataframe(traces)
+    return {
+        "Y": best_Y * scale_ref,  # rescale to original magnitude
+        "traces": traces,
+        "final_iter": best_iter,
+        "best_total_energy": best_energy,
+        "best_Y_iteration": best_iter,
+        "target": X0 * scale_ref,
+        "settings": {
+            "fidelity_type": fidelity_type,
+            "orth_type": orth_type,
+            "retraction": retraction,
+            "optimizer": optimizer,
+            "learning_rate": lr,
+            "fid_eta": fid_eta,
+            "c_orth": c_orth,
+            "warmup_iters": warmup_iters,
+            "slope_tol": tol,
+            "window_size": window_size,
         }
     }
 
@@ -1510,8 +1845,8 @@ def test_scale_invariance():
 
     assert abs(np.log10(lr1) - np.log10(lr2)) < 0.1, "Learning rate should be approximately scale invariant"
 
-    res1 = nsa_flow_autograd(Y, X, max_iter=50, verbose=False)
-    res2 = nsa_flow_autograd(10 * Y, 10 * X, max_iter=50, verbose=False)
+    res1 = nsa_flow_orth(Y, X, max_iter=50, verbose=False)
+    res2 = nsa_flow_orth(10 * Y, 10 * X, max_iter=50, verbose=False)
 
     diff = torch.norm(res1["Y"] / torch.norm(res1["Y"]) - res2["Y"] / torch.norm(res2["Y"]))
     print(f"Normalized output difference: {diff:.3e}")
@@ -1563,7 +1898,7 @@ def test_autograd_scale_invariance( lr_strategy="auto" ):
 
     print("[TEST] Running NSA-Flow autograd with scaled inputs (×1e4)...")
 
-    result = nsa_flow_autograd(
+    result = nsa_flow_orth(
         Y * 1e4,            # scaled input
         X0=X0 * 1e4,        # ensure target matches scale
         w=0.5,
@@ -1760,13 +2095,13 @@ def test_estimate_learning_rate_for_nsa_flow_modular(plot=False):
     return res
 
 
-def test_nsa_flow_autograd_modular(plot=True):
+def test_nsa_flow_orth_modular(plot=True):
     import torch
     torch.manual_seed(1)
     Y = torch.randn(50, 10)
     X = torch.randn_like(Y)
 
-    result = nsa_flow_autograd(
+    result = nsa_flow_orth(
         Y0=Y,
         X0=X,
         w=0.5,
@@ -1933,7 +2268,7 @@ def run_single_experiment(
 
     try:
         t0 = time.time()
-        res = nsa_flow_autograd(
+        res = nsa_flow_orth(
             Y0,
             X0=X0,
             w=w,
@@ -2404,420 +2739,936 @@ def plot_evaluation_summary(df, save_dir=None, timestamp=None, show_plots=True):
 
 ### deep learning stuff below 
 
-######################################################################
-# NSA-Flow Lightweight Test Suite — Full Drop-In Replacement
-######################################################################
-import torch, torch.nn as nn, torch.nn.functional as F
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import numpy as np
-from torch.utils.data import TensorDataset, DataLoader
-from sklearn.decomposition import PCA
-from scipy.linalg import orthogonal_procrustes
-import torch.distributions as dist
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-torch.set_default_dtype(torch.float32)
-
-
-def apply_nonnegativity(Y, mode="softplus"):
-    """
-    Apply nonnegativity transformation to a tensor.
-
-    Parameters
-    ----------
-    Y : torch.Tensor
-        Input tensor.
-    mode : str or bool
-        Nonnegativity mode:
-        - 'none' or False : no constraint
-        - 'softplus'      : smooth differentiable mapping (soft nonnegativity)
-        - True or 'hard'  : hard projection via clamping
-
-    Returns
-    -------
-    torch.Tensor
-        Transformed tensor according to the specified mode.
-    """
-    if mode in [False, "none", None]:
-        return Y
-    elif mode == "softplus":
-        return F.softplus(Y)
-    elif mode in [True, "hard", "Hard"]:
-        return torch.clamp(Y, min=0.0)
-    else:
-        raise ValueError(f"Invalid apply_nonneg mode: {mode}. "
-                         "Use 'none', 'softplus', or True/'hard'.")
-
-
-######################################################################
-# NSA Flow Layer (Computational Retraction)
-######################################################################
-class NSAFlowLayer(nn.Module):
-    """Differentiable orthogonality regularizer via gradient–retraction flow."""
-
-    def __init__(self, w_retract=0.5, w_learnable=True,
-                 retraction_type="soft_polar", tradeoff_alpha=0.9, tradeoff_learnable=True,
-                 nn_constraint="softplus", **kwargs):
+# ============================================================
+# Simple baseline MLP
+# ============================================================
+class SimpleMLP(nn.Module):
+    def __init__(self, in_dim, out_dim, hidden):
         super().__init__()
-        self.w_retract = nn.Parameter(torch.tensor(float(w_retract)), requires_grad=w_learnable)
-        self.tradeoff_alpha = nn.Parameter(torch.tensor(float(tradeoff_alpha)), requires_grad=tradeoff_learnable)
-        self.retraction_type = retraction_type
-        self.nn_constraint = nn_constraint
-        # Filter out 'out_dim' if present to avoid passing to retract_auto
-        kwargs.pop('out_dim', None)
-        self.kwargs = kwargs
-
-    def forward(self, Y, X=None):
-        from .core import nsa_flow_retract_auto, defect_fast  # local import to avoid circular refs
-        if not Y.requires_grad:
-            Y = Y.requires_grad_(True)
-
-        try:
-            alpha = torch.sigmoid(self.tradeoff_alpha)
-            f_weight = alpha
-            o_weight = 1.0 - alpha
-            E_fid = fidelity_scaled(Y, X) * f_weight
-            E_orth = invariant_orthogonality_defect(Y) * o_weight
-            E = E_fid + E_orth
-            grad_Y = torch.autograd.grad(E, Y, create_graph=self.training)[0]
-            Y_step = Y - grad_Y
-            Y_re = nsa_flow_retract_auto(
-                Y_step,
-                w_retract=self.w_retract.to(Y),
-                retraction_type=self.retraction_type,
-                **self.kwargs,
-            )
-            Y_re = apply_nonnegativity(Y_re, mode=self.nn_constraint)
-            if not torch.isfinite(Y_re).all():
-                Y_re = defect_fast(Y)
-            return Y_re, {"E_fid": E_fid.detach().item(), "E_orth": E_orth.detach().item()}
-        except Exception as e:
-            print(f"⚠️ NSAFlowLayer fallback: {e}")
-            Y_out = Y.detach()  # Return detached Y to preserve shape instead of potential scalar
-            return Y_out, {"E_fid": float("nan"), "E_orth": float("nan")}
-
-
-######################################################################
-# NSA Flow Learnable Retraction Layer
-######################################################################
-class NSAFlowLearnableRetractionLayer(nn.Module):
-    """Differentiable orthogonality regularizer with learnable retraction transform."""
-
-    def __init__(self, w_retract=0.5, w_learnable=True,
-                 retraction_type="soft_polar", tradeoff_alpha=0.9, tradeoff_learnable=True,
-                 nn_constraint="softplus", out_dim=5, **kwargs):
-        super().__init__()
-        self.w_retract = nn.Parameter(torch.tensor(float(w_retract)), requires_grad=w_learnable)
-        self.tradeoff_alpha = nn.Parameter(torch.tensor(float(tradeoff_alpha)), requires_grad=tradeoff_learnable)
-        self.retraction_type = retraction_type
-        self.nn_constraint = nn_constraint
-        self.kwargs = kwargs
-
-        # Learnable transform: a small MLP to approximate the retraction
-        self.transform_net = nn.Sequential(
-            nn.Linear(out_dim, 32),
-            nn.ReLU(),
-            nn.Linear(32, out_dim)
-        )  # Residual-like
-
-    def forward(self, Y, X=None):
-        from .core import defect_fast  # local import to avoid circular refs
-        if not Y.requires_grad:
-            Y = Y.requires_grad_(True)
-
-        Y_re = Y + self.transform_net(Y)  # Residual connection for stability
-        Y_re = apply_nonnegativity(Y_re, mode=self.nn_constraint)
-        if not torch.isfinite(Y_re).all():
-            Y_re = defect_fast(Y)
-        # Compute info for monitoring/aux loss
-        with torch.enable_grad():
-            alpha = torch.sigmoid(self.tradeoff_alpha)
-            f_weight = alpha
-            o_weight = 1.0 - alpha
-            E_fid = fidelity_scaled(Y_re, X) * f_weight
-            E_orth = invariant_orthogonality_defect(Y_re) * o_weight
-        return Y_re, {"E_fid": E_fid.detach().item(), "E_orth": E_orth.detach().item()}
-
-
-######################################################################
-# Tiny Regression MLP
-######################################################################
-class SmallRegressor(nn.Module):
-    def __init__(self, in_dim, hid_dim=64, out_dim=5, use_flow=False, flow_class=NSAFlowLayer, flow_kwargs=None):
-        super().__init__()
-        self.use_flow = use_flow
         self.net = nn.Sequential(
-            nn.Linear(in_dim, hid_dim),
+            nn.Linear(in_dim, hidden),
             nn.ReLU(),
-            nn.Linear(in_dim, hid_dim*2),
+            nn.Linear(hidden, hidden),
             nn.ReLU(),
-            nn.Linear(hid_dim*2, hid_dim),
-            nn.ReLU(),
-            nn.Linear(hid_dim, out_dim)
+            nn.Linear(hidden, out_dim)
         )
-        self.flow = None
-        if use_flow:
-            flow_kwargs = flow_kwargs or {}
-            flow_kwargs['out_dim'] = out_dim  # Pass out_dim for potential use
-            self.flow = flow_class(**(flow_kwargs))
-
-    def forward(self, x):
-        z = self.net(x)
-        if not self.use_flow:
-            return z, None
-        z_flow, info = self.flow(z, X=z.detach())
-        return z_flow, info
+    def forward(self, x): 
+        return self.net(x)
 
 
-######################################################################
-# Evaluation Helper
-######################################################################
-def eval_model(model, loader, loss_fn, is_flow=False):
-    model.eval()
-    total_loss = 0.0
-    Ef_hist, Eo_hist = [], []
+# ===========================================
+# NSA Flow Layer (CLOSER)
+# ===========================================
+class NSAFlowLayer(nn.Module):
+    """
+    Unified NSA Flow layer:
+      - Optional residual MLP transform
+      - Adaptive retraction blend (learnable w_retract)
+      - Optional nonnegativity enforcement ('none', 'soft', 'hard')
+      - Can compute fidelity + orthogonality losses if target provided
+    """
+    def __init__(
+        self,
+        k,
+        hidden=64,
+        w_retract=0.5,
+        retraction_type="soft_polar",
+        apply_nonneg="none",
+        residual=True,
+        use_transform=True,
+    ):
+        super().__init__()
+        self.k = k
+        self.hidden = hidden
+        self.retraction_type = retraction_type
+        self.apply_nonneg = apply_nonneg
+        self.residual = residual
+        self.use_transform = use_transform
 
-    if is_flow:
-        with torch.enable_grad():
-            for xb, yb in loader:
-                xb, yb = xb.to(device), yb.to(device)
-                y_pred, info = model(xb)
-                total_loss += loss_fn(y_pred, yb).item() * xb.size(0)
-                if info:
-                    Ef_hist.append(info.get("E_fid", float("nan")))
-                    Eo_hist.append(info.get("E_orth", float("nan")))
-    else:
-        with torch.no_grad():
-            for xb, yb in loader:
-                xb, yb = xb.to(device), yb.to(device)
-                y_pred, _ = model(xb)
-                total_loss += loss_fn(y_pred, yb).item() * xb.size(0)
-    return total_loss / len(loader.dataset), Ef_hist, Eo_hist
+        # Optional small residual MLP (row-wise)
+        if use_transform:
+            self.transform_net = nn.Sequential(
+                nn.Linear(k, hidden),
+                nn.ReLU(),
+                nn.Linear(hidden, k)
+            )
+        else:
+            self.transform_net = None
+
+        # Learnable retraction weight
+        self.w_retract = nn.Parameter(torch.tensor(float(w_retract)))
+        # Adaptive tradeoff scalar for loss weighting
+        self.alpha = nn.Parameter(torch.tensor(0.0))
+
+    def _apply_nonneg(self, Y):
+        if self.apply_nonneg == "soft":
+            return F.softplus(Y)
+        elif self.apply_nonneg == "relu":
+            return F.relu(Y)
+        elif self.apply_nonneg == "hard":
+            return torch.clamp(Y, min=0.0)
+        return Y
+
+    def forward(self, Y, target=None):
+        if self.use_transform:
+            Y_t = Y + self.transform_net(Y)
+        else:
+            Y_t = Y
+
+        Yw = nsa_flow_retract_auto(Y_t, w_retract=self.w_retract, retraction_type=self.retraction_type)
+
+        if self.residual:
+            Y_out = self._apply_nonneg(Y + Yw)
+        else:
+            Y_out = self._apply_nonneg(Yw)
+
+        if target is not None:
+            fid = fidelity_scaled(Y_out, target)
+            orth = invariant_orthogonality_defect(Y_out)
+            w_dyn = torch.sigmoid(self.alpha)
+            total_loss = fid * (1.0 - w_dyn) + orth * w_dyn
+            return Y_out, total_loss, fid, orth, w_dyn
+        else:
+            return Y_out
+
+# ============================================================
+# Full test: MLP → NSA → Joint + Residual NSA
+# ============================================================
+def test_mlp_then_nsa_joint_residual(
+    seed=0,
+    w=0.5,
+    n=200,
+    p=8,
+    k=6,
+    hidden=128,
+    noise=0.1,
+    mlp_epochs=2000,
+    nsa_epochs=1500,
+    joint_epochs=1500,
+    lr_mlp=1e-3,
+    lr_nsa=1e-3,
+    lr_joint=5e-4,
+    apply_nonneg="hard"
+):
+    torch.manual_seed(seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # === Synthetic data
+    W_true = torch.randn(p, k, device=device)
+    X = torch.randn(n, p, device=device)
+    Y_true = F.softplus(X @ W_true)
+    Y_obs = Y_true + noise * torch.randn_like(Y_true)
+
+    n_train = int(0.8 * n)
+    X_train, X_test = X[:n_train], X[n_train:]
+    Y_train, Y_test = Y_obs[:n_train], Y_obs[n_train:]
+
+    # ========================================================
+    # 1️⃣ Train baseline MLP
+    # ========================================================
+    print("\n=== Training MLP ===")
+    mlp = SimpleMLP(p, k, hidden).to(device)
+    opt = torch.optim.AdamW(mlp.parameters(), lr=lr_mlp)
+    mlp_losses = []
+    for epoch in range(mlp_epochs):
+        opt.zero_grad()
+        Y_pred = mlp(X_train)
+        loss = fidelity_scaled(Y_pred, Y_train)
+        loss.backward()
+        opt.step()
+        mlp_losses.append(loss.item())
+        if epoch % 200 == 0 or epoch == mlp_epochs - 1:
+            print(f"[MLP {epoch:04d}] L={loss.item():.4e}")
+
+    with torch.no_grad():
+        Y_pred_mlp = mlp(X_test)
+        corr_mlp = torch.corrcoef(torch.stack([Y_pred_mlp.flatten(), Y_test.flatten()]))[0, 1].item()
+        invorth_mlp = invariant_orthogonality_defect(Y_pred_mlp).item()
+
+    print(f"\nMLP correlation: {corr_mlp:.3f}")
+    print(f"MLP orth defect: {invorth_mlp:.3f}")
+
+    # ========================================================
+    # 2️⃣ NSA refinement (residual option)
+    # ========================================================
+    print(f"\n=== Training NSA refinement (apply_nonneg='{apply_nonneg}') ===")
+    nsa = NSAFlowLayer(k, w_retract=w, apply_nonneg=apply_nonneg, residual=False).to(device)
+    opt_nsa = torch.optim.AdamW(nsa.parameters(), lr=lr_nsa)
+    nsa_losses, nsa_fids, nsa_orths = [], [], []
+
+    with torch.no_grad():
+        Y0 = mlp(X_train)
+
+    for epoch in range(nsa_epochs):
+        opt_nsa.zero_grad()
+        Y_ref = nsa(Y0)
+        fid = fidelity_scaled(Y_ref, Y_train)
+        orth = invariant_orthogonality_defect(Y_ref)
+        loss = fid + 0.1 * orth
+        loss.backward()
+        opt_nsa.step()
+        nsa_losses.append(loss.item())
+        nsa_fids.append(fid.item())
+        nsa_orths.append(orth.item())
+        if epoch % 200 == 0 or epoch == nsa_epochs - 1:
+            print(f"[NSA {epoch:04d}] loss={loss.item():.4e} fid={fid.item():.4e} orth={orth.item():.4e}")
+
+    with torch.no_grad():
+        Y_pred_refined = nsa(mlp(X_test))
+        corr_nsa = torch.corrcoef(torch.stack([Y_pred_refined.flatten(), Y_test.flatten()]))[0, 1].item()
+        invorth_nsa = invariant_orthogonality_defect(Y_pred_refined).item()
+
+    print(f"\nNSA refined correlation: {corr_nsa:.3f}")
+    print(f"NSA refined orth defect: {invorth_nsa:.3f}")
+
+    # ========================================================
+    # 3️⃣ Joint fine-tuning (MLP + Residual NSA)
+    # ========================================================
+    print("\n=== Joint fine-tuning MLP + NSA (residual) ===")
+    joint_model = nn.Sequential(mlp, nsa)
+    opt_joint = torch.optim.AdamW(joint_model.parameters(), lr=lr_joint)
+    joint_losses, joint_fids, joint_orths = [], [], []
+
+    for epoch in range(joint_epochs):
+        opt_joint.zero_grad()
+        Y_joint = joint_model(X_train)
+        fid = fidelity_scaled(Y_joint, Y_train)
+        orth = invariant_orthogonality_defect(Y_joint)
+        loss = fid * (1 - w) + orth * w
+        loss.backward()
+        opt_joint.step()
+        joint_losses.append(loss.item())
+        joint_fids.append(fid.item())
+        joint_orths.append(orth.item())
+        if epoch % 200 == 0 or epoch == joint_epochs - 1:
+            print(f"[Joint {epoch:04d}] loss={loss.item():.4e} fid={fid.item():.4e} orth={orth.item():.4e}")
+
+    with torch.no_grad():
+        Y_pred_joint = joint_model(X_test)
+        corr_joint = torch.corrcoef(torch.stack([Y_pred_joint.flatten(), Y_test.flatten()]))[0, 1].item()
+        invorth_joint = invariant_orthogonality_defect(Y_pred_joint).item()
+
+    print(f"\nFinal joint correlation: {corr_joint:.3f}")
+    print(f"Final joint orth defect: {invorth_joint:.3f}")
+
+    # ========================================================
+    # 📊 Diagnostics & Visuals
+    # ========================================================
+    fig, axs = plt.subplots(2, 3, figsize=(16, 8))
+
+    axs[0,0].plot(mlp_losses)
+    axs[0,0].set_title("MLP loss")
+
+    axs[0,1].plot(nsa_losses, label="Total")
+    axs[0,1].plot(nsa_fids, "--", label="Fid")
+    axs[0,1].plot(nsa_orths, "--", label="Orth")
+    axs[0,1].legend()
+    axs[0,1].set_title(f"NSA refinement ({apply_nonneg}, residual)")
+
+    axs[0,2].plot(joint_losses, label="Total")
+    axs[0,2].plot(joint_fids, "--", label="Fid")
+    axs[0,2].plot(joint_orths, "--", label="Orth")
+    axs[0,2].legend()
+    axs[0,2].set_title("Joint fine-tuning")
+
+    axs[1,0].scatter(Y_test.flatten().cpu(), Y_pred_mlp.flatten().cpu(), alpha=0.4, label=f"MLP r={corr_mlp:.2f}")
+    axs[1,0].scatter(Y_test.flatten().cpu(), Y_pred_refined.flatten().cpu(), alpha=0.4, label=f"MLP+NSA r={corr_nsa:.2f}")
+    axs[1,0].scatter(Y_test.flatten().cpu(), Y_pred_joint.flatten().cpu(), alpha=0.4, label=f"Joint r={corr_joint:.2f}")
+    axs[1,0].set_title("Predicted vs True Y (Test)")
+    axs[1,0].legend()
+
+    axs[1,1].hist(Y_pred_joint.flatten().cpu().numpy(), bins=40, alpha=0.7)
+    axs[1,1].set_title(f"Output distribution (apply_nonneg={apply_nonneg})")
+
+    corrmat = np.corrcoef(Y_pred_joint.detach().cpu().numpy().T)
+    axs[1,2].imshow(corrmat, cmap="coolwarm", vmin=-1, vmax=1)
+    axs[1,2].set_title("Column correlation heatmap (Joint)")
+
+    plt.tight_layout()
+    plt.show()
+    print( str( np.min(Y_pred_joint.detach().cpu().numpy()) ) )
+    return dict(
+        corr_mlp=corr_mlp,
+        corr_nsa=corr_nsa,
+        corr_joint=corr_joint,
+        invorth_mlp=invorth_mlp,
+        invorth_nsa=invorth_nsa,
+        invorth_joint=invorth_joint,
+        apply_nonneg=apply_nonneg,
+        Y_pred_joint=Y_pred_joint.detach().cpu()
+    )
 
 
-######################################################################
-# Prediction Collector
-######################################################################
-def get_predictions(model, X, batch_size=64, is_flow=False):
-    model.eval()
-    preds = []
-    context = torch.enable_grad() if is_flow else torch.no_grad()
-    with context:
-        for i in range(0, len(X), batch_size):
-            xb = X[i:i + batch_size].to(device)
-            y_pred, _ = model(xb)
-            preds.append(y_pred.detach().cpu())
-    return torch.cat(preds).numpy()
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import r2_score, mean_absolute_error, explained_variance_score
+
+# -----------------------
+# Helper metrics
+# -----------------------
+def mse_fn(A, B):
+    return float(((A - B) ** 2).mean().item())
+
+def rmse_fn(A, B):
+    return float(torch.sqrt(((A - B) ** 2).mean()).item())
+
+def mae_fn(A, B):
+    return float(mean_absolute_error(A.cpu().numpy().ravel(), B.cpu().numpy().ravel()))
+
+def r2_fn(A, B):
+    try:
+        return float(r2_score(B.cpu().numpy().ravel(), A.cpu().numpy().ravel()))
+    except Exception:
+        return float("nan")
+
+def explained_var_fn(A, B):
+    try:
+        return float(explained_variance_score(B.cpu().numpy().ravel(), A.cpu().numpy().ravel()))
+    except Exception:
+        return float("nan")
+
+def singular_values(tensor):
+    """Return singular values of a 2D torch tensor (cpu numpy)."""
+    with torch.no_grad():
+        U, S, Vt = torch.linalg.svd(tensor, full_matrices=False)
+        return S.detach().cpu().numpy()
+
+def principal_angles(A, B, r=None):
+    """
+    Principal angles between column spaces of A and B.
+    A, B: (n_samples, k) torch tensors (or numpy arrays)
+    returns angles in radians (numpy array), and cosines (singular values)
+    """
+    A = A.detach().cpu().numpy() if isinstance(A, torch.Tensor) else np.asarray(A)
+    B = B.detach().cpu().numpy() if isinstance(B, torch.Tensor) else np.asarray(B)
+    # compute orthonormal bases via SVD (columns are components)
+    Ua, Sa, _ = np.linalg.svd(A, full_matrices=False)
+    Ub, Sb, _ = np.linalg.svd(B, full_matrices=False)
+    if r is None:
+        r = min(Ua.shape[1], Ub.shape[1])
+    M = Ua[:, :r].T @ Ub[:, :r]
+    _, s, _ = np.linalg.svd(M, full_matrices=False)
+    s = np.clip(s, -1.0, 1.0)
+    angles = np.arccos(s)
+    return angles, s
 
 
-######################################################################
-# PCA Regression Data + Deep Comparison
-######################################################################
-def test_nsa_flow_layer_lite(seed=42):
+# -----------------------
+# Extended experiment
+# -----------------------
+def test_mlp_then_nsa_joint_residual_diagnostics(
+    seed=0,
+    w=0.5,
+    n=200,
+    p=8,
+    k=6,
+    hidden=128,
+    noise=0.1,
+    mlp_epochs=1000,
+    nsa_epochs=800,
+    joint_epochs=800,
+    lr_mlp=1e-3,
+    lr_nsa=1e-3,
+    lr_joint=5e-4,
+    apply_nonneg="hard",
+    residual=True,
+    use_transform=True,
+    verbose=True
+):
+    """
+    Full pipeline:
+      1) Train MLP for fidelity
+      2) Train Residual NSA refinement (tracking w_dyn)
+      3) Joint fine-tuning (tracking w_dyn)
+      4) Detailed numeric metrics + visualizations (singular spectra, principal angles, distribution, residuals)
+    Returns a dict of metrics and arrays for further inspection.
+    """
     torch.manual_seed(seed)
     np.random.seed(seed)
-#    torch.set_default_dtype(torch.float64)
-    print("🧠 Training models...")
-    # Synthetic PCA regression data with high multivariate correlation
-    n_samples, n_features, n_targets = 512, 100, 3
-    mean = torch.zeros(n_features, device=device)
-    corr = 0.5  # High correlation
-    R = torch.full((n_features, n_features), corr, device=device)
-    R.diagonal().fill_(1.0)
-    X = dist.MultivariateNormal(mean, R).sample((n_samples,)).to(device)
-    pca = PCA(n_components=n_targets)
-    Y = torch.from_numpy(pca.fit_transform(X.cpu().numpy())).to(device)#.float()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Train/Test split
-    idx = torch.randperm(n_samples)
-    tr, te = idx[:400], idx[400:]
-    Xtr, Xte, Ytr, Yte = X[tr], X[te], Y[tr], Y[te]
+    # Synthetic nonlinear data (learnable)
+    W_true = torch.randn(p, k, device=device)
+    X = torch.randn(n, p, device=device)
+    Y_true = F.softplus(X @ W_true)                 # underlying signal
+    Y_obs = Y_true + noise * torch.randn_like(Y_true)
 
-    train_loader = DataLoader(TensorDataset(Xtr, Ytr), batch_size=64, shuffle=True)
-    test_loader = DataLoader(TensorDataset(Xte, Yte), batch_size=64)
+    n_train = int(0.8 * n)
+    X_train, X_test = X[:n_train], X[n_train:]
+    Y_train, Y_test = Y_obs[:n_train], Y_obs[n_train:]
 
-    # Common flow kwargs
-    flow_kwargs = dict(w_retract=0.5, retraction_type="soft_polar", tradeoff_alpha=0.909, tradeoff_learnable=True, nn_constraint="none")
+    # --------------------
+    # 1) Train baseline MLP (fidelity only)
+    # --------------------
+    if verbose: print("\n=== TRAIN MLP (fidelity only) ===")
+    mlp = SimpleMLP(p, k, hidden).to(device)
+    opt_mlp = torch.optim.AdamW(mlp.parameters(), lr=lr_mlp, weight_decay=1e-4)
+    mlp_losses = []
+    for epoch in range(mlp_epochs):
+        opt_mlp.zero_grad()
+        Y_pred_tr = mlp(X_train)
+        loss = fidelity_scaled(Y_pred_tr, Y_train)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(mlp.parameters(), 1.0)
+        opt_mlp.step()
+        mlp_losses.append(loss.item())
+        if verbose and (epoch % max(1, mlp_epochs//5) == 0 or epoch == mlp_epochs-1):
+            print(f"[MLP {epoch:04d}] L={loss.item():.4e}")
 
-    # Models
-    base_model = SmallRegressor(n_features, hid_dim=64, out_dim=n_targets, use_flow=False).to(device)
-    flow_comp_model = SmallRegressor(
-        n_features, hid_dim=64, out_dim=n_targets, use_flow=True, flow_class=NSAFlowLayer, flow_kwargs=flow_kwargs
-    ).to(device)
-    flow_learn_model = SmallRegressor(
-        n_features, hid_dim=64, out_dim=n_targets, use_flow=True, flow_class=NSAFlowLearnableRetractionLayer, flow_kwargs=flow_kwargs
-    ).to(device)
-
-    loss_fn = nn.MSELoss()
-    opt_base = torch.optim.Adam(base_model.parameters(), lr=1e-3)
-    opt_flow_comp = torch.optim.Adam(flow_comp_model.parameters(), lr=1e-3)
-    opt_flow_learn = torch.optim.Adam(flow_learn_model.parameters(), lr=1e-3)
-
-    base_hist = []
-    flow_comp_hist, flow_comp_Efid_hist, flow_comp_Eorth_hist = [], [], []
-    flow_learn_hist, flow_learn_Efid_hist, flow_learn_Eorth_hist = [], [], []
-
-    for epoch in range(1, 51):
-        base_model.train()
-        flow_comp_model.train()
-        flow_learn_model.train()
-        base_loss_epoch = flow_comp_loss_epoch = flow_learn_loss_epoch = 0.0
-
-        for xb, yb in train_loader:
-            xb, yb = xb.to(device), yb.to(device)
-
-            # baseline
-            opt_base.zero_grad()
-            y_pred, _ = base_model(xb)
-            loss_b = loss_fn(y_pred, yb)
-            loss_b.backward()
-            opt_base.step()
-            base_loss_epoch += loss_b.item() * xb.size(0)
-
-            # flow comp model
-            opt_flow_comp.zero_grad()
-            y_pred_fc, info_fc = flow_comp_model(xb)
-            loss_fc = loss_fn(y_pred_fc, yb)
-            loss_fc.backward()
-            opt_flow_comp.step()
-            flow_comp_loss_epoch += loss_fc.item() * xb.size(0)
-            if info_fc:
-                flow_comp_Efid_hist.append(info_fc["E_fid"])
-                flow_comp_Eorth_hist.append(info_fc["E_orth"])
-
-            # flow learn model
-            opt_flow_learn.zero_grad()
-            y_pred_fl, info_fl = flow_learn_model(xb)
-            loss_fl = loss_fn(y_pred_fl, yb)
-            # Add auxiliary loss to train the transform_net to minimize E
-            E_fid = torch.tensor(info_fl["E_fid"], device=device)
-            E_orth = torch.tensor(info_fl["E_orth"], device=device)
-            aux_loss = E_fid + E_orth
-            loss_fl += 0.1 * aux_loss  # Weight auxiliary loss
-            loss_fl.backward()
-            opt_flow_learn.step()
-            flow_learn_loss_epoch += loss_fl.item() * xb.size(0)
-            if info_fl:
-                flow_learn_Efid_hist.append(info_fl["E_fid"])
-                flow_learn_Eorth_hist.append(info_fl["E_orth"])
-
-        # Evaluate
-        tb = eval_model(base_model, test_loader, loss_fn, is_flow=False)[0]
-        tfc, Efc_hist, Eoc_hist = eval_model(flow_comp_model, test_loader, loss_fn, is_flow=True)
-        tfl, Efl_hist, Eol_hist = eval_model(flow_learn_model, test_loader, loss_fn, is_flow=True)
-        base_hist.append(tb)
-        flow_comp_hist.append(tfc)
-        flow_learn_hist.append(tfl)
-
-        print(f"Epoch {epoch:04d} | "
-              f"Base train/test {base_loss_epoch/len(train_loader.dataset):.4e}/{tb:.4e} | "
-              f"FlowComp train/test {flow_comp_loss_epoch/len(train_loader.dataset):.4e}/{tfc:.4e} | "
-              f"FlowLearn train/test {flow_learn_loss_epoch/len(train_loader.dataset):.4e}/{tfl:.4e} | "
-              f"w_comp={flow_comp_model.flow.w_retract.item():.4f} "
-              f"alpha_comp={torch.sigmoid(flow_comp_model.flow.tradeoff_alpha).item():.4f} | "
-              f"w_learn={flow_learn_model.flow.w_retract.item():.4f} "
-              f"alpha_learn={torch.sigmoid(flow_learn_model.flow.tradeoff_alpha).item():.4f}")
-
-    ##################################################################
-    # Deep Reporting
-    ##################################################################
-    Zb = get_predictions(base_model, Xte, is_flow=False)
-    Zfc = get_predictions(flow_comp_model, Xte, is_flow=True)
-    Zfl = get_predictions(flow_learn_model, Xte, is_flow=True)
-    Yt = Yte.cpu().numpy()
-
-    from .core import invariant_orthogonality_defect
-
-    # Additional metrics for deeper comparison
+    mlp.eval()
     with torch.no_grad():
-        Zb_t = torch.from_numpy(Zb).to(device)
-        Zfc_t = torch.from_numpy(Zfc).to(device)
-        Zfl_t = torch.from_numpy(Zfl).to(device)
-        ortho_def_base = invariant_orthogonality_defect(Zb_t).item()
-        ortho_def_comp = invariant_orthogonality_defect(Zfc_t).item()
-        ortho_def_learn = invariant_orthogonality_defect(Zfl_t).item()
+        Y_mlp_test = mlp(X_test)
+    # basic metrics
+    mlp_mse = mse_fn(Y_mlp_test, Y_test)
+    mlp_rmse = rmse_fn(Y_mlp_test, Y_test)
+    mlp_mae = mae_fn(Y_mlp_test, Y_test)
+    mlp_r2 = r2_fn(Y_mlp_test, Y_test)
+    mlp_expl_var = explained_var_fn(Y_mlp_test, Y_test)
+    mlp_svals = singular_values(Y_mlp_test)
+    mlp_invorth = float(invariant_orthogonality_defect(Y_mlp_test).item())
+    if verbose:
+        print(f"MLP test MSE={mlp_mse:.6f} RMSE={mlp_rmse:.6f} R2={mlp_r2:.4f} invOrth={mlp_invorth:.4e}")
 
-    # Procrustes alignment of learned subspaces to ground truth PCA
-    Rb, _ = orthogonal_procrustes(Zb, Yt)
-    Rfc, _ = orthogonal_procrustes(Zfc, Yt)
-    Rfl, _ = orthogonal_procrustes(Zfl, Yt)
-    Zb_aligned = Zb @ Rb
-    Zfc_aligned = Zfc @ Rfc
-    Zfl_aligned = Zfl @ Rfl
-    procrustes_err_base = np.linalg.norm(Zb_aligned - Yt) / np.linalg.norm(Yt)
-    procrustes_err_comp = np.linalg.norm(Zfc_aligned - Yt) / np.linalg.norm(Yt)
-    procrustes_err_learn = np.linalg.norm(Zfl_aligned - Yt) / np.linalg.norm(Yt)
+    # --------------------
+    # 2) NSA residual refinement (on training MLP outputs)
+    # --------------------
+    if verbose: print("\n=== TRAIN NSA refinement (residual) ===")
+    nsa = NSAFlowLayer(k, hidden=64, w_retract=w, retraction_type="soft_polar",
+                       apply_nonneg=apply_nonneg, residual=residual, use_transform=use_transform).to(device)
+    opt_nsa = torch.optim.AdamW(nsa.parameters(), lr=lr_nsa, weight_decay=1e-6)
+    nsa_losses, nsa_fids, nsa_orths, nsa_wdyn = [], [], [], []
 
-    # Singular value trajectories
-    sv_b = np.linalg.svd(Zb, compute_uv=False)
-    sv_fc = np.linalg.svd(Zfc, compute_uv=False)
-    sv_fl = np.linalg.svd(Zfl, compute_uv=False)
+    with torch.no_grad():
+        Y0_train = mlp(X_train).detach()
 
-    # Correlations between embedding dimensions
-    corr_base = np.corrcoef(Zb.T)
-    corr_comp = np.corrcoef(Zfc.T)
-    corr_learn = np.corrcoef(Zfl.T)
-    off_diag_avg_base = np.mean(np.abs(corr_base - np.eye(corr_base.shape[0])))
-    off_diag_avg_comp = np.mean(np.abs(corr_comp - np.eye(corr_comp.shape[0])))
-    off_diag_avg_learn = np.mean(np.abs(corr_learn - np.eye(corr_learn.shape[0])))
+    # If NSA alpha is learnable and used, we'll record sigmoid(alpha) as w_dyn
+    for epoch in range(nsa_epochs):
+        opt_nsa.zero_grad()
+        Y_ref = nsa(Y0_train) if nsa._apply_nonneg is None else nsa(Y0_train)  # forward returns tensor (targetless)
+        # compute terms (we will use fidelity and orth as defined)
+        fid = fidelity_scaled(Y_ref, Y_train)
+        orth = invariant_orthogonality_defect(Y_ref)
+        loss = fid + 0.1 * orth
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(nsa.parameters(), 1.0)
+        opt_nsa.step()
 
-    # Histograms of fidelity and orth energies (combined for flow models)
-    fig, axs = plt.subplots(2, 3, figsize=(15, 6))
-    axs[0, 0].plot(base_hist, label="Base test MSE")
-    axs[0, 0].plot(flow_comp_hist, label="FlowComp test MSE")
-    axs[0, 0].plot(flow_learn_hist, label="FlowLearn test MSE")
-    axs[0, 0].set_title("Test MSE Trajectories")
-    axs[0, 0].legend()
+        # record
+        nsa_losses.append(float(loss.item()))
+        nsa_fids.append(float(fid.item()))
+        nsa_orths.append(float(orth.item()))
+        try:
+            wdyn = float(torch.sigmoid(nsa.alpha).detach().cpu().item())
+        except Exception:
+            wdyn = float("nan")
+        nsa_wdyn.append(wdyn)
 
-    axs[0, 1].plot(sv_b, "o-", label="Base SVs")
-    axs[0, 1].plot(sv_fc, "x-", label="FlowComp SVs")
-    axs[0, 1].plot(sv_fl, "s-", label="FlowLearn SVs")
-    axs[0, 1].set_title("Singular Values")
-    axs[0, 1].legend()
+        if verbose and (epoch % max(1, nsa_epochs//5) == 0 or epoch == nsa_epochs-1):
+            print(f"[NSA {epoch:04d}] loss={loss.item():.4e} fid={fid.item():.4e} orth={orth.item():.4e} w_dyn={wdyn:.3f}")
 
-    axs[1, 0].hist(flow_comp_Efid_hist, bins=20, alpha=0.5, label="Comp Fidelity")
-    axs[1, 0].hist(flow_comp_Eorth_hist, bins=20, alpha=0.5, label="Comp Orth")
-    axs[1, 0].hist(flow_learn_Efid_hist, bins=20, alpha=0.5, label="Learn Fidelity")
-    axs[1, 0].hist(flow_learn_Eorth_hist, bins=20, alpha=0.5, label="Learn Orth")
-    axs[1, 0].set_title("Per-Batch Energy Distributions")
-    axs[1, 0].legend()
+    nsa.eval()
+    with torch.no_grad():
+        Y_nsa_test = nsa(mlp(X_test))
+    nsa_mse = mse_fn(Y_nsa_test, Y_test)
+    nsa_rmse = rmse_fn(Y_nsa_test, Y_test)
+    nsa_mae = mae_fn(Y_nsa_test, Y_test)
+    nsa_r2 = r2_fn(Y_nsa_test, Y_test)
+    nsa_expl_var = explained_var_fn(Y_nsa_test, Y_test)
+    nsa_svals = singular_values(Y_nsa_test)
+    nsa_invorth = float(invariant_orthogonality_defect(Y_nsa_test).item())
+    if verbose:
+        print(f"NSA-refined test MSE={nsa_mse:.6f} RMSE={nsa_rmse:.6f} R2={nsa_r2:.4f} invOrth={nsa_invorth:.4e}")
 
-    axs[1, 1].bar(["Base", "Comp", "Learn"], [procrustes_err_base, procrustes_err_comp, procrustes_err_learn])
-    axs[1, 1].set_title("Procrustes Alignment Error (↓ better)")
+    # --------------------
+    # 3) Joint fine-tuning (MLP + NSA)
+    # --------------------
+    if verbose: print("\n=== JOINT FINE-TUNE ===")
+    joint_model = nn.Sequential(mlp, nsa)  # reuses trained mlp + trained nsa
+    opt_joint = torch.optim.AdamW(joint_model.parameters(), lr=lr_joint, weight_decay=1e-6)
+    joint_losses, joint_fid_hist, joint_orth_hist, joint_wdyn = [], [], [], []
+    for epoch in range(joint_epochs):
+        opt_joint.zero_grad()
+        Y_joint_tr = joint_model(X_train)
+        fid_j = fidelity_scaled(Y_joint_tr, Y_train)
+        orth_j = invariant_orthogonality_defect(Y_joint_tr)
+        loss_j = fid_j * (1.0 - w) + orth_j * w
+        loss_j.backward()
+        torch.nn.utils.clip_grad_norm_(joint_model.parameters(), 1.0)
+        opt_joint.step()
 
-    axs[0, 2].bar(["Base", "Comp", "Learn"], [ortho_def_base, ortho_def_comp, ortho_def_learn])
-    axs[0, 2].set_title("Orthogonality Defect (↓ better)")
+        joint_losses.append(float(loss_j.item()))
+        joint_fid_hist.append(float(fid_j.item()))
+        joint_orth_hist.append(float(orth_j.item()))
+        joint_wdyn.append(float(torch.sigmoid(nsa.alpha).detach().cpu().item()) if hasattr(nsa, "alpha") else float("nan"))
 
-    axs[1, 2].bar(["Base", "Comp", "Learn"], [off_diag_avg_base, off_diag_avg_comp, off_diag_avg_learn])
-    axs[1, 2].set_title("Avg Off-Diag Corr (↓ better)")
+        if verbose and (epoch % max(1, joint_epochs//5) == 0 or epoch == joint_epochs-1):
+            print(f"[Joint {epoch:04d}] loss={loss_j.item():.4e} fid={fid_j.item():.4e} orth={orth_j.item():.4e} w_dyn={joint_wdyn[-1]:.3f}")
+
+    joint_model.eval()
+    with torch.no_grad():
+        Y_joint_test = joint_model(X_test)
+
+    joint_mse = mse_fn(Y_joint_test, Y_test)
+    joint_rmse = rmse_fn(Y_joint_test, Y_test)
+    joint_mae = mae_fn(Y_joint_test, Y_test)
+    joint_r2 = r2_fn(Y_joint_test, Y_test)
+    joint_expl_var = explained_var_fn(Y_joint_test, Y_test)
+    joint_svals = singular_values(Y_joint_test)
+    joint_invorth = float(invariant_orthogonality_defect(Y_joint_test).item())
+    if verbose:
+        print(f"JOINT test MSE={joint_mse:.6f} RMSE={joint_rmse:.6f} R2={joint_r2:.4f} invOrth={joint_invorth:.4e}")
+
+    # --------------------
+    # Subspace / principal angles between predicted and true column spans
+    # --------------------
+    # We compute principal angles between column spaces (k columns) of the predicted matrix vs Y_true (test)
+    angles_mlp, svals_mlp = principal_angles(Y_mlp_test, Y_test, r=min(Y_mlp_test.shape[1], Y_test.shape[1]))
+    angles_nsa, svals_nsa = principal_angles(Y_nsa_test, Y_test, r=min(Y_nsa_test.shape[1], Y_test.shape[1]))
+    angles_joint, svals_joint = principal_angles(Y_joint_test, Y_test, r=min(Y_joint_test.shape[1], Y_test.shape[1]))
+
+    # --------------------
+    # Visualizations (summary + deep diagnostics)
+    # --------------------
+    # 1) Loss curves and w_dyn tracking
+    fig1, axs1 = plt.subplots(2, 3, figsize=(18, 10))
+    axs1 = axs1.ravel()
+
+    axs1[0].plot(mlp_losses); axs1[0].set_title("MLP training fidelity loss")
+    axs1[1].plot(nsa_losses, label="NSA total"); axs1[1].plot(nsa_fids, "--", label="NSA fid"); axs1[1].plot(nsa_orths, ":",
+                                                                                                       label="NSA orth"); axs1[1].legend(); axs1[1].set_title("NSA refinement metrics")
+    axs1[2].plot(joint_losses, label="Joint total"); axs1[2].plot(joint_fid_hist, "--", label="Joint fid"); axs1[2].plot(joint_orth_hist, ":", label="Joint orth"); axs1[2].legend(); axs1[2].set_title("Joint fine-tuning")
+
+    # w_dyn (alpha sigmoid) traces
+    axs1[3].plot(nsa_wdyn, label="NSA w_dyn (sigmoid alpha)"); axs1[3].set_title("NSA tradeoff (w_dyn)")
+    axs1[4].plot(joint_wdyn, label="Joint w_dyn"); axs1[4].set_title("Joint tradeoff (w_dyn)")
+    axs1[3].grid(True); axs1[4].grid(True)
+
+    # Sing. value spectra
+    axs1[5].plot(mlp_svals, marker='o', label='MLP svals'); axs1[5].plot(nsa_svals, marker='x', label='NSA svals'); axs1[5].plot(joint_svals, marker='s', label='JOINT svals'); axs1[5].legend(); axs1[5].set_title("Singular value spectra (test preds)")
 
     plt.tight_layout()
     plt.show()
 
-    # Summary Table
-    print("\n📊 Summary ------------------------------------------------------")
-    print(f"Final Test Loss — Base: {base_hist[-1]:.6f} | Comp: {flow_comp_hist[-1]:.6f} | Learn: {flow_learn_hist[-1]:.6f}")
-    print(f"Procrustes Error — Base: {procrustes_err_base:.6f} | Comp: {procrustes_err_comp:.6f} | Learn: {procrustes_err_learn:.6f}")
-    print(f"Orthogonality Defect — Base: {ortho_def_base:.6f} | Comp: {ortho_def_comp:.6f} | Learn: {ortho_def_learn:.6f}")
-    print(f"Final w_retract — Comp: {flow_comp_model.flow.w_retract.item():.6f} | Learn: {flow_learn_model.flow.w_retract.item():.6f}")
-    print(f"Final tradeoff_alpha — Comp: {torch.sigmoid(flow_comp_model.flow.tradeoff_alpha).item():.6f} | Learn: {torch.sigmoid(flow_learn_model.flow.tradeoff_alpha).item():.6f}")
-    print(f"Average Off-Diagonal Correlation (Embeddings) — Base: {off_diag_avg_base:.6f} | Comp: {off_diag_avg_comp:.6f} | Learn: {off_diag_avg_learn:.6f}")
-    print(f"Base Correlation Matrix:\n{corr_base}")
-    print(f"Comp Correlation Matrix:\n{corr_comp}")
-    print(f"Learn Correlation Matrix:\n{corr_learn}")
-    print(f"Median Fidelity Energy — Comp: {np.nanmedian(flow_comp_Efid_hist):.4e} | Learn: {np.nanmedian(flow_learn_Efid_hist):.4e}")
-    print(f"Median Orthogonality Energy — Comp: {np.nanmedian(flow_comp_Eorth_hist):.4e} | Learn: {np.nanmedian(flow_learn_Eorth_hist):.4e}")
-    print("---------------------------------------------------------------\n")
+    # 2) Scatter predicted vs true and residual histogram
+    fig2, axs2 = plt.subplots(2, 3, figsize=(18, 10))
+    axs2 = axs2.ravel()
+    axs2[0].scatter(Y_test.flatten().cpu(), Y_mlp_test.flatten().cpu(), alpha=0.4); axs2[0].set_title(f"MLP scatter r={np.round(mlp_r2,3)}")
+    axs2[1].scatter(Y_test.flatten().cpu(), Y_nsa_test.flatten().cpu(), alpha=0.4); axs2[1].set_title(f"MLP+NSA scatter r={np.round(nsa_r2,3)}")
+    axs2[2].scatter(Y_test.flatten().cpu(), Y_joint_test.flatten().cpu(), alpha=0.4); axs2[2].set_title(f"JOINT scatter r={np.round(joint_r2,3)}")
+
+    # residuals hist
+    axs2[3].hist((Y_mlp_test - Y_test).flatten().cpu().numpy(), bins=50, alpha=0.7); axs2[3].set_title("Residuals (MLP)")
+    axs2[4].hist((Y_nsa_test - Y_test).flatten().cpu().numpy(), bins=50, alpha=0.7); axs2[4].set_title("Residuals (MLP+NSA)")
+    axs2[5].hist((Y_joint_test - Y_test).flatten().cpu().numpy(), bins=50, alpha=0.7); axs2[5].set_title("Residuals (JOINT)")
+
+    plt.tight_layout()
+    plt.show()
+
+    # 3) Principal angles bar plots
+    fig3, ax3 = plt.subplots(1, 3, figsize=(16, 4))
+    ax3[0].bar(np.arange(len(angles_mlp)), angles_mlp); ax3[0].set_title("Principal angles MLP -> true")
+    ax3[1].bar(np.arange(len(angles_nsa)), angles_nsa); ax3[1].set_title("Principal angles MLP+NSA -> true")
+    ax3[2].bar(np.arange(len(angles_joint)), angles_joint); ax3[2].set_title("Principal angles Joint -> true")
+    plt.tight_layout(); plt.show()
+
+    # --------------------
+    # Pack results
+    # --------------------
+    out = {
+        "mlp": {
+            "Y_pred": Y_mlp_test.detach().cpu(),
+            "mse": mlp_mse, "rmse": mlp_rmse, "mae": mlp_mae, "r2": mlp_r2, "explained_var": mlp_expl_var,
+            "svals": mlp_svals, "invorth": mlp_invorth, "angles": angles_mlp, "svals_cos": svals_mlp
+        },
+        "nsa": {
+            "Y_pred": Y_nsa_test.detach().cpu(),
+            "mse": nsa_mse, "rmse": nsa_rmse, "mae": nsa_mae, "r2": nsa_r2, "explained_var": nsa_expl_var,
+            "svals": nsa_svals, "invorth": nsa_invorth, "angles": angles_nsa, "svals_cos": svals_nsa,
+            "wdyn": nsa_wdyn, "loss_hist": nsa_losses, "fid_hist": nsa_fids, "orth_hist": nsa_orths
+        },
+        "joint": {
+            "Y_pred": Y_joint_test.detach().cpu(),
+            "mse": joint_mse, "rmse": joint_rmse, "mae": joint_mae, "r2": joint_r2, "explained_var": joint_expl_var,
+            "svals": joint_svals, "invorth": joint_invorth, "angles": angles_joint, "svals_cos": svals_joint,
+            "wdyn": joint_wdyn, "loss_hist": joint_losses, "fid_hist": joint_fid_hist, "orth_hist": joint_orth_hist
+        },
+        "mlp_losses": mlp_losses,
+        "nsa_wdyn": nsa_wdyn,
+        "joint_wdyn": joint_wdyn,
+        "Y_test": Y_test.detach().cpu(),
+        "X_test": X_test.detach().cpu()
+    }
+    return out
+
+
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LinearRegression
+
+
+
+# ===========================================
+# Main evaluation with PCA baseline
+# ===========================================
+def test_mlp_then_nsa_joint_residual_pca(
+    seed=0,
+    w=0.5,
+    n=200,
+    p=8,
+    k=6,
+    hidden=128,
+    noise=0.1,
+    mlp_epochs=2000,
+    nsa_epochs=1500,
+    joint_epochs=1500,
+    lr_mlp=1e-3,
+    lr_nsa=1e-3,
+    lr_joint=5e-4,
+    apply_nonneg="hard",
+    residual=True,
+    pca_components=6
+):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # === Synthetic nonlinear data ===
+    W_true = torch.randn(p, k, device=device)
+    X = torch.randn(n, p, device=device)
+    Y_true = F.softplus(X @ W_true)
+    Y_obs = Y_true + noise * torch.randn_like(Y_true)
+
+    n_train = int(0.8 * n)
+    X_train, X_test = X[:n_train], X[n_train:]
+    Y_train, Y_test = Y_obs[:n_train], Y_obs[n_train:]
+
+    # =======================================
+    # 0️⃣ PCA Regression Baseline
+    # =======================================
+    print("\n=== PCA Regression Baseline ===")
+    pca = PCA(n_components=pca_components)
+    X_train_np = X_train.cpu().numpy()
+    Y_train_np = Y_train.cpu().numpy()
+    X_test_np = X_test.cpu().numpy()
+    Y_test_np = Y_test.cpu().numpy()
+
+    X_train_pca = pca.fit_transform(X_train_np)
+    X_test_pca = pca.transform(X_test_np)
+
+    reg = LinearRegression()
+    reg.fit(X_train_pca, Y_train_np)
+    Y_pred_pca = torch.tensor(reg.predict(X_test_pca), dtype=torch.float32, device=device)
+
+    corr_pca = torch.corrcoef(torch.stack([Y_pred_pca.flatten(), Y_test.flatten()]))[0, 1].item()
+    invorth_pca = invariant_orthogonality_defect(Y_pred_pca).item()
+
+    print(f"PCA correlation: {corr_pca:.3f}")
+    print(f"PCA orth defect: {invorth_pca:.3f}")
+
+    # =======================================
+    # 1️⃣ MLP Baseline
+    # =======================================
+    print("\n=== Training MLP ===")
+    mlp = SimpleMLP(p, k, hidden).to(device)
+    opt = torch.optim.AdamW(mlp.parameters(), lr=lr_mlp)
+    mlp_losses = []
+
+    for epoch in range(mlp_epochs):
+        opt.zero_grad()
+        Y_pred = mlp(X_train)
+        loss = fidelity_scaled(Y_pred, Y_train)
+        loss.backward()
+        opt.step()
+        mlp_losses.append(loss.item())
+
+    with torch.no_grad():
+        Y_pred_mlp = mlp(X_test)
+        corr_mlp = torch.corrcoef(torch.stack([Y_pred_mlp.flatten(), Y_test.flatten()]))[0, 1].item()
+        invorth_mlp = invariant_orthogonality_defect(Y_pred_mlp).item()
+
+    print(f"\nMLP correlation: {corr_mlp:.3f}")
+    print(f"MLP orth defect: {invorth_mlp:.3f}")
+
+    # =======================================
+    # 2️⃣ NSA refinement
+    # =======================================
+    print(f"\n=== NSA refinement (apply_nonneg='{apply_nonneg}') ===")
+    nsa = NSAFlowLayer(k, w_retract=w, apply_nonneg=apply_nonneg, residual=residual).to(device)
+    opt_nsa = torch.optim.AdamW(nsa.parameters(), lr=lr_nsa)
+    nsa_losses, nsa_fids, nsa_orths = [], [], []
+
+    with torch.no_grad():
+        Y0 = mlp(X_train)
+
+    for epoch in range(nsa_epochs):
+        opt_nsa.zero_grad()
+        Y_ref = nsa(Y0)
+        fid = fidelity_scaled(Y_ref, Y_train)
+        orth = invariant_orthogonality_defect(Y_ref)
+        loss = fid + 0.1 * orth
+        loss.backward()
+        opt_nsa.step()
+        nsa_losses.append(loss.item())
+
+    with torch.no_grad():
+        Y_pred_refined = nsa(mlp(X_test))
+        corr_nsa = torch.corrcoef(torch.stack([Y_pred_refined.flatten(), Y_test.flatten()]))[0, 1].item()
+        invorth_nsa = invariant_orthogonality_defect(Y_pred_refined).item()
+
+    print(f"\nNSA refined correlation: {corr_nsa:.3f}")
+    print(f"NSA refined orth defect: {invorth_nsa:.3f}")
+
+    # =======================================
+    # 3️⃣ Joint Fine-Tuning
+    # =======================================
+    print("\n=== Joint fine-tuning MLP + NSA ===")
+    joint_model = nn.Sequential(mlp, nsa)
+    opt_joint = torch.optim.AdamW(joint_model.parameters(), lr=lr_joint)
+    joint_losses = []
+
+    for epoch in range(joint_epochs):
+        opt_joint.zero_grad()
+        Y_joint = joint_model(X_train)
+        fid = fidelity_scaled(Y_joint, Y_train)
+        orth = invariant_orthogonality_defect(Y_joint)
+        loss = fid * (1 - w) + orth * w
+        loss.backward()
+        opt_joint.step()
+        joint_losses.append(loss.item())
+
+    with torch.no_grad():
+        Y_pred_joint = joint_model(X_test)
+        corr_joint = torch.corrcoef(torch.stack([Y_pred_joint.flatten(), Y_test.flatten()]))[0, 1].item()
+        invorth_joint = invariant_orthogonality_defect(Y_pred_joint).item()
+
+    print(f"\nFinal joint correlation: {corr_joint:.3f}")
+    print(f"Final joint orth defect: {invorth_joint:.3f}")
+    # =======================================
+    # 📊 Visualization and comparison
+    # =======================================
+    fig, axs = plt.subplots(2, 3, figsize=(17, 8))
+
+    axs[0,0].bar(["PCA","MLP","MLP+NSA","Joint"], [corr_pca, corr_mlp, corr_nsa, corr_joint])
+    axs[0,0].set_title("Test Correlation with True Y")
+
+    axs[0,1].bar(["PCA","MLP","MLP+NSA","Joint"], [invorth_pca, invorth_mlp, invorth_nsa, invorth_joint])
+    axs[0,1].set_title("Orthogonality Defect (Lower = Better)")
+
+    axs[0,2].plot(joint_losses)
+    axs[0,2].set_title("Joint Training Loss")
+
+    axs[1,0].scatter(Y_test.flatten().cpu(), Y_pred_pca.flatten().cpu(), alpha=0.4, label=f"PCA r={corr_pca:.2f}")
+    axs[1,0].scatter(Y_test.flatten().cpu(), Y_pred_mlp.flatten().cpu(), alpha=0.4, label=f"MLP r={corr_mlp:.2f}")
+    axs[1,0].scatter(Y_test.flatten().cpu(), Y_pred_joint.flatten().cpu(), alpha=0.4, label=f"Joint r={corr_joint:.2f}")
+    axs[1,0].legend()
+    axs[1,0].set_title("Predicted vs True Y")
+
+    axs[1,1].hist(Y_pred_joint.flatten().cpu().numpy(), bins=40, alpha=0.7)
+    axs[1,1].set_title(f"Output Distribution (apply_nonneg={apply_nonneg})")
+
+    corrmat = np.corrcoef(Y_pred_joint.detach().cpu().numpy().T)
+    axs[1,2].imshow(corrmat, cmap="coolwarm", vmin=-1, vmax=1)
+    axs[1,2].set_title("Column Correlation (Joint)")
+
+    plt.tight_layout()
+    plt.show()
 
     return dict(
-        base_test_hist=base_hist,
-        flow_comp_test_hist=flow_comp_hist,
-        flow_learn_test_hist=flow_learn_hist,
-        flow_comp_Efid_hist=flow_comp_Efid_hist,
-        flow_comp_Eorth_hist=flow_comp_Eorth_hist,
-        flow_learn_Efid_hist=flow_learn_Efid_hist,
-        flow_learn_Eorth_hist=flow_learn_Eorth_hist,
-        procrustes_base=procrustes_err_base,
-        procrustes_comp=procrustes_err_comp,
-        procrustes_learn=procrustes_err_learn,
+        corr_pca=corr_pca,
+        corr_mlp=corr_mlp,
+        corr_nsa=corr_nsa,
+        corr_joint=corr_joint,
+        invorth_pca=invorth_pca,
+        invorth_mlp=invorth_mlp,
+        invorth_nsa=invorth_nsa,
+        invorth_joint=invorth_joint,
+        Y_pred_joint=Y_pred_joint.detach().cpu(),
     )
+
+
+
+def test_mlp_then_nsa_joint_residual_v2(
+    seed=0,
+    w=0.5,
+    n=200,
+    p=8,
+    k=6,
+    hidden=128,
+    noise=0.1,
+    mlp_epochs=1000,
+    nsa_epochs=800,
+    joint_epochs=800,
+    lr_mlp=1e-3,
+    lr_nsa=1e-3,
+    lr_joint=5e-4,
+    apply_nonneg="hard"
+):
+    torch.manual_seed(seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # === Synthetic nonlinear mapping ===
+    W_true = torch.randn(p, k, device=device)
+    X = torch.randn(n, p, device=device)
+    Y_true = F.softplus(X @ W_true)
+    Y_obs = Y_true + noise * torch.randn_like(Y_true)
+
+    n_train = int(0.8 * n)
+    X_train, X_test = X[:n_train], X[n_train:]
+    Y_train, Y_test = Y_obs[:n_train], Y_obs[n_train:]
+
+    # =====================================================
+    # Baseline MLP
+    # =====================================================
+    print("\n=== Training MLP ===")
+    mlp = SimpleMLP(p, k, hidden).to(device)
+    opt = torch.optim.AdamW(mlp.parameters(), lr=lr_mlp)
+    mlp_losses = []
+    for epoch in range(mlp_epochs):
+        opt.zero_grad()
+        Y_pred = mlp(X_train)
+        loss = fidelity_scaled(Y_pred, Y_train)
+        loss.backward()
+        opt.step()
+        mlp_losses.append(loss.item())
+
+    with torch.no_grad():
+        Y_pred_mlp = mlp(X_test)
+        corr_mlp = torch.corrcoef(torch.stack([Y_pred_mlp.flatten(), Y_test.flatten()]))[0, 1].item()
+        mse_mlp = F.mse_loss(Y_pred_mlp, Y_test).item()
+        var_true = Y_test.var(dim=0).mean()
+        r2_mlp = 1 - mse_mlp / var_true.item()
+        orth_mlp = invariant_orthogonality_defect(Y_pred_mlp).item()
+
+    # =====================================================
+    # PCA baseline
+    # =====================================================
+    print("\n=== PCA regression baseline ===")
+    from sklearn.decomposition import PCA
+    from sklearn.linear_model import LinearRegression
+
+    X_train_np = X_train.cpu().numpy()
+    Y_train_np = Y_train.cpu().numpy()
+    X_test_np = X_test.cpu().numpy()
+    Y_test_np = Y_test.cpu().numpy()
+
+    pca = PCA(n_components=k)
+    Z_train = pca.fit_transform(X_train_np)
+    Z_test = pca.transform(X_test_np)
+    reg = LinearRegression().fit(Z_train, Y_train_np)
+    Y_pred_pca = torch.tensor(reg.predict(Z_test), device=device, dtype=torch.float32)
+
+    corr_pca = torch.corrcoef(torch.stack([Y_pred_pca.flatten(), Y_test.flatten()]))[0, 1].item()
+    mse_pca = F.mse_loss(Y_pred_pca, Y_test).item()
+    var_true = Y_test.var(dim=0).mean()
+    r2_pca = 1 - mse_pca / var_true.item()
+    orth_pca = invariant_orthogonality_defect(Y_pred_pca).item()
+
+    # =====================================================
+    # NSA refinement
+    # =====================================================
+    print("\n=== NSA refinement ===")
+    nsa = NSAFlowLayer(k, w_retract=w, apply_nonneg=apply_nonneg, residual=True).to(device)
+    opt_nsa = torch.optim.AdamW(nsa.parameters(), lr=lr_nsa)
+    nsa_losses, nsa_fids, nsa_orths = [], [], []
+
+    with torch.no_grad():
+        Y0 = mlp(X_train)
+
+    for epoch in range(nsa_epochs):
+        opt_nsa.zero_grad()
+        Y_ref, total_loss, fid, orth, w_dyn = nsa(Y0, target=Y_train)
+        total_loss.backward()
+        opt_nsa.step()
+        nsa_losses.append(total_loss.item())
+        nsa_fids.append(fid.item())
+        nsa_orths.append(orth.item())
+
+    with torch.no_grad():
+        Y_pred_refined = nsa(mlp(X_test))
+        corr_nsa = torch.corrcoef(torch.stack([Y_pred_refined.flatten(), Y_test.flatten()]))[0, 1].item()
+        mse_nsa = F.mse_loss(Y_pred_refined, Y_test).item()
+        var_true = Y_test.var(dim=0).mean()
+        r2_nsa = 1 - mse_nsa / var_true.item()
+        orth_nsa = invariant_orthogonality_defect(Y_pred_refined).item()
+
+    # =====================================================
+    # Joint fine-tuning (learn α → w_dyn evolution)
+    # =====================================================
+    print("\n=== Joint fine-tuning ===")
+    joint_model = nn.Sequential(mlp, nsa)
+    opt_joint = torch.optim.AdamW(joint_model.parameters(), lr=lr_joint)
+    joint_losses, joint_fids, joint_orths, wdyn_trace = [], [], [], []
+
+    for epoch in range(joint_epochs):
+        opt_joint.zero_grad()
+        Y_joint, total_loss, fid, orth, w_dyn = nsa(mlp(X_train), target=Y_train)
+        total_loss.backward()
+        opt_joint.step()
+        joint_losses.append(total_loss.item())
+        joint_fids.append(fid.item())
+        joint_orths.append(orth.item())
+        wdyn_trace.append(w_dyn.item())
+        if epoch % 100 == 0:
+            print(f"[Joint {epoch:04d}] loss={total_loss.item():.4e} fid={fid.item():.4e} orth={orth.item():.4e} w_dyn={w_dyn.item():.3f}")
+
+    with torch.no_grad():
+        Y_pred_joint = joint_model(X_test)
+        corr_joint = torch.corrcoef(torch.stack([Y_pred_joint.flatten(), Y_test.flatten()]))[0, 1].item()
+        mse_joint = F.mse_loss(Y_pred_joint, Y_test).item()
+        var_true = Y_test.var(dim=0).mean()
+        r2_joint = 1 - mse_joint / var_true.item()
+        orth_joint = invariant_orthogonality_defect(Y_pred_joint).item()
+
+    # =====================================================
+    # 📊 Summary table
+    # =====================================================
+    summary = pd.DataFrame([
+        ["PCA", corr_pca, r2_pca, mse_pca, orth_pca],
+        ["MLP", corr_mlp, r2_mlp, mse_mlp, orth_mlp],
+        ["MLP+NSA", corr_nsa, r2_nsa, mse_nsa, orth_nsa],
+        ["Joint", corr_joint, r2_joint, mse_joint, orth_joint],
+    ], columns=["Model", "Corr", "R2", "MSE", "OrthDefect"])
+    print("\n=== Quantitative Summary ===")
+    print(summary)
+
+    # =====================================================
+    # 📈 Visualization suite
+    # =====================================================
+    fig, axs = plt.subplots(3, 3, figsize=(17, 12))
+
+    axs[0,0].plot(mlp_losses); axs[0,0].set_title("MLP Loss")
+    axs[0,1].plot(nsa_losses, label="Total"); axs[0,1].plot(nsa_fids, '--', label="Fid"); axs[0,1].plot(nsa_orths, '--', label="Orth")
+    axs[0,1].legend(); axs[0,1].set_title("NSA Refinement")
+    axs[0,2].plot(joint_losses, label="Total"); axs[0,2].plot(joint_fids, '--', label="Fid"); axs[0,2].plot(joint_orths, '--', label="Orth")
+    axs[0,2].legend(); axs[0,2].set_title("Joint Fine-tune")
+
+    axs[1,0].scatter(Y_test.cpu().flatten(), Y_pred_mlp.cpu().flatten(), alpha=0.4, label=f"MLP r={corr_mlp:.2f}")
+    axs[1,0].scatter(Y_test.cpu().flatten(), Y_pred_refined.cpu().flatten(), alpha=0.4, label=f"MLP+NSA r={corr_nsa:.2f}")
+    axs[1,0].scatter(Y_test.cpu().flatten(), Y_pred_joint.cpu().flatten(), alpha=0.4, label=f"Joint r={corr_joint:.2f}")
+    axs[1,0].legend(); axs[1,0].set_title("Pred vs True (Test)")
+
+    axs[1,1].plot(wdyn_trace); axs[1,1].set_title("w_dyn Evolution (sigmoid(α))")
+
+    axs[1,2].imshow(np.corrcoef(Y_pred_joint.cpu().numpy().T), cmap="coolwarm", vmin=-1, vmax=1)
+    axs[1,2].set_title("Column Correlation Heatmap")
+
+    axs[2,0].hist(Y_pred_joint.cpu().numpy().flatten(), bins=40, alpha=0.7); axs[2,0].set_title("Output Distribution")
+
+    axs[2,1].imshow(pca.components_, aspect='auto', cmap='coolwarm')
+    axs[2,1].set_title("PCA Components")
+
+    axs[2,2].axis('off')
+    axs[2,2].table(cellText=summary.round(3).values, colLabels=summary.columns, loc='center')
+
+    plt.tight_layout()
+    plt.show()
+
+    return summary, dict(Y_pred_joint=Y_pred_joint.detach().cpu(), wdyn_trace=wdyn_trace)
