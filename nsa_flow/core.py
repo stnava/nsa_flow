@@ -3463,3 +3463,150 @@ def test_mlp_then_nsa_joint_residual_v2(
     plt.show()
 
     return summary, dict(Y_pred_joint=Y_pred_joint.detach().cpu(), wdyn_trace=wdyn_trace)
+
+
+
+################################
+import matplotlib.pyplot as plt
+from copy import deepcopy
+import os
+################################
+def demo_nsa_flow_tradeoff(
+    w_values=None,
+    p=40,
+    k=6,
+    noise_level=0.05,
+    max_iter=1000,
+    lr_strategy="armijo",
+    apply_nonneg="relu",
+    warmup_iters=20,
+    tol=1e-6,
+    window_size=8,
+    seed=0,
+    verbose=False,
+    save_path=None,
+    fig_dpi=250,
+    legend_y=0.50,         # 🟢 knob 1: vertical position of legend
+    font_scale=1.2,        # 🟢 knob 2: controls all font sizes
+    fig_scale=1.0,         # 🟢 knob 3: controls overall figure size
+):
+    """
+    Educational demo: visualize how NSA-Flow trades off fidelity vs orthogonality
+    across a range of w values, with optional figure saving and adjustable layout.
+
+    Layout knobs:
+        legend_y  – moves the legend vertically in the first subplot
+        font_scale – single scalar controlling all font sizes
+        fig_scale  – overall scaling of figure dimensions
+    """
+
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    # --- Synthetic setup ---
+    X_true = torch.randn(p, k)
+    X_true = nsa_flow_retract_auto(X_true, 0.5)
+    X0 = X_true.detach().clone()
+    Y0 = X_true + noise_level * torch.randn_like(X_true)
+
+    if w_values is None:
+        w_values = np.linspace(0.0, 1.0, 9).tolist()
+        w_values = [ 0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.99 ]
+
+    # --- Figure setup ---
+    ncols = 4
+    nrows = int(np.ceil(len(w_values) / ncols))
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(fig_scale * 16, fig_scale * 3.5 * nrows)
+    )
+    axes = axes.flatten()
+
+    results = []
+
+    # --- Font sizes (scaled globally) ---
+    title_fs = 12 * font_scale
+    label_fs = 10 * font_scale
+    annot_fs = 8.5 * font_scale
+    legend_fs = 8 * font_scale
+    suptitle_fs = 14 * font_scale
+
+    # --- Main sweep ---
+    for i, w in enumerate(w_values):
+        result = nsa_flow_orth(
+            Y0,
+            w=w,
+            max_iter=max_iter,
+            initial_learning_rate=None,
+            lr_strategy=lr_strategy,
+            verbose=verbose,
+            tol=tol,
+            window_size=window_size,
+            warmup_iters=warmup_iters,
+            apply_nonneg=apply_nonneg,
+        )
+
+        X_target = result["target"]
+        Y_final = result["Y"]
+
+        fid_start = fidelity_scaled(X_target, Y0).item()
+        fid_end = fidelity_scaled(X_target, Y_final).item()
+
+        orth_start = invariant_orthogonality_defect(Y0).item()
+        orth_end = invariant_orthogonality_defect(Y_final).item()
+
+        results.append({
+            "w": w,
+            "fid_start": fid_start,
+            "fid_end": fid_end,
+            "orth_start": orth_start,
+            "orth_end": orth_end,
+            "best_total_energy": result["best_total_energy"],
+        })
+
+        ax = axes[i]
+        trace = result["traces"]
+
+        if isinstance(trace, pd.DataFrame):
+            ax.plot(trace["iter"], trace["total_energy"], label="Total", color="black", lw=2)
+            ax.plot(trace["iter"], trace["fidelity"], label="Fidelity", color="blue", ls="--", alpha=0.7)
+            ax.plot(trace["iter"], trace["orthogonality"], label="Orthogonality", color="red", ls="--", alpha=0.7)
+            ax.set_title(f"w = {w:.2f}", fontsize=title_fs)
+            ax.set_xlabel("Iteration", fontsize=label_fs)
+            ax.set_ylabel("Energy", fontsize=label_fs)
+
+            # Annotate with metrics
+            ax.text(
+                0.98, 0.97,
+                f"Fid: {fid_end:.2e}\nOrth: {orth_end:.2e}",
+                transform=ax.transAxes,
+                ha="right", va="top", fontsize=annot_fs,
+                bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="gray", lw=0.5, alpha=0.85)
+            )
+
+        # Legend only on the first panel
+        if i == 0:
+            ax.legend(fontsize=legend_fs, loc="upper right", bbox_to_anchor=(1.0, legend_y), frameon=False)
+
+    # Hide unused axes
+    for j in range(i + 1, len(axes)):
+        axes[j].axis("off")
+
+    fig.suptitle("NSA-Flow Tradeoff: Fidelity vs Orthogonality", fontsize=suptitle_fs, y=0.995)
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+
+    # --- Save or show ---
+    if save_path is not None:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        fig.savefig(save_path, dpi=fig_dpi, bbox_inches="tight")
+        print(f"\n✅ Figure saved to: {save_path}")
+    else:
+        plt.show()
+
+    results_df = pd.DataFrame(results)
+    print("\nSummary of NSA-Flow tradeoff results:\n")
+    print(results_df.round(4))
+
+    return results_df, save_path
+
