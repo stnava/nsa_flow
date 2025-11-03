@@ -27,6 +27,60 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 
+import torch
+import numpy as np
+import pandas as pd
+
+def safe_to_tensor(X, dtype=torch.float64, device=None, name="input"):
+    """
+    Safely convert an input (NumPy, pandas, or torch) into a clean torch.Tensor.
+
+    Handles:
+      - pd.DataFrame with mixed or non-numeric columns
+      - np.ndarray with dtype=object or NaNs
+      - torch.Tensor (passed through)
+    
+    Parameters
+    ----------
+    X : array-like
+        Input array, DataFrame, or tensor.
+    dtype : torch.dtype, optional
+        Target tensor precision (default: torch.float64).
+    device : torch.device or str, optional
+        Target device (default: None → keep on CPU).
+    name : str, optional
+        Used in error messages for debugging context.
+    
+    Returns
+    -------
+    torch.Tensor
+        Cleaned tensor with numeric dtype and NaNs replaced by 0.
+    """
+    # --- Handle torch tensor early ---
+    if torch.is_tensor(X):
+        return X.to(dtype=dtype, device=device)
+
+    # --- Handle pandas DataFrame ---
+    if isinstance(X, pd.DataFrame):
+        X = X.apply(pd.to_numeric, errors='coerce').fillna(0.0).to_numpy()
+
+    # --- Handle numpy array ---
+    if isinstance(X, np.ndarray):
+        if X.dtype == object:
+            # Convert elementwise, fallback to 0.0 on failure
+            def _safe_float(v):
+                try:
+                    return float(v)
+                except Exception:
+                    return 0.0
+            X = np.vectorize(_safe_float)(X)
+        # Replace any remaining NaNs or infs
+        X = np.nan_to_num(X, nan=0.0, posinf=1e6, neginf=-1e6)
+        X = np.array(X, dtype=np.float64)
+        return torch.tensor(X, dtype=dtype, device=device)
+
+    raise TypeError(f"Unsupported type for {name}: {type(X)}")
+
 def invariant_orthogonality_defect(V):
     """Scale-invariant orthogonality defect."""
     norm2 = torch.sum(V ** 2)
@@ -91,11 +145,10 @@ def apply_nonnegativity(Y, mode="softplus"):
                          "Use 'none', 'softplus', or True/'hard'.")
 
 
-
 def compute_energy(
     Y, X0, w=0.5,
-    fidelity_type="scale_invariant",   # can be "basic", "scale_invariant", or "symmetric"
-    orth_type="scale_invariant",       # can be "basic" or "scale_invariant"
+    fidelity_type="scale_invariant",
+    orth_type="scale_invariant",
     fid_eta=1.0,
     c_orth=1.0,
     track_grad=True,
@@ -103,7 +156,15 @@ def compute_energy(
 ):
     """
     Centralized energy computation for NSA-Flow.
+    Combines fidelity and orthogonality losses into a total energy value.
     """
+
+    import torch
+
+    # --- Ensure safe numeric inputs ---
+    w = float(w)
+    fid_eta = float(fid_eta)
+    c_orth = float(c_orth)
 
     # --- Fidelity term ---
     if fidelity_type == "basic":
@@ -117,18 +178,20 @@ def compute_energy(
 
     # --- Orthogonality term ---
     if orth_type == "basic":
-        orth = c_orth * torch.norm(Y.T @ Y - torch.eye(Y.shape[1], device=Y.device))**2
+        I = torch.eye(Y.shape[1], device=Y.device, dtype=Y.dtype)
+        orth = c_orth * torch.mean((Y.T @ Y - I) ** 2)
     elif orth_type == "scale_invariant":
-        orth = c_orth * defect_fast(Y) 
+        orth = c_orth * defect_fast(Y)
     else:
         raise ValueError(f"Unknown orth_type: {orth_type}")
 
-    total = fidelity * ( 1.0 - w ) + orth * w
+    # --- Total energy ---
+    total = fidelity * (1 - w) + orth * w
 
     if not track_grad:
-        fidelity = fidelity.detach().item()
-        orth = orth.detach().item()
-        total = total.detach().item()
+        fidelity = fidelity.detach()
+        orth = orth.detach()
+        total = total.detach()
 
     if return_dict:
         return {
@@ -138,6 +201,7 @@ def compute_energy(
         }
 
     return total
+
 
 def traces_to_dataframe(traces):
     """
@@ -1342,6 +1406,12 @@ def nsa_flow_orth(
     else:
         raise ValueError("precision must be 'float32' or 'float64'")
 
+    import numpy as np, torch, pandas as pd
+
+    Y0 = safe_to_tensor(Y0, dtype=torch.float64, name="Y0")
+    if X0 is not None:
+        X0 = safe_to_tensor(X0, dtype=torch.float64, name="X0")
+
     torch.manual_seed(seed)
     if device is None:
         device = Y0.device
@@ -1459,10 +1529,6 @@ def nsa_flow_orth(
                 opt = get_torch_optimizer(optimizer, [Z], lr=lr)
 
 
-
-    # --- Optimization variable ---
-    Z = torch.nn.Parameter(Y.clone().detach().requires_grad_(True))
-
     # --- Learning rate strategy ---
     if initial_learning_rate is None and isinstance(lr_strategy, str) and \
        lr_strategy.lower() in get_lr_estimation_strategies():
@@ -1487,6 +1553,7 @@ def nsa_flow_orth(
     else:
         lr = initial_learning_rate or 1e-3
 
+    Z = torch.nn.Parameter(Y.clone().detach().requires_grad_(True))
     opt = get_torch_optimizer(optimizer, [Z], lr=lr*lrscl)
 
     # --- Tracking and monitoring ---
@@ -1513,10 +1580,11 @@ def nsa_flow_orth(
             c_orth=c_orth,
             track_grad=True,
         )
-
+        # --- Compute energy (autograd-safe) ---
         total_energy.backward()
+        g = Z.grad
         opt.step()
-
+        # --- Compute energy (autograd-safe) ---
         # --- Evaluate & store progress ---
         with torch.no_grad():
             Y_eval = nsa_flow_retract_auto(Z, w_use, retraction)
@@ -3609,4 +3677,157 @@ def demo_nsa_flow_tradeoff(
     print(results_df.round(4))
 
     return results_df, save_path
+
+
+
+def demo_nsa_flow_optimizer_tradeoff(
+    optimizers=None,
+    w_values=None,
+    p=40,
+    k=6,
+    noise_level=0.05,
+    max_iter=600,
+    lr_strategy="armijo",
+    apply_nonneg="relu",
+    warmup_iters=20,
+    tol=1e-6,
+    window_size=8,
+    seed=0,
+    verbose=False,
+    nrows=None,
+    ncols=None,
+    save_path=None,
+    fig_dpi=250,
+    legend_y=0.4,
+    font_scale=1.1,
+    fig_scale=1.0,
+):
+    """
+    Compare optimizer performance across w-values.
+    Plots Fidelity (blue) and Orthogonality (red) together on each optimizer's subplot.
+    Allows user to choose subplot grid dimensions (nrows, ncols).
+    """
+    import time
+
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    # --- Synthetic setup ---
+    X_true = torch.randn(p, k)
+    X_true = nsa_flow_retract_auto(X_true, 0.5)
+    Y0 = X_true + noise_level * torch.randn_like(X_true)
+
+    # --- Weight values ---
+    if w_values is None:
+        w_values = [0.01, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 0.9, 0.99]
+
+    # --- Optimizers ---
+    if optimizers is None:
+        optimizers = get_torch_optimizer(return_list=True)
+        optimizers = [o for o in optimizers if o not in ["pid", "qhm", "qhadam"]]
+        optimizers = ["adabound","adam","asgd","lars","radam","sgd","sgdp","yogi"]
+
+    n_opt = len(optimizers)
+
+    # --- Determine layout ---
+    if nrows is None or ncols is None:
+        ncols = math.ceil(math.sqrt(n_opt)) if ncols is None else ncols
+        nrows = math.ceil(n_opt / ncols)
+
+    # --- Font and figure parameters ---
+    title_fs = 12 * font_scale
+    label_fs = 10 * font_scale
+    legend_fs = 8.5 * font_scale
+    suptitle_fs = 15 * font_scale
+
+    fig, axes = plt.subplots(
+        nrows=nrows, ncols=ncols,
+        figsize=(fig_scale * 4.8 * ncols, fig_scale * 3.6 * nrows),
+        sharex=True,
+    )
+
+    axes = np.array(axes).reshape(-1)  # flatten grid
+    results = []
+
+    for i, opt_name in enumerate(optimizers):
+        ax = axes[i]
+        fid_vals, orth_vals = [], []
+
+        for w in w_values:
+            try:
+                result = nsa_flow_orth(
+                    Y0,
+                    w=w,
+                    max_iter=max_iter,
+                    lr_strategy=lr_strategy,
+                    verbose=False,
+                    tol=tol,
+                    window_size=window_size,
+                    warmup_iters=warmup_iters,
+                    apply_nonneg=apply_nonneg,
+                    optimizer=opt_name,
+                )
+
+                X_target = result["target"]
+                Y_final = result["Y"]
+                fid_end = fidelity_scaled(X_target, Y_final).item()
+                orth_end = invariant_orthogonality_defect(Y_final).item()
+                if verbose:
+                    print(f"[{opt_name} | w={w:.2f}] FID={fid_end:.4e}, ORTH={orth_end:.4e}")
+                fid_vals.append(fid_end)
+                orth_vals.append(orth_end)
+                results.append({
+                    "optimizer": opt_name,
+                    "w": w,
+                    "fid_end": fid_end,
+                    "orth_end": orth_end,
+                })
+            except Exception as e:
+                fid_vals.append(np.nan)
+                orth_vals.append(np.nan)
+                results.append({
+                    "optimizer": opt_name,
+                    "w": w,
+                    "fid_end": np.nan,
+                    "orth_end": np.nan,
+                    "error": str(e)
+                })
+
+        # --- Plot both metrics on same axes ---
+        ax2 = ax.twinx()
+        ax.plot(w_values, fid_vals, '-o', color="blue", label="Fidelity")
+        ax2.plot(w_values, orth_vals, '-s', color="red", label="Orthogonality")
+
+        ax.set_title(opt_name, fontsize=title_fs)
+        ax.set_xlabel("w", fontsize=label_fs)
+        ax.set_ylabel("Fidelity", color="blue", fontsize=label_fs)
+        ax2.set_ylabel("Orthogonality", color="red", fontsize=label_fs)
+
+        ax.grid(alpha=0.3)
+
+        # Combine legends
+        lines, labels = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax2.legend(lines + lines2, labels + labels2, fontsize=legend_fs,
+                   loc="upper right", bbox_to_anchor=(1.0, legend_y), frameon=False)
+
+    # --- Turn off unused subplots ---
+    for j in range(len(optimizers), len(axes)):
+        axes[j].axis("off")
+
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.suptitle("NSA-Flow Optimizer Comparison: Fidelity & Orthogonality vs w",
+                 fontsize=suptitle_fs, y=0.995)
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        fig.savefig(save_path, dpi=fig_dpi, bbox_inches="tight")
+        print(f"✅ Saved figure to {save_path}")
+    else:
+        plt.show()
+
+    results_df = pd.DataFrame(results)
+    print("\nSummary of results (per optimizer × w):")
+    print(results_df.groupby("optimizer")[["fid_end", "orth_end"]].mean().round(4))
+    return results_df
 

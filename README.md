@@ -55,30 +55,26 @@ pip install git+https://github.com/stnava/nsa_flow.git
 ```python
 import torch
 import nsa_flow
-from nsa_flow import nsa_flow, invariant_orthogonality_defect
-
 torch.manual_seed(42)
-
 # Random initialization
-Y = torch.randn(50, 10)
-X0 = torch.randn_like(Y)
-
+Y = torch.randn(120, 200)+1
+print("Initial orthogonality defect:", nsa_flow.invariant_orthogonality_defect(Y))
 # Run NSA-Flow optimization
-result = nsa_flow(
+result = nsa_flow.nsa_flow_orth(
     Y,
-    X0=X0,
-    w=0.8,
+    w=0.5,
     retraction="soft_polar",
-    optimizer="sgdp",
-    max_iter=50,
+    optimizer="asgd",
+    max_iter=5000,
     record_every=1,
     tol=1e-8,
-    initial_learning_rate=1e-2,
-    verbose=True,
+    initial_learning_rate=None,
+    lr_strategy='bayes',
+    warmup_iters=10,
+    verbose=False,
 )
-
-print("Initial orthogonality defect:", invariant_orthogonality_defect(Y))
-print("Final orthogonality defect:", invariant_orthogonality_defect(result["Y"]))
+nsa_flow.plot_nsa_trace( result['traces'] )
+print("Final orthogonality defect:", nsa_flow.invariant_orthogonality_defect(result["Y"]))
 ```
 
 ⸻
