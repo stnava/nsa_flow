@@ -8,7 +8,7 @@ It unifies sparse matrix factorization, orthogonalization, and manifold constrai
 Documentation of functions [here](https://htmlpreview.github.io/?https://raw.githubusercontent.com/stnava/nsa_flow/main/docs/nsa_flow.html)
 
 
-[Download the Project Slides](./docs/project-Tuning_Interpretability_with_Orthogonal_Flow.pdf)
+[Download the Project Slides](./docs/Tuning_Interpretability_with_Orthogonal_Flow.pdf)
 
 
 ---
