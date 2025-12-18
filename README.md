@@ -3,6 +3,11 @@
 **NSA-Flow** is a general-purpose optimization framework for interpretable representation learning.  
 It unifies sparse matrix factorization, orthogonalization, and manifold constraints into a single, differentiable algorithm that operates near the Stiefel manifold.
 
+![The NSA-flow framework](docs/nsaflow_info.png)
+
+Documentation of functions [here](https://htmlpreview.github.io/?https://raw.githubusercontent.com/stnava/nsa_flow/main/docs/index.html)
+
+
 ---
 
 ## ✨ Overview
