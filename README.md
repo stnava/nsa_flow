@@ -5,7 +5,7 @@ It unifies sparse matrix factorization, orthogonalization, and manifold constrai
 
 ![The NSA-flow framework](docs/nsaflow_info.png)
 
-Documentation of functions [here](https://htmlpreview.github.io/?https://raw.githubusercontent.com/stnava/nsa_flow/main/docs/index.html)
+Documentation of functions [here](https://htmlpreview.github.io/?https://raw.githubusercontent.com/stnava/nsa_flow/main/docs/nsa_flow.html)
 
 
 ---
