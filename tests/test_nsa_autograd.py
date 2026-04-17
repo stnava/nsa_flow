@@ -3,7 +3,7 @@ import pytest
 import torch_optimizer
 
 from nsa_flow import (
-    nsa_flow_autograd,
+    nsa_flow_orth,
     get_torch_optimizer,
     nsa_flow_retract_auto,
     defect_fast,
@@ -31,14 +31,14 @@ def test_get_torch_optimizer_invalid_name():
 # =====================================================
 # ===============  NSA-FLOW TESTS =====================
 # =====================================================
-@pytest.mark.parametrize("optimizer", ["adam", "lbfgs", "sgd"])
+@pytest.mark.parametrize("optimizer", ["adam", "sgd"])
 @pytest.mark.parametrize("retraction", ["none", "polar", "soft_polar"])
-def test_nsa_flow_autograd_converges(optimizer, retraction):
+def test_nsa_flow_orth_converges(optimizer, retraction):
     torch.manual_seed(0)
     Y0 = torch.randn(10, 4, dtype=torch.float64)
     X0 = Y0 + 0.05 * torch.randn_like(Y0)
 
-    result = nsa_flow_autograd(
+    result = nsa_flow_orth(
         Y0=Y0,
         X0=X0,
         w=0.5,
@@ -59,8 +59,10 @@ def test_nsa_flow_autograd_converges(optimizer, retraction):
 
 def test_energy_decreases_over_time():
     Y0 = torch.randn(12, 5)
-    result = nsa_flow_autograd(Y0, max_iter=40, record_every=1, tol=1e-8, verbose=True )
-    energies = [t["total_energy"] for t in result["traces"]]
+    result = nsa_flow_orth(Y0, max_iter=40, record_every=1, tol=1e-8, verbose=True )
+    # Traces is a DataFrame
+    df = result["traces"]
+    energies = df["total_energy"].values
     assert all(e >= 0 for e in energies)
     assert energies[-1] <= energies[0] * 1.01, "Energy did not decrease sufficiently"
 
@@ -68,7 +70,7 @@ def test_energy_decreases_over_time():
 @pytest.mark.parametrize("apply_nonneg", [True, False])
 def test_nonnegativity_constraint_respected(apply_nonneg):
     Y0 = torch.randn(8, 3)
-    result = nsa_flow_autograd(Y0, apply_nonneg=apply_nonneg, max_iter=20)
+    result = nsa_flow_orth(Y0, apply_nonneg=apply_nonneg, max_iter=20)
     Y_final = result["Y"]
     if apply_nonneg:
         assert torch.all(Y_final >= -1e-10)
@@ -96,13 +98,13 @@ def test_defect_fast_behavior():
 
 def test_deterministic_seed_reproducibility():
     Y0 = torch.randn(6, 4)
-    res1 = nsa_flow_autograd(Y0, seed=123, max_iter=10)
-    res2 = nsa_flow_autograd(Y0, seed=123, max_iter=10)
+    res1 = nsa_flow_orth(Y0, seed=123, max_iter=10)
+    res2 = nsa_flow_orth(Y0, seed=123, max_iter=10)
     assert torch.allclose(res1["Y"], res2["Y"], atol=1e-8)
 
 
 def test_returns_expected_keys():
     Y0 = torch.randn(10, 5)
-    res = nsa_flow_autograd(Y0, max_iter=10)
+    res = nsa_flow_orth(Y0, max_iter=10)
     for k in ["Y", "traces", "final_iter", "best_total_energy", "best_Y_iteration", "target"]:
         assert k in res

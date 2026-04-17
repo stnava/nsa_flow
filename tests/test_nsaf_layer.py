@@ -1,69 +1,101 @@
 import torch
 import torch.nn as nn
-from nsa_flow import nsa_flow, nsa_flow_retract_auto, defect_fast, NSAFlowLayer
-# Assuming you have the full definitions from previous context:
-# - get_torch_optimizer
-# - invariant_orthogonality_defect
-# - defect_fast
-# - inv_sqrt_sym_adaptive
-# - nsa_flow_retract_auto
-# - nsa_flow
-# - NSAFlowLayer (as defined in the previous response)
+from nsa_flow import NSAFlowLayer, defect_fast
 
-# Paste those definitions here if not already in your script.
-# For brevity, assuming they are available.
-
-# Simple test script
-def test_nsa_flow_layer(batch_size=2, p=20, k=5, apply_nonneg=False, max_iter=100, verbose=True):
-    # Create dummy data: batch of matrices to approximate
-    X0 = torch.randn(batch_size, p, k)
-    if apply_nonneg:
-        X0 = torch.abs(X0)  # Make non-negative for testing
-
-    # Instantiate the layer
+def test_nsa_flow_layer_basic():
+    """Test the basic functionality of NSAFlowLayer."""
+    batch_size = 4
+    p = 20
+    k = 5
+    
+    # Input data
+    X = torch.randn(batch_size, p, k)
+    
+    # Initialize layer
     layer = NSAFlowLayer(
-        w=0.5,
-        retraction="soft_polar",
-        max_iter=max_iter,
-        tol=1e-5,
-        apply_nonneg=apply_nonneg,
-        optimizer="adam",  # Or "fast"
-        initial_learning_rate=0.01,  # Adjust as needed
-        simplified=False,
-        project_full_gradient=False
+        k=k,
+        hidden=32,
+        w_retract=0.5,
+        retraction_type="soft_polar",
+        apply_nonneg="none",
+        residual=False,
+        use_transform=True
     )
-
+    
     # Forward pass
-    Y = layer(X0)
+    Y = layer(X)
+    
+    print(f"Input shape: {X.shape}")
+    print(f"Output shape: {Y.shape}")
+    
+    assert Y.shape == (batch_size, p, k), f"Shape mismatch: {Y.shape}"
+    
+    # Check orthogonality defect for first batch item
+    defect_in = defect_fast(X[0])
+    defect_out = defect_fast(Y[0])
+    print(f"Defect In:  {defect_in:.6e}")
+    print(f"Defect Out: {defect_out:.6e}")
+    
+    # Since w_retract=0.5, defect should generally decrease
+    # (though not guaranteed in a single step with transform, but usually true)
+    
+def test_nsa_flow_layer_nonneg():
+    """Test nonnegativity enforcement in NSAFlowLayer."""
+    batch_size = 2
+    p = 10
+    k = 3
+    X = torch.randn(batch_size, p, k)
+    
+    layer = NSAFlowLayer(
+        k=k,
+        apply_nonneg="hard"
+    )
+    
+    Y = layer(X)
+    assert torch.all(Y >= 0), "Non-negativity (hard) not enforced"
+    print("Non-negativity (hard) check passed.")
 
-    # Verify shapes
-    assert Y.shape == (batch_size, p, k), f"Unexpected shape: {Y.shape}"
+def test_nsa_flow_layer_residual():
+    """Test residual connection in NSAFlowLayer."""
+    batch_size = 2
+    p = 10
+    k = 3
+    X = torch.randn(batch_size, p, k)
+    
+    layer = NSAFlowLayer(
+        k=k,
+        residual=True,
+        w_retract=0.5
+    )
+    
+    Y = layer(X)
+    assert Y.shape == X.shape
+    print("Residual connection pass successful.")
 
-    # Check non-negativity if enabled
-    if apply_nonneg:
-        assert torch.all(Y >= 0), "Non-negativity not enforced"
+def test_nsa_flow_layer_with_target():
+    """Test loss computation when target is provided."""
+    batch_size = 2
+    p = 10
+    k = 3
+    X = torch.randn(batch_size, p, k)
+    target = torch.randn(batch_size, p, k)
+    
+    layer = NSAFlowLayer(k=k)
+    
+    # Forward with target returns (Y_out, total_loss, fid, orth, w_dyn)
+    output = layer(X, target=target)
+    
+    assert len(output) == 5
+    Y_out, loss, fid, orth, w_dyn = output
+    
+    assert loss > 0
+    print(f"Loss computed: {loss.item():.6e}")
+    print(f"Fidelity: {fid.item():.6e}, Orth: {orth.item():.6e}")
 
-    # Compute orthogonality defect for each batch item
-    defects = []
-    for i in range(batch_size):
-        defect = defect_fast(Y[i])
-        defects.append(defect.item())
-        if verbose:
-            print(f"Batch {i}: Orthogonality defect = {defect.item():.6e}")
-
-    # Fidelity: mean squared error to X0
-    mse = torch.mean((Y - X0) ** 2).item()
-    if verbose:
-        print(f"Mean MSE to target: {mse:.6e}")
-        print(f"Average defect: {sum(defects)/batch_size:.6e}")
-
-    return Y
-
-# Run the test
 if __name__ == "__main__":
-    print("Testing without non-negativity:")
-    test_nsa_flow_layer(apply_nonneg=False, max_iter=200)
-
-    print("\nTesting with non-negativity:")
-    test_nsa_flow_layer(apply_nonneg=True, max_iter=200)
-
+    print("Running NSAFlowLayer tests...")
+    test_nsa_flow_layer_basic()
+    test_nsa_flow_layer_nonneg()
+    test_nsa_flow_layer_residual()
+    test_nsa_flow_layer_with_target()
+    print("All NSAFlowLayer tests passed!")

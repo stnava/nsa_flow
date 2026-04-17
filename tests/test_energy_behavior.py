@@ -1,14 +1,14 @@
 import torch
 import matplotlib.pyplot as plt
 import nsa_flow  # make sure your module is importable
-from nsa_flow import nsa_flow,  nsa_flow_retract_auto, invariant_orthogonality_defect, defect_fast, nsa_flow_autograd, plot_nsa_trace
+from nsa_flow import invariant_orthogonality_defect, nsa_flow_orth, plot_nsa_trace
 torch.manual_seed(42)
 Y = torch.randn(50, 10)
 X0 = torch.randn(Y.shape[0], Y.shape[1])
 retraction='soft_polar'
 o='lars'
 ###################
-result = nsa_flow_autograd(
+result = nsa_flow_orth(
         Y * 1e4,
         w=0.5, 
         retraction=retraction,
