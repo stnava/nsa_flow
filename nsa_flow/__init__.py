@@ -21,6 +21,8 @@ from .core import (
     evaluate, 
     plot_evaluation_summary,
     NSAFlowLayer,
+    NSAFlowLinear,
+    NSAFlowConv2d,
     test_mlp_then_nsa_joint_residual,
     test_mlp_then_nsa_joint_residual_pca,
     test_mlp_then_nsa_joint_residual_diagnostics, 
@@ -31,7 +33,8 @@ from .core import (
     demo_nsa_flow_tradeoff,
     safe_to_tensor,
     demo_nsa_flow_optimizer_tradeoff,
-    nsa_flow  # This is the alias to nsa_flow_orth
+    nsa_flow,  # This is the alias to nsa_flow_orth
+    nsa_flow_autograd # Alias
 )
 from . import legacy
 
@@ -44,9 +47,9 @@ __all__ = [
     "test_nsa_flow_orth_modular", "test_aggression_effect_with_convergence",
     "get_lr_estimation_strategies", "test_lr_aggression_monotonicity",
     "run_single_experiment", "evaluate", "plot_evaluation_summary",
-    "NSAFlowLayer", "test_mlp_then_nsa_joint_residual", 
+    "NSAFlowLayer", "NSAFlowLinear", "NSAFlowConv2d", "test_mlp_then_nsa_joint_residual", 
     "test_mlp_then_nsa_joint_residual_pca", "test_mlp_then_nsa_joint_residual_diagnostics",
     "test_mlp_then_nsa_joint_residual_v2", "fidelity_scaled", "fidelity_symmetric",
-    "nsa_flow_orth", "demo_nsa_flow_tradeoff", "safe_to_tensor", 
+    "nsa_flow_orth", "nsa_flow_autograd", "demo_nsa_flow_tradeoff", "safe_to_tensor", 
     "demo_nsa_flow_optimizer_tradeoff", "legacy"
 ]

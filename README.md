@@ -145,3 +145,14 @@ GitHub.
 
 
 
+## to publish a release
+
+before doing this - make sure you have a recent run of `pip-compile pyproject.toml`
+
+```
+rm -r -f build/ nsa_flow.egg-info/ dist/
+python -m  build .
+python -m pip install --upgrade twine
+python -m twine upload --repository nsa_flow dist/*
+```
+
