@@ -248,7 +248,7 @@ def nsa_flow_old(Y0, X0=None, w=0.5,
         "Y": best_Y,
         "traces": traces,
         "final_iter": zz,
-        "best_total_energy": best_total_energy.item(),
+        "best_total_energy": best_total_energy.item() if isinstance(best_total_energy, torch.Tensor) else float(best_total_energy),
         "best_Y_iteration": best_Y_iteration,
         "target": X0
     }
@@ -539,7 +539,7 @@ def nsa_flow(Y0, X0=None, w=0.5,
         "Y": best_Y,
         "traces": traces,
         "final_iter": zz,
-        "best_total_energy": best_total_energy.item(),
+        "best_total_energy": best_total_energy.item() if isinstance(best_total_energy, torch.Tensor) else float(best_total_energy),
         "best_Y_iteration": best_Y_iteration,
         "target": X0
     }

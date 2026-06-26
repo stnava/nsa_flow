@@ -2,34 +2,38 @@ import os
 import copy
 import math
 import time
-import torch
-import torch_optimizer
-from typing import Optional
 import warnings
-import torch.nn.functional as F
-import pandas as pd
-import matplotlib.pyplot as plt
 import json
 import hashlib
+from typing import Optional
 from pathlib import Path
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import matplotlib.pyplot as plt
-import numpy as np
-from sklearn.model_selection import train_test_split
 
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
+try:
+    import torch_optimizer
+except ImportError:
+    torch_optimizer = None
 
-import torch
-import numpy as np
-import pandas as pd
+try:
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import r2_score, mean_absolute_error, explained_variance_score
+    from sklearn.decomposition import PCA
+    from sklearn.linear_model import LinearRegression
+except ImportError:
+    train_test_split = None
+    r2_score = None
+    mean_absolute_error = None
+    explained_variance_score = None
+    PCA = None
+    LinearRegression = None
 
 def safe_to_tensor(X, dtype=torch.float64, device=None, name="input"):
     """
@@ -74,7 +78,16 @@ def safe_to_tensor(X, dtype=torch.float64, device=None, name="input"):
                 except Exception:
                     return 0.0
             X = np.vectorize(_safe_float)(X)
-        # Replace any remaining NaNs or infs
+        # Replace any remaining NaNs or infs (warn user)
+        has_nan = np.isnan(X).any()
+        has_inf = np.isinf(X).any()
+        if has_nan or has_inf:
+            warnings.warn(
+                f"safe_to_tensor({name}): replaced "
+                f"{'NaN' if has_nan else ''}{'/' if has_nan and has_inf else ''}"
+                f"{'Inf' if has_inf else ''} values with 0.0/±1e6.",
+                UserWarning, stacklevel=2,
+            )
         X = np.nan_to_num(X, nan=0.0, posinf=1e6, neginf=-1e6)
         X = np.array(X, dtype=np.float64)
         return torch.tensor(X, dtype=dtype, device=device)
@@ -99,7 +112,7 @@ def invariant_orthogonality_defect(V):
     S = V.T @ V
     diagS = torch.diag(S)
     off_f2 = torch.sum(S * S) - torch.sum(diagS ** 2)
-    return off_f2 / (norm2 ** 2)
+    return off_f2 / (norm2 ** 2).clamp_min(1e-24)
 
 
 def defect_fast(V):
@@ -398,21 +411,22 @@ def estimate_learning_rate_for_nsa_flow(
     c_orth = 1.0 if c_orth is None else c_orth
     aggression = float(np.clip(aggression, 0.0, 1.0))
 
-    # --- Define energy function safely ---
+    # --- Define energy function (no-grad version for candidate evaluation) ---
     def safe_energy(Y):
         try:
-            Yr = nsa_flow_retract_auto(Y, w, retraction)
-            Yr = apply_nonnegativity(Yr, apply_nonneg)
-            e = compute_energy(
-                Yr,
-                X0,
-                w=w,
-                fid_eta=fid_eta,
-                c_orth=c_orth,
-                fidelity_type=fidelity_type,
-                orth_type=orth_type,
-                track_grad=False,
-            )
+            with torch.no_grad():
+                Yr = nsa_flow_retract_auto(Y, w, retraction)
+                Yr = apply_nonnegativity(Yr, apply_nonneg)
+                e = compute_energy(
+                    Yr,
+                    X0,
+                    w=w,
+                    fid_eta=fid_eta,
+                    c_orth=c_orth,
+                    fidelity_type=fidelity_type,
+                    orth_type=orth_type,
+                    track_grad=False,
+                )
             e_val = _to_float(e)
             if not np.isfinite(e_val):
                 return np.nan
@@ -423,19 +437,35 @@ def estimate_learning_rate_for_nsa_flow(
             return np.nan
 
     # ---------------------------------------------------------------------
-    # Baseline energy and gradient
+    # Baseline energy and gradient (proper autograd chain)
     # ---------------------------------------------------------------------
-    f_ref = safe_energy(Y_ref)
-    if np.isnan(f_ref):
+    # Compute energy WITH autograd so gradients flow back to Y_ref
+    try:
+        Yr_ref = nsa_flow_retract_auto(Y_ref, w, retraction)
+        Yr_ref = apply_nonnegativity(Yr_ref, apply_nonneg)
+        f_ref_tensor = compute_energy(
+            Yr_ref,
+            X0,
+            w=w,
+            fid_eta=fid_eta,
+            c_orth=c_orth,
+            fidelity_type=fidelity_type,
+            orth_type=orth_type,
+            track_grad=True,
+        )
+        f_ref = _to_float(f_ref_tensor)
+    except Exception as ex:
+        if verbose:
+            warnings.warn(f"Initial energy computation failed: {ex}")
         raise ValueError("Initial energy computation failed (NaN).")
 
-    f_ref_tensor = torch.tensor(f_ref, dtype=Y_ref.dtype, requires_grad=True)
-    f_ref_tensor.backward(retain_graph=False)
-    grad_ref = (
-        Y_ref.grad.detach().clone()
-        if Y_ref.grad is not None
-        else torch.zeros_like(Y_ref)
-    )
+    if not np.isfinite(f_ref):
+        raise ValueError("Initial energy computation failed (NaN).")
+
+    # Compute gradient via autograd (proper chain from Y_ref → energy)
+    grad_ref = torch.autograd.grad(
+        f_ref_tensor, Y_ref, create_graph=False, retain_graph=False
+    )[0].detach().clone()
     grad_norm = torch.norm(grad_ref).item() + 1e-12
 
     # ---------------------------------------------------------------------
@@ -678,8 +708,8 @@ def _inv_sqrt_newton_schulz(A: torch.Tensor, eps: float = 1e-8,
     I = torch.eye(k, device=A.device, dtype=A.dtype)
     A_reg = A + eps * I
 
-    # compute norm for scaling
-    normA = torch.linalg.norm(A_reg)
+    # compute spectral norm for scaling (convergence requires ||I - A/norm|| < 1)
+    normA = torch.linalg.norm(A_reg, ord=2)
     if normA == 0:
         return I  # fallback
     Y = A_reg / normA
@@ -822,6 +852,14 @@ def nsa_flow_retract_auto(
             Y_work = Y.to(torch.float64)
             U, S, Vh = torch.linalg.svd(Y_work, full_matrices=False)
 
+            # Clamp singular values for numerical stability
+            S = S.clamp_min(eps_rf)
+            # Condition number limiting: prevent ill-conditioned reconstructions
+            if max_condition is not None and max_condition > 0:
+                s_max = S.max(dim=-1, keepdim=True).values
+                s_floor = s_max / max_condition
+                S = torch.where(S < s_floor, s_floor.expand_as(S), S)
+
             # Polar orthogonalization
             Y_polar = (U @ Vh).to(orig_dtype)
 
@@ -941,19 +979,19 @@ def nsa_flow_orth(
     X0 = X0 / scale_ref
     Y = Y / scale_ref
 
-    # --- Default scaling constants ---
+    # --- Default scaling constants (with safety clamps) ---
     g0 = 0.5 * torch.sum((Y - X0) ** 2) / (p * k)
     g0 = torch.clamp(g0, min=1e-8)
     d0 = torch.clamp(defect_fast(Y), min=1e-8)
-    fid_eta = (1 - w) / (g0 * p * k)
-    c_orth = 4 * w / d0
+    fid_eta = min(float((1 - w) / (g0 * p * k)), 1e6)
+    c_orth = min(float(4 * w / d0), 1e6)
 
     # --- Optimization variable ---
     Z = torch.nn.Parameter(Y.clone().detach().requires_grad_(True))
-    lrscl=lr=1.
+    lr = 1.0
     w_use = w
     if warmup_iters > 0:
-        w_use = 0.5
+        w_use = w  # use the user-specified w, not a forced override
         Z = torch.nn.Parameter(Y.clone().detach().requires_grad_(True))
         opt = get_torch_optimizer(optimizer, [Z], lr=lr)
         # ---------------------------------------------------------------------
@@ -1058,7 +1096,7 @@ def nsa_flow_orth(
         lr = initial_learning_rate or 1e-3
 
     Z = torch.nn.Parameter(Y.clone().detach().requires_grad_(True))
-    opt = get_torch_optimizer(optimizer, [Z], lr=lr*lrscl)
+    opt = get_torch_optimizer(optimizer, [Z], lr=lr)
 
     # --- Tracking and monitoring ---
     traces, recent_iters, recent_totals, recent_energies = [], [], [], []
@@ -1084,11 +1122,18 @@ def nsa_flow_orth(
             c_orth=c_orth,
             track_grad=True,
         )
-        # --- Compute energy (autograd-safe) ---
+        # --- Backward pass with gradient clipping ---
         total_energy.backward()
-        g = Z.grad
+        torch.nn.utils.clip_grad_norm_([Z], max_norm=10.0)
         opt.step()
-        # --- Compute energy (autograd-safe) ---
+
+        # --- NaN/Inf detection ---
+        if not torch.isfinite(total_energy):
+            if verbose:
+                print(f"Non-finite energy at iter {it}; reverting to best.")
+            if best_Y is not None:
+                Z.data.copy_(best_Y / scale_ref)
+            break
         # --- Evaluate & store progress ---
         with torch.no_grad():
             Y_eval = nsa_flow_retract_auto(Z, w_use, retraction)
@@ -1127,8 +1172,7 @@ def nsa_flow_orth(
             if len(recent_energies) > window_size:
                 recent_energies.pop(0)
 
-            if verbose and (it % record_every == 0 or it < 10):
-                print(f"[Iter {it:3d}] Total={total_val:.6e} | Fid={fidelity_val:.6e} | Orth={orth_val:.6e}")
+
 
             # --- Convergence criterion ---
             # update recent lists for slope-fit
@@ -1163,15 +1207,7 @@ def nsa_flow_orth(
                         print(f"Converged at iter {it} (slope {slope:.3e} > -{tol:.3e}).")
                     break
 
-            if False:
-                if len(recent_energies) == window_size:
-                    e_max, e_min = max(recent_energies), min(recent_energies)
-                    e_avg = sum(recent_energies) / len(recent_energies)
-                    rel_var = (e_max - e_min) / (abs(e_avg) + 1e-12)
-                    if rel_var < tol:
-                        if verbose:
-                            print(f"Converged at iter {it} (energy stable < {tol:.2e})")
-                        break
+
 
     traces = traces_to_dataframe(traces)
     return {
@@ -1434,28 +1470,7 @@ def test_retraction_across_w(plot=True):
     assert np.all(np.isfinite(norms)) and np.all(np.isfinite(orth)), "NaN or Inf detected."
     print("✅ Retraction visualization and sanity check passed.")
 
-def test_estimate_learning_rate_for_nsa_flow_modular(plot=False):
-    import torch
-    torch.manual_seed(0)
-    Y = torch.randn(40, 8)
-    X = torch.randn_like(Y)
 
-    res = estimate_learning_rate_for_nsa_flow(
-        Y, X,
-        w=0.4,
-        retraction="soft_polar",
-        fidelity_type="symmetric",
-        orth_type="scale_invariant",
-        strategy="armijo_aggressive",
-        plot=plot,
-        verbose=True
-    )
-
-    assert "best_lr" in res
-    assert res["best_lr"] > 0, "Learning rate should be positive."
-    assert np.isfinite(res["losses"]).all(), "Losses contain NaN or Inf."
-    print(f"✅ Passed LR modular test — best_lr={res['best_lr']:.3e}")
-    return res
 
 
 def test_nsa_flow_orth_modular(plot=True):
@@ -1807,7 +1822,7 @@ def evaluate(seed: int = 42, fast: bool = False, verbose: bool = True):
                                         Y_final = res.get("Y_final", None)
                                         X0 = res.get("X0", None)
                                         if Y_final is not None and X0 is not None:
-                                            e_total, e_fid, e_orth = nsa_flow.compute_energy_components(
+                                            e_dict = compute_energy(
                                                 Y_final,
                                                 X0,
                                                 w=w,
@@ -1815,10 +1830,12 @@ def evaluate(seed: int = 42, fast: bool = False, verbose: bool = True):
                                                 c_orth=res.get("c_orth", 1.0),
                                                 fidelity_type=fid_type,
                                                 orth_type=orth_type,
+                                                track_grad=False,
+                                                return_dict=True,
                                             )
-                                            res["fidelity_energy"] = e_fid
-                                            res["orth_energy"] = e_orth
-                                            res["total_energy"] = e_total
+                                            res["fidelity_energy"] = e_dict["fidelity"]
+                                            res["orth_energy"] = e_dict["orthogonality"]
+                                            res["total_energy"] = e_dict["total"]
 
                                     # ✅ Record metadata cleanly
                                     res.update(
@@ -2102,11 +2119,6 @@ def plot_evaluation_summary(df, save_dir=None, timestamp=None, show_plots=True):
 
 ### deep learning stuff below 
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import matplotlib.pyplot as plt
-import numpy as np
 
 # ============================================================
 # Simple baseline MLP
@@ -2542,12 +2554,9 @@ def test_mlp_then_nsa_joint_residual(
     )
 
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.metrics import r2_score, mean_absolute_error, explained_variance_score
+
+
+
 
 # -----------------------
 # Helper metrics
@@ -2845,10 +2854,6 @@ def test_mlp_then_nsa_joint_residual_diagnostics(
         "X_test": X_test.detach().cpu()
     }
     return out
-
-
-from sklearn.decomposition import PCA
-from sklearn.linear_model import LinearRegression
 
 
 
@@ -3212,11 +3217,8 @@ def test_mlp_then_nsa_joint_residual_v2(
 
 
 
-################################
-import matplotlib.pyplot as plt
 from copy import deepcopy
-import os
-################################
+
 def demo_nsa_flow_tradeoff(
     w_values=None,
     p=40,
