@@ -1,8 +1,10 @@
 import torch
 import time
 import numpy as np
-import pandas as pd
-from .core import nsa_flow_retract_auto, defect_fast, traces_to_dataframe, get_torch_optimizer
+from .retraction import nsa_flow_retract_auto
+from .energy import defect_fast
+from .utils import traces_to_dataframe
+from .optimizer import get_torch_optimizer
 
 def nsa_flow_old(Y0, X0=None, w=0.5,
              retraction="soft_polar",

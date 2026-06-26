@@ -1,55 +1,80 @@
-from .core import (
-    nsa_flow_retract_auto, 
-    inv_sqrt_sym_adaptive, 
-    invariant_orthogonality_defect, 
-    energy_fidelity, 
-    get_torch_optimizer, 
-    defect_fast, 
-    plot_nsa_trace, 
-    estimate_learning_rate_for_nsa_flow,
-    test_scale_invariance,
-    test_lr_strategies, 
-    test_autograd_scale_invariance,
-    test_estimate_learning_rate_for_nsa_flow,
-    compute_energy,
+from .utils import (
+    safe_to_tensor,
     apply_nonnegativity,
-    test_nsa_flow_orth_modular,
-    test_aggression_effect_with_convergence,
-    get_lr_estimation_strategies,
-    test_lr_aggression_monotonicity,
-    run_single_experiment, 
-    evaluate, 
+    traces_to_dataframe,
+    plot_nsa_trace,
+    run_single_experiment,
+    evaluate,
     plot_evaluation_summary,
+)
+from .energy import (
+    invariant_orthogonality_defect,
+    defect_fast,
+    fidelity_basic,
+    fidelity_scaled,
+    fidelity_symmetric,
+    compute_energy,
+    energy_fidelity,
+)
+from .retraction import (
+    inv_sqrt_sym_adaptive,
+    nsa_flow_retract_newton_schulz,
+    nsa_flow_retract_cayley,
+    nsa_flow_retract_auto,
+)
+from .optimizer import (
+    get_torch_optimizer,
+    get_lr_estimation_strategies,
+    estimate_learning_rate_for_nsa_flow,
+)
+from .flow import (
+    nsa_flow,
+    nsa_flow_autograd,
+    nsa_flow_orth,
+)
+from .layers import (
+    SimpleMLP,
     NSAFlowLayer,
     NSAFlowLinear,
     NSAFlowConv2d,
-    test_mlp_then_nsa_joint_residual,
-    test_mlp_then_nsa_joint_residual_pca,
-    test_mlp_then_nsa_joint_residual_diagnostics, 
-    test_mlp_then_nsa_joint_residual_v2,
-    fidelity_scaled,
-    fidelity_symmetric,
-    nsa_flow_orth,
-    demo_nsa_flow_tradeoff,
-    safe_to_tensor,
-    demo_nsa_flow_optimizer_tradeoff,
-    nsa_flow,  # This is the alias to nsa_flow_orth
-    nsa_flow_autograd # Alias
 )
 from . import legacy
 
 __all__ = [
-    "nsa_flow", "nsa_flow_retract_auto", "inv_sqrt_sym_adaptive", 
-    "invariant_orthogonality_defect", "energy_fidelity", "get_torch_optimizer", 
-    "defect_fast", "plot_nsa_trace", "estimate_learning_rate_for_nsa_flow",
-    "test_scale_invariance", "test_lr_strategies", "test_autograd_scale_invariance",
-    'test_estimate_learning_rate_for_nsa_flow', 'compute_energy', 'apply_nonnegativity',
-    "test_nsa_flow_orth_modular", "test_aggression_effect_with_convergence",
-    "get_lr_estimation_strategies", "test_lr_aggression_monotonicity",
-    "run_single_experiment", "evaluate", "plot_evaluation_summary",
-    "NSAFlowLayer", "NSAFlowLinear", "NSAFlowConv2d", "test_mlp_then_nsa_joint_residual", 
-    "test_mlp_then_nsa_joint_residual_pca", "test_mlp_then_nsa_joint_residual_diagnostics",
-    "test_mlp_then_nsa_joint_residual_v2", "fidelity_scaled", "fidelity_symmetric",
-    "nsa_flow_orth", "nsa_flow_autograd", "demo_nsa_flow_tradeoff", "safe_to_tensor", 
-    "demo_nsa_flow_optimizer_tradeoff", "legacy"
+    # utils
+    "safe_to_tensor",
+    "apply_nonnegativity",
+    "traces_to_dataframe",
+    "plot_nsa_trace",
+    "run_single_experiment",
+    "evaluate",
+    "plot_evaluation_summary",
+    # energy
+    "invariant_orthogonality_defect",
+    "defect_fast",
+    "fidelity_basic",
+    "fidelity_scaled",
+    "fidelity_symmetric",
+    "compute_energy",
+    "energy_fidelity",
+    # retraction
+    "inv_sqrt_sym_adaptive",
+    "nsa_flow_retract_newton_schulz",
+    "nsa_flow_retract_cayley",
+    "nsa_flow_retract_auto",
+    # optimizer
+    "get_torch_optimizer",
+    "get_lr_estimation_strategies",
+    "estimate_learning_rate_for_nsa_flow",
+    # flow
+    "nsa_flow",
+    "nsa_flow_autograd",
+    "nsa_flow_orth",
+    # layers
+    "SimpleMLP",
+    "NSAFlowLayer",
+    "NSAFlowLinear",
+    "NSAFlowConv2d",
+    # legacy
+    "legacy",
 ]
