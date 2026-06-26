@@ -78,6 +78,7 @@ def estimate_learning_rate_for_nsa_flow(
     plot=False,
     fidelity_type="scale_invariant",
     orth_type="scale_invariant",
+    ns_iter=5,
 ):
     """
     Estimate a suitable learning rate for NSA-Flow optimization with 10 strategy modes
@@ -107,7 +108,7 @@ def estimate_learning_rate_for_nsa_flow(
     def safe_energy(Y):
         try:
             with torch.no_grad():
-                Yr = nsa_flow_retract_auto(Y, w, retraction)
+                Yr = nsa_flow_retract_auto(Y, w, retraction, ns_iter=ns_iter)
                 Yr = apply_nonnegativity(Yr, apply_nonneg)
                 e = compute_energy(
                     Yr,
@@ -129,7 +130,7 @@ def estimate_learning_rate_for_nsa_flow(
             return np.nan
 
     try:
-        Yr_ref = nsa_flow_retract_auto(Y_ref, w, retraction)
+        Yr_ref = nsa_flow_retract_auto(Y_ref, w, retraction, ns_iter=ns_iter)
         Yr_ref = apply_nonnegativity(Yr_ref, apply_nonneg)
         f_ref_tensor = compute_energy(
             Yr_ref,

@@ -173,6 +173,7 @@ def nsa_flow_retract_auto(
     eps_rf: float = 1e-6,
     max_condition: float = 1e4,
     verbose: bool = False,
+    ns_iter: int = 5,
 ) -> torch.Tensor:
     """
     Differentiable retraction for NSA-Flow.
@@ -223,7 +224,7 @@ def nsa_flow_retract_auto(
             Y_re = Y_re * scale_factor
 
         elif retraction_type in ["newton_schulz", "soft_newton_schulz"]:
-            Y_polar = nsa_flow_retract_newton_schulz(Y, eps=eps_rf)
+            Y_polar = nsa_flow_retract_newton_schulz(Y, ns_iter=ns_iter, eps=eps_rf)
             if retraction_type == "soft_newton_schulz":
                 Y_re = (1.0 - w_retract_t) * Y + w_retract_t * Y_polar
             else:
@@ -236,7 +237,7 @@ def nsa_flow_retract_auto(
             Y_re = Y_re * scale_factor
 
         elif retraction_type in ["cayley", "soft_cayley"]:
-            Y_polar = nsa_flow_retract_cayley(Y, eps=eps_rf)
+            Y_polar = nsa_flow_retract_cayley(Y, ns_iter=ns_iter, eps=eps_rf)
             if retraction_type == "soft_cayley":
                 Y_re = (1.0 - w_retract_t) * Y + w_retract_t * Y_polar
             else:

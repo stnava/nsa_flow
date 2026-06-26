@@ -32,6 +32,7 @@ def nsa_flow_orth(
     lr_scheduler=False,
     lr_scheduler_patience=10,
     lr_scheduler_factor=0.5,
+    ns_iter=5,
 ):
     """
     Autograd-compatible NSA-Flow (modular energy version).
@@ -101,7 +102,7 @@ def nsa_flow_orth(
 
                 for it in range(1, warmup_iters + 1):
                     opt.zero_grad()
-                    Y_retracted = nsa_flow_retract_auto(Z, w_use, retraction)
+                    Y_retracted = nsa_flow_retract_auto(Z, w_use, retraction, ns_iter=ns_iter)
                     Y_retracted = apply_nonnegativity(Y_retracted, apply_nonneg)
                     total_energy = compute_energy(
                         Y_retracted,
@@ -118,7 +119,7 @@ def nsa_flow_orth(
 
                     # Evaluate & store progress
                     with torch.no_grad():
-                        Y_eval = nsa_flow_retract_auto(Z, w_use, retraction)
+                        Y_eval = nsa_flow_retract_auto(Z, w_use, retraction, ns_iter=ns_iter)
                         Y_eval = apply_nonnegativity(Y_eval, apply_nonneg)
                         E = compute_energy(
                             Y_eval,
@@ -173,6 +174,7 @@ def nsa_flow_orth(
             aggression=aggression,
             plot=False,
             verbose=verbose,
+            ns_iter=ns_iter,
         )
         lr = lr_result["best_lr"]
         if verbose:
@@ -205,7 +207,7 @@ def nsa_flow_orth(
         opt.zero_grad()
 
         # --- Retraction + optional nonnegativity ---
-        Y_retracted = nsa_flow_retract_auto(Z, w_use, retraction)
+        Y_retracted = nsa_flow_retract_auto(Z, w_use, retraction, ns_iter=ns_iter)
         Y_retracted = apply_nonnegativity(Y_retracted, apply_nonneg)
 
         # --- Compute energy (autograd-safe) ---
@@ -234,7 +236,7 @@ def nsa_flow_orth(
 
         # --- Evaluate & store progress ---
         with torch.no_grad():
-            Y_eval = nsa_flow_retract_auto(Z, w_use, retraction)
+            Y_eval = nsa_flow_retract_auto(Z, w_use, retraction, ns_iter=ns_iter)
             Y_eval = apply_nonnegativity(Y_eval, apply_nonneg)
             E = compute_energy(
                 Y_eval,
