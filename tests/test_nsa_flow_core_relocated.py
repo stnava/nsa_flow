@@ -194,7 +194,10 @@ def test_mlp_then_nsa_joint_residual(device):
     assert Y_joint.shape == (n - n_train, k)
     assert (Y_joint >= 0.0).all(), "Outputs must be non-negative"
 
-@pytest.mark.parametrize("retraction_type", ["polar", "newton_schulz", "cayley"])
+@pytest.mark.parametrize("retraction_type", [
+    "polar", "newton_schulz", "cayley", "ns", "soft_ns", 
+    "soft_newton_schulz", "soft_cayley", "soft_polar"
+])
 def test_retraction_types(retraction_type):
     """Test all implemented retraction types in nsa_flow_retract_auto."""
     Y = torch.randn(15, 3)

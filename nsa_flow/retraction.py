@@ -223,9 +223,9 @@ def nsa_flow_retract_auto(
                 scale_factor = normY / torch.norm(Y_re).clamp_min(1e-12)
             Y_re = Y_re * scale_factor
 
-        elif retraction_type in ["newton_schulz", "soft_newton_schulz"]:
+        elif retraction_type in ["newton_schulz", "soft_newton_schulz", "ns", "soft_ns"]:
             Y_polar = nsa_flow_retract_newton_schulz(Y, ns_iter=ns_iter, eps=eps_rf)
-            if retraction_type == "soft_newton_schulz":
+            if retraction_type in ["soft_newton_schulz", "soft_ns"]:
                 Y_re = (1.0 - w_retract_t) * Y + w_retract_t * Y_polar
             else:
                 Y_re = Y_polar
