@@ -6,7 +6,9 @@ The problem solved is
     subject to Y >= 0                                        (when ``nonneg``)
 
 with ``Dtilde = D / (1 - 1/k)`` and ``D(Y) = ||G - I/k||_F^2`` for the
-trace-normalised Gram matrix ``G = Y'Y / tr(Y'Y)``.
+trace-normalised Gram matrix ``G = Y'Y / tr(Y'Y)``.  With ``align`` the fidelity
+numerator becomes ``min_{Q in O(k)} ||Y - X0 Q||_F^2``, a distance to ``X0``'s
+right-``O(k)`` orbit rather than to the point ``X0``.
 
 The method is Spectral Projected Gradient (Birgin, Martinez & Raydan 2000):
 Barzilai-Borwein step lengths safeguarded by an Armijo backtracking line search
@@ -16,7 +18,8 @@ gradient-mapping norm ``||Y+ - Y|| / t`` is a computable stationarity
 certificate.
 
 Cost per iteration is two ``[p,k] x [k,k]`` products plus one Gram: ``O(p k^2)``.
-No SVD, eigendecomposition or QR appears in the loop.
+No SVD, eigendecomposition or QR appears in the loop -- except under ``align``,
+which adds one ``k x k`` SVD per evaluation for the Procrustes rotation.
 """
 import time
 import warnings
@@ -55,7 +58,7 @@ class NSAResult(dict):
 
 
 def _solve_fixed_w(Y, X0, w, denom, nonneg, max_iter, tol, sigma, verbose, trace,
-                   vg=value_and_grad):
+                   vg=value_and_grad, align=False):
     """Monotone spectral projected gradient for a single value of ``w``."""
     proj = project_nonneg if nonneg else (lambda A: A)
     k = Y.shape[-1]
@@ -63,7 +66,7 @@ def _solve_fixed_w(Y, X0, w, denom, nonneg, max_iter, tol, sigma, verbose, trace
     inv_k = 1.0 / (1.0 - 1.0 / k) if k > 1 else 0.0
 
     Y = proj(Y)
-    E, F, Dn, g = vg(Y, X0, w, denom, inv_k, eye_k)
+    E, F, Dn, g = vg(Y, X0, w, denom, inv_k, eye_k, align)
     E = float(E)
     t = 1.0 / max(float(g.norm()), 1e-12)          # scale-free first guess
     Y_prev = g_prev = None
@@ -84,7 +87,7 @@ def _solve_fixed_w(Y, X0, w, denom, nonneg, max_iter, tol, sigma, verbose, trace
             Y_new = proj(Y - t * g)
             d_ = Y_new - Y
             dn2 = float((d_ * d_).sum())
-            E_new = float(energy(Y_new, X0, w=w, denom=denom))
+            E_new = float(energy(Y_new, X0, w=w, denom=denom, align=align))
             if E_new <= E - sigma * dn2 / t:
                 accepted = True
                 break
@@ -98,7 +101,7 @@ def _solve_fixed_w(Y, X0, w, denom, nonneg, max_iter, tol, sigma, verbose, trace
         gmap = (dn2 ** 0.5) / t                     # ||Y+ - Y|| / t
         Y_prev, g_prev = Y, g
         Y = Y_new
-        E, F, Dn, g = vg(Y, X0, w, denom, inv_k, eye_k)
+        E, F, Dn, g = vg(Y, X0, w, denom, inv_k, eye_k, align)
         E = float(E)
 
         if trace is not None:
@@ -116,7 +119,7 @@ def _solve_fixed_w(Y, X0, w, denom, nonneg, max_iter, tol, sigma, verbose, trace
 
 def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
              continuation=0, w_start=0.0, sigma=1e-4, dtype=None, device=None,
-             verbose=False, keep_trace=False, compile=False):
+             verbose=False, keep_trace=False, compile=False, align=False):
     """Fit a non-negative, near-orthogonal ``Y`` close to ``target``.
 
     Parameters
@@ -138,6 +141,15 @@ def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
         ``keep_trace``) record the whole path.  This is a *diagnostic*: across
         every problem family tested, random restarts and cold starts reach the
         same optimum for ``w < 1``, so continuation is not needed to find it.
+    align : bool
+        Anchor to ``X0``'s right-``O(k)`` orbit rather than to ``X0`` itself, by
+        replacing ``||Y - X0||_F^2`` with ``min_{Q in O(k)} ||Y - X0 Q||_F^2``
+        (orthogonal Procrustes, closed form).  Appropriate when only the *span*
+        of ``X0`` is trustworthy: ``D`` is exactly right-``O(k)`` invariant, so
+        the anchored form pays to preserve a rotation the orthogonality term
+        cannot see.  Costs one ``k x k`` SVD per iteration.  Note the energy is
+        then a difference of convex functions and is nonsmooth where ``X0'Y``
+        drops rank, so the SPG theory applies on the full-rank set only.
     compile : bool
         Compile the fused value-and-gradient kernel with ``torch.compile``.
         Worth 3-4x at moderate sizes; costs a few seconds on first call.
@@ -206,15 +218,16 @@ def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
         if verbose:
             print(f"  continuation step w={wi:.4f}")
         Y, E, it, stop, gmap = _solve_fixed_w(Y, X0, wi, denom, nonneg, max_iter,
-                                              tol, sigma, verbose, trace, vg)
+                                              tol, sigma, verbose, trace, vg, align)
         total_iters += it
 
-    tot, f, dd = energy(Y, X0, w=float(w), denom=denom, return_parts=True)
+    tot, f, dd = energy(Y, X0, w=float(w), denom=denom, return_parts=True,
+                        align=align)
     return NSAResult(
         Y=Y, target=X0, w=float(w), energy=float(tot), fidelity=float(f),
         defect=float(dd), raw_defect=float(stiefel_defect(Y)),
         effective_rank=float(effective_rank(Y)),
-        scale_ratio=float(Y.norm() / X0.norm()), iters=total_iters,
+        scale_ratio=float(Y.norm() / X0.norm()), iters=total_iters, align=bool(align),
         converged=stop != "max_iter", stop_reason=stop, grad_map=float(gmap),
         seconds=time.time() - t0,
         w_schedule=ws, trace=trace, nonneg=bool(nonneg),

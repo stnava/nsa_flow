@@ -11,12 +11,16 @@ import pytest
 import torch
 
 from nsa_flow import (
+    aligned_target,
     defect_floor,
     effective_rank,
     energy,
+    fidelity,
     gram,
     grad_energy,
+    grad_fidelity,
     grad_stiefel_defect,
+    procrustes_rotation,
     project_scaled_stiefel,
     stiefel_defect,
 )
@@ -272,3 +276,68 @@ def test_energy_gradient_matches_autograd_including_k_equals_one():
         energy(Y, X0, w=0.37).backward()
         rel = (Y.grad - grad_energy(Y.detach(), X0, 0.37)).norm() / Y.grad.norm()
         assert rel.item() < 1e-12
+
+
+# ---------------------------------------------------------------------------
+# Procrustes-aligned fidelity: anchor to X0's right-O(k) orbit, not to X0.
+# ---------------------------------------------------------------------------
+
+def _rand_orth(k, dtype=torch.float64):
+    return torch.linalg.qr(torch.randn(k, k, dtype=dtype))[0]
+
+
+def test_procrustes_rotation_is_orthogonal_and_optimal():
+    """Q is in O(k) and no other orthogonal matrix does better."""
+    X0 = torch.rand(40, 5, dtype=torch.float64)
+    Y = torch.rand(40, 5, dtype=torch.float64)
+    Q = procrustes_rotation(X0, Y)
+    assert (Q.T @ Q - torch.eye(5, dtype=torch.float64)).abs().max() < 1e-12
+    best = (Y - X0 @ Q).pow(2).sum()
+    for _ in range(200):                      # no random competitor beats it
+        assert best <= (Y - X0 @ _rand_orth(5)).pow(2).sum() + 1e-12
+
+
+def test_aligned_fidelity_matches_the_nuclear_norm_closed_form():
+    """min_Q ||Y - X0 Q||^2 = ||Y||^2 + ||X0||^2 - 2||X0'Y||_*."""
+    X0 = torch.rand(30, 4, dtype=torch.float64)
+    Y = torch.rand(30, 4, dtype=torch.float64)
+    closed = (Y.pow(2).sum() + X0.pow(2).sum()
+              - 2 * torch.linalg.svdvals(X0.T @ Y).sum()) / X0.pow(2).sum()
+    assert abs(float(fidelity(Y, X0, align=True)) - float(closed)) < 1e-12
+
+
+def test_aligned_fidelity_is_a_distance_to_the_orbit():
+    """Invariant under X0 -> X0 R, never above the anchored value, zero on the orbit."""
+    X0 = torch.rand(30, 4, dtype=torch.float64)
+    Y = torch.rand(30, 4, dtype=torch.float64)
+    f_al = float(fidelity(Y, X0, align=True))
+    assert f_al <= float(fidelity(Y, X0, align=False)) + 1e-14
+    for _ in range(20):
+        R = _rand_orth(4)
+        assert abs(float(fidelity(Y, X0 @ R, align=True)) - f_al) < 1e-12
+        # and it vanishes on the whole orbit of X0
+        assert float(fidelity(X0 @ R, X0, align=True)) < 1e-12
+        # whereas the anchored form does not
+    assert float(fidelity(X0 @ _rand_orth(4), X0, align=False)) > 1e-3
+
+
+def test_aligned_gradient_matches_autograd_via_the_envelope_theorem():
+    """No SVD derivative is needed: dF/dY = 2(Y - X0 Q*)/||X0||^2 at the optimum."""
+    torch.manual_seed(3)
+    X0 = torch.rand(25, 4, dtype=torch.float64)
+    Y = torch.rand(25, 4, dtype=torch.float64).requires_grad_(True)
+    fidelity(Y, X0, align=True).backward()    # autograd differentiates the SVD too
+    closed = grad_fidelity(Y.detach(), X0, align=True)
+    assert (Y.grad - closed).abs().max() < 1e-10
+
+
+def test_defect_is_blind_to_the_rotation_fidelity_pays_for():
+    """The premise of aligning: D is right-O(k) invariant, anchored F is not."""
+    Y = torch.rand(30, 4, dtype=torch.float64)
+    d0 = float(stiefel_defect(Y))
+    spread = []
+    for _ in range(20):
+        R = _rand_orth(4)
+        assert abs(float(stiefel_defect(Y @ R)) - d0) < 1e-12
+        spread.append(float(fidelity(Y @ R, Y, align=False)))
+    assert max(spread) > 1e-2                 # fidelity varies over the orbit

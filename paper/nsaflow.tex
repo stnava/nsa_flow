@@ -547,9 +547,12 @@ Two things follow. First, the operator does what the theory says it should ---
 driving $D$ down recovers disjoint structure, monotonically in $w$, from any
 starting basis. Second, refinement does not substitute for a good starting
 basis: PCA$+$NSA remains well below sparse PCA$+$NSA. Since the fidelity term
-anchors the solution near $X_0$ by construction, this is the expected behaviour
-rather than a surprise, and it is the clearest argument for the joint
-formulation over factors and loadings that we leave open.
+anchors the solution near $X_0$ by construction, this is the specification being
+met rather than a limitation: NSA-Flow is a refinement operator, and asking it to
+discover a basis it was told to stay near would be asking it to be a different
+method. The practical reading is a usage rule --- supply the best basis the
+application affords, because output quality is monotone in input quality --- not
+a case for reformulation.
 
 \input{results/e1_table.tex}
 
@@ -625,7 +628,7 @@ is robust to the choice.
 
 \input{results/e4_table.tex}
 
-\subsection{ADNI regional brain volumes}\subsection{ADNI regional brain volumes}
+\subsection{ADNI regional brain volumes}
 
 DKT \citep{klein2012} regional grey-matter volumes from an ANTs
 single-subject-template run \citep{avants2011,tustison2014} on ADNI

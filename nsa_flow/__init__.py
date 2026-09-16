@@ -26,18 +26,21 @@ from .energy import (
     grad_energy,
     effective_rank,
     defect_floor,
+    procrustes_rotation,
+    aligned_target,
 )
 from .project import project_nonneg, project_scaled_stiefel, polar_factor
 from .solve import nsa_flow, NSAResult
 from .layers import NSAFlowLinear, NSAFlowConv2d, NSAFlowLayer
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 __all__ = [
     # energy
     "gram", "stiefel_defect", "stiefel_defect_normalised", "grad_stiefel_defect",
     "fidelity", "grad_fidelity", "energy", "grad_energy",
     "effective_rank", "defect_floor",
+    "procrustes_rotation", "aligned_target",
     # projections
     "project_nonneg", "project_scaled_stiefel", "polar_factor",
     # solver

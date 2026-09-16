@@ -15,6 +15,7 @@ __all__ = [
     "gram", "stiefel_defect", "stiefel_defect_normalised", "grad_stiefel_defect",
     "fidelity", "grad_fidelity", "energy", "grad_energy",
     "effective_rank", "defect_floor",
+    "procrustes_rotation", "aligned_target",
 ]
 
 
@@ -100,26 +101,80 @@ def effective_rank(Y):
     return k / (k * stiefel_defect(Y) + 1.0)
 
 
-def fidelity(Y, X0, denom=None):
-    """``F(Y) = ||Y - X0||_F^2 / ||X0||_F^2`` -- dimensionless, zero at ``Y = X0``."""
+def procrustes_rotation(X0, Y):
+    r"""``argmin_{Q in O(k)} ||Y - X0 Q||_F``, the orthogonal Procrustes solution.
+
+    With ``M = X0'Y = U Sigma V'`` the minimiser is ``Q = U V'``, and the
+    attained value is ``||Y||_F^2 + ||X0||_F^2 - 2 ||M||_*`` (nuclear norm).
+    Costs one ``k x k`` SVD, negligible beside the ``O(p k^2)`` solver step.
+
+    Unique iff ``M`` has full rank, which holds generically for full-rank
+    ``X0, Y``; see ``aligned_target`` for the consequence.
+    """
+    M = X0.transpose(-2, -1) @ Y
+    U, _, Vh = torch.linalg.svd(M)
+    return U @ Vh
+
+
+def aligned_target(X0, Y):
+    r"""``X0 Q`` for the Procrustes ``Q``: the representative of ``X0``'s
+    right-``O(k)`` orbit closest to ``Y``.
+
+    Rationale.  ``D`` is exactly right-``O(k)`` invariant, ``D(YQ) = D(Y)``, so the
+    orthogonality term is blind to the rotation that the anchored fidelity
+    ``||Y - X0||_F^2`` charges full price to preserve.  When only the *span* of
+    ``X0`` is trustworthy -- PCA fixes its subspace by the eigenvalue gaps but its
+    rotation only by the variance-ordering convention -- charging for rotation
+    over-constrains the problem.  Quotienting it out leaves the anchor in place
+    while giving ``D`` a whole ``O(k)`` orbit of equally faithful representatives
+    to find a disjoint one in.
+
+    ``||X0 Q||_F = ||X0||_F``, so the fidelity denominator is unchanged and the
+    term stays dimensionless with the same normalisation.
+
+    Caveat, stated because it is a genuine cost.  The aligned fidelity equals
+    ``(||Y||_F^2 + ||X0||_F^2 - 2||X0'Y||_*) / ||X0||_F^2``, a difference of convex
+    functions: it is neither convex nor globally differentiable, being nonsmooth
+    exactly where ``X0'Y`` drops rank.  The SPG convergence theory therefore
+    applies on the full-rank set rather than everywhere, unlike the anchored form.
+    """
+    return X0 @ procrustes_rotation(X0, Y)
+
+
+def fidelity(Y, X0, denom=None, align=False):
+    """``F(Y) = ||Y - X0||_F^2 / ||X0||_F^2`` -- dimensionless, zero at ``Y = X0``.
+
+    With ``align``, ``X0`` is replaced by its Procrustes-closest rotation, making
+    ``F`` a distance to ``X0``'s right-``O(k)`` orbit instead of to the point
+    ``X0``; it is then zero on that whole orbit.
+    """
     d = _trace(gram(X0)) if denom is None else denom
+    if align:
+        X0 = aligned_target(X0, Y)
     return (Y - X0).pow(2).sum((-2, -1)) / d
 
 
-def grad_fidelity(Y, X0, denom=None):
-    """``grad F = 2 (Y - X0) / ||X0||_F^2``."""
+def grad_fidelity(Y, X0, denom=None, align=False):
+    """``grad F = 2 (Y - X0) / ||X0||_F^2``, with ``X0 -> X0 Q(Y)`` under ``align``.
+
+    The derivative of the inner minimisation vanishes at its own optimum
+    (envelope theorem), so no derivative of the SVD is needed and the numerical
+    hazard of differentiating repeated singular values never arises.
+    """
     d = _trace(gram(X0)) if denom is None else denom
     d_ = d.reshape(*d.shape, 1, 1) if torch.is_tensor(d) else d
+    if align:
+        X0 = aligned_target(X0, Y)
     return 2.0 * (Y - X0) / d_
 
 
-def energy(Y, X0, w=0.5, denom=None, return_parts=False):
+def energy(Y, X0, w=0.5, denom=None, return_parts=False, align=False):
     r"""``E_w(Y) = (1 - w) F(Y) + w Dtilde(Y)``.
 
     Both terms are dimensionless and ``O(1)``, so ``w in [0, 1]`` is a genuine
     convex weight requiring no data-dependent calibration constants.
     """
-    f = fidelity(Y, X0, denom=denom)
+    f = fidelity(Y, X0, denom=denom, align=align)
     d = stiefel_defect_normalised(Y)
     tot = (1.0 - w) * f + w * d
     if return_parts:
@@ -127,15 +182,15 @@ def energy(Y, X0, w=0.5, denom=None, return_parts=False):
     return tot
 
 
-def grad_energy(Y, X0, w=0.5, denom=None):
+def grad_energy(Y, X0, w=0.5, denom=None, align=False):
     k = Y.shape[-1]
-    g = (1.0 - w) * grad_fidelity(Y, X0, denom=denom)
+    g = (1.0 - w) * grad_fidelity(Y, X0, denom=denom, align=align)
     if k > 1 and w != 0.0:
         g = g + (w / (1.0 - 1.0 / k)) * grad_stiefel_defect(Y)
     return g
 
 
-def value_and_grad(Y, X0, w=0.5, denom=None, inv_k=None, eye_k=None):
+def value_and_grad(Y, X0, w=0.5, denom=None, inv_k=None, eye_k=None, align=False):
     r"""Fused ``(E_w, F, Dtilde, grad E_w)`` sharing a single Gram product.
 
     ``energy`` and ``grad_energy`` each form ``Y'Y``; computing them together
@@ -155,7 +210,7 @@ def value_and_grad(Y, X0, w=0.5, denom=None, inv_k=None, eye_k=None):
 
     d = _trace(gram(X0)) if denom is None else denom
     d_ = d.reshape(*d.shape, 1, 1) if torch.is_tensor(d) else d
-    R = Y - X0
+    R = Y - (aligned_target(X0, Y) if align else X0)
     F = R.pow(2).sum((-2, -1)) / d
 
     if k == 1:
