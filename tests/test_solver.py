@@ -7,6 +7,7 @@ import torch
 
 from nsa_flow import (grad_energy, grad_reconstruction_fidelity, nsa_flow,
                       nsa_flow_data, reconstruction_fidelity)
+from nsa_flow.reconstruct import GramOperator
 
 F64 = torch.float64
 
@@ -315,3 +316,84 @@ def test_data_anchored_rejects_bad_input():
         nsa_flow_data(X)                          # neither k nor init
     with pytest.raises(ValueError):
         nsa_flow_data(X.unsqueeze(0), k=3)        # 3-D
+
+
+# ---------------------------------------------------------------------------
+# Matrix-free route: same numbers from X as from S = X'X, without forming S
+# ---------------------------------------------------------------------------
+
+def test_matrix_free_matches_the_gram_route_for_value_and_gradient():
+    torch.manual_seed(0)
+    X = torch.rand(60, 20, dtype=torch.float64)
+    S, c = X.T @ X, X.pow(2).sum()
+    V = torch.rand(20, 4, dtype=torch.float64)
+    ops = GramOperator(X=X)
+    assert abs(float(reconstruction_fidelity(V, S, c))
+               - float(reconstruction_fidelity(V, ops, c))) < 1e-10
+    assert (grad_reconstruction_fidelity(V, S, c)
+            - grad_reconstruction_fidelity(V, ops, c)).abs().max() < 1e-10
+    # and the mu=0 start agrees up to sign, being eigenvectors either way
+    assert (ops.leading(4) * GramOperator(S=S).leading(4)).sum(0).abs().min() > 1 - 1e-8
+
+
+def test_gram_operator_rejects_ambiguous_construction():
+    X = torch.rand(10, 5, dtype=torch.float64)
+    with pytest.raises(ValueError):
+        GramOperator()                                  # neither
+    with pytest.raises(ValueError):
+        GramOperator(S=X.T @ X, X=X)                    # both
+
+
+def test_solver_gives_the_same_answer_by_either_route():
+    """The route is an implementation detail; it must not change the result.
+
+    Compared up to a column permutation, which is a genuine symmetry here: both
+    ``||X - X V V'||_F`` and the orthogonality defect are permutation invariant,
+    so the two routes can order the columns differently while agreeing on every
+    scalar the solver reports.
+    """
+    from scipy.optimize import linear_sum_assignment
+    torch.manual_seed(0)
+    X = torch.rand(60, 20, dtype=torch.float64)
+    a = nsa_flow_data(X, k=4, w=0.5, matrix_free=False)
+    b = nsa_flow_data(X, k=4, w=0.5, matrix_free=True)
+    assert abs(a.energy - b.energy) < 1e-9
+    assert abs(a.fidelity - b.fidelity) < 1e-9
+    assert abs(a.defect - b.defect) < 1e-9
+    A = a.Y / a.Y.norm(dim=0, keepdim=True)
+    B = b.Y / b.Y.norm(dim=0, keepdim=True)
+    cos = (A.T @ B).abs().numpy()
+    r, c = linear_sum_assignment(-cos)
+    assert cos[r, c].min() > 1 - 1e-6           # same basis, possibly reordered
+
+
+def test_energy_is_invariant_to_column_permutation():
+    """Why the previous test must match rather than compare elementwise."""
+    torch.manual_seed(1)
+    X = torch.rand(40, 12, dtype=torch.float64)
+    V = torch.rand(12, 4, dtype=torch.float64)
+    S, c = X.T @ X, X.pow(2).sum()
+    perm = torch.tensor([2, 0, 3, 1])
+    assert abs(float(reconstruction_fidelity(V, S, c))
+               - float(reconstruction_fidelity(V[:, perm], S, c))) < 1e-12
+    from nsa_flow import angle_defect
+    assert abs(float(angle_defect(V)) - float(angle_defect(V[:, perm]))) < 1e-12
+
+
+def test_route_is_dispatched_by_shape_and_reported():
+    """p > n picks matrix-free, which is both the cost crossover and the only
+    route that fits in memory at large p."""
+    wide = nsa_flow_data(torch.rand(20, 60, dtype=torch.float64), k=3, w=0.5)
+    tall = nsa_flow_data(torch.rand(60, 20, dtype=torch.float64), k=3, w=0.5)
+    assert wide["matrix_free"] is True
+    assert tall["matrix_free"] is False
+
+
+def test_matrix_free_handles_p_far_larger_than_n():
+    """Forming S here would be 0.32 GB; this route never allocates it."""
+    torch.manual_seed(0)
+    X = torch.rand(40, 6000, dtype=torch.float64)
+    r = nsa_flow_data(X, k=4, w=0.5, max_iter=200)
+    assert r["matrix_free"] is True
+    assert r.Y.shape == (6000, 4)
+    assert (r.Y >= 0).all() and torch.isfinite(r.Y).all()

@@ -32,12 +32,12 @@ from .energy import (
 from .angle import angle_defect, cosine_matrix, grad_angle_defect
 from .project import project_nonneg, project_scaled_stiefel, polar_factor
 from .solve import nsa_flow, NSAResult
-from .reconstruct import (nsa_flow_data, reconstruction_fidelity,
+from .reconstruct import (GramOperator, nsa_flow_data, reconstruction_fidelity,
                           grad_reconstruction_fidelity, relax_into_nonneg)
 from .signed import nsa_flow_signed
 from .layers import NSAFlowLinear, NSAFlowConv2d, NSAFlowLayer
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 __all__ = [
     # energy
@@ -52,7 +52,7 @@ __all__ = [
     # solver
     "nsa_flow", "NSAResult",
     "nsa_flow_data", "reconstruction_fidelity", "grad_reconstruction_fidelity",
-    "relax_into_nonneg", "nsa_flow_signed",
+    "relax_into_nonneg", "nsa_flow_signed", "GramOperator",
     # layers
     "NSAFlowLinear", "NSAFlowConv2d", "NSAFlowLayer",
     "__version__",
