@@ -114,7 +114,7 @@ def _solve_fixed_w(Y, X0, w, denom, nonneg, max_iter, tol, sigma, verbose, trace
     return Y, E, it, stop, gmap
 
 
-def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=2000, tol=1e-9,
+def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
              continuation=0, w_start=0.0, sigma=1e-4, dtype=None, device=None,
              verbose=False, keep_trace=False, compile=False):
     """Fit a non-negative, near-orthogonal ``Y`` close to ``target``.
@@ -141,8 +141,12 @@ def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=2000, tol=1e-9,
     compile : bool
         Compile the fused value-and-gradient kernel with ``torch.compile``.
         Worth 3-4x at moderate sizes; costs a few seconds on first call.
-    tol : float
-        Stop when the projected-gradient mapping norm falls below this.
+    tol : float, optional
+        Stop when the projected-gradient mapping norm falls below this.  The
+        default is derived from the working precision -- ``1e-9`` in float64 and
+        ``1e-6`` in float32 -- because a fixed ``1e-9`` is below float32 machine
+        epsilon (``1.2e-7``) and so can never be met, which would silently turn
+        every single-precision call into a ``max_iter`` run.
 
     Notes
     -----
@@ -178,6 +182,9 @@ def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=2000, tol=1e-9,
             RuntimeWarning, stacklevel=2)
     if not torch.isfinite(X0).all():
         raise ValueError("target contains non-finite values")
+
+    if tol is None:
+        tol = 1e-9 if X0.dtype == torch.float64 else 1e-6
 
     p, k = X0.shape
     denom = X0.pow(2).sum()

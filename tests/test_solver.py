@@ -235,3 +235,28 @@ def test_compiled_kernel_agrees_with_eager(prob):
     a = nsa_flow(prob, w=0.6, max_iter=2000, tol=1e-12)
     b = nsa_flow(prob, w=0.6, max_iter=2000, tol=1e-12, compile=True)
     assert abs(a.energy - b.energy) < 1e-10
+
+
+# ------------------------------------------------------ dtype-aware tolerance
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("w", [0.3, 0.5, 0.7, 0.9])
+def test_default_settings_converge_in_both_precisions(dtype, w):
+    """A default call must converge, not silently exhaust max_iter.
+
+    A fixed tol=1e-9 is below float32 machine epsilon (1.2e-7), so it can never
+    be met in single precision -- and torch.rand returns float32, so that was
+    the common path.  The default tolerance is therefore derived from the dtype.
+    """
+    X = torch.rand(120, 8, dtype=dtype)
+    r = nsa_flow(X, w=w)
+    assert r.converged and r.stop_reason != "max_iter", (
+        f"{dtype} w={w}: stop={r.stop_reason} after {r.iters} iters, "
+        f"|Gmap|={r.grad_map:.2e}")
+
+
+def test_explicit_tol_is_respected():
+    X = torch.rand(60, 6, dtype=F64)
+    loose = nsa_flow(X, w=0.7, tol=1e-6)
+    tight = nsa_flow(X, w=0.7, tol=1e-12)
+    assert loose.iters < tight.iters
+    assert loose.grad_map > tight.grad_map
