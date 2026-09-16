@@ -1,0 +1,937 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NSA-Flow: Geometry, Optimization & Procrustes-Aligned Flow</title>
+  <!-- KaTeX for crisp LaTeX math rendering -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js"
+          onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}]});"></script>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: #131b2e;
+      --card-border: #1e293b;
+      --accent: #6366f1;
+      --accent-glow: rgba(99, 102, 241, 0.25);
+      --cyan: #06b6d4;
+      --emerald: #10b981;
+      --amber: #f59e0b;
+      --rose: #f43f5e;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      overflow: hidden;
+      height: 100vh;
+      width: 100vw;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Top Navigation Header */
+    header {
+      height: 60px;
+      background: rgba(19, 27, 46, 0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--card-border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 2rem;
+      z-index: 100;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      font-weight: 700;
+      font-size: 1.15rem;
+      letter-spacing: -0.02em;
+    }
+
+    .badge {
+      background: linear-gradient(135deg, var(--accent), var(--cyan));
+      padding: 0.25rem 0.6rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .header-controls {
+      display: flex;
+      align-items: center;
+      gap: 1.25rem;
+    }
+
+    .slide-counter {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+
+    .nav-btn {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      color: var(--text);
+      padding: 0.45rem 0.9rem;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      transition: all 0.2s ease;
+    }
+
+    .nav-btn:hover:not(:disabled) {
+      background: var(--accent);
+      border-color: var(--accent);
+      box-shadow: 0 0 15px var(--accent-glow);
+    }
+
+    .nav-btn:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+
+    /* Presentation Deck Area */
+    .deck-container {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem 2rem;
+    }
+
+    .slide {
+      position: absolute;
+      width: min(1380px, 95vw);
+      height: min(780px, 86vh);
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 20px;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6);
+      padding: 2.2rem 2.8rem;
+      display: flex;
+      flex-direction: column;
+      opacity: 0;
+      pointer-events: none;
+      transform: scale(0.96) translateX(40px);
+      transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .slide.active {
+      opacity: 1;
+      pointer-events: auto;
+      transform: scale(1) translateX(0);
+    }
+
+    /* Slide Header */
+    .slide-header {
+      margin-bottom: 1.2rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      padding-bottom: 0.8rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+    }
+
+    .slide-title-group h2 {
+      font-size: 1.75rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      background: linear-gradient(135deg, #fff 40%, var(--cyan));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .slide-title-group p {
+      font-size: 0.95rem;
+      color: var(--text-muted);
+      margin-top: 0.2rem;
+    }
+
+    .slide-tag {
+      font-size: 0.8rem;
+      font-weight: 700;
+      padding: 0.3rem 0.75rem;
+      border-radius: 9999px;
+      background: rgba(99, 102, 241, 0.15);
+      color: #a5b4fc;
+      border: 1px solid rgba(99, 102, 241, 0.3);
+    }
+
+    /* Slide Content Layout */
+    .slide-body {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 2rem;
+      align-items: stretch;
+      min-height: 0;
+    }
+
+    .slide-body.full-width {
+      grid-template-columns: 1fr;
+    }
+
+    .left-col {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      overflow-y: auto;
+      padding-right: 0.5rem;
+    }
+
+    .right-col {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      background: rgba(11, 15, 25, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 14px;
+      padding: 1.2rem;
+      position: relative;
+    }
+
+    /* Math Cards & Callouts */
+    .math-card {
+      background: rgba(15, 23, 42, 0.7);
+      border: 1px solid rgba(99, 102, 241, 0.25);
+      border-left: 4px solid var(--accent);
+      border-radius: 10px;
+      padding: 1rem 1.25rem;
+    }
+
+    .math-card.emerald {
+      border-left-color: var(--emerald);
+      border-color: rgba(16, 185, 129, 0.25);
+    }
+
+    .math-card.amber {
+      border-left-color: var(--amber);
+      border-color: rgba(245, 158, 11, 0.25);
+    }
+
+    .math-card.rose {
+      border-left-color: var(--rose);
+      border-color: rgba(244, 63, 94, 0.25);
+    }
+
+    .math-card h4 {
+      font-size: 0.95rem;
+      font-weight: 700;
+      margin-bottom: 0.4rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .math-card p, .math-card li {
+      font-size: 0.9rem;
+      line-height: 1.5;
+      color: #cbd5e1;
+    }
+
+    .math-card ul {
+      padding-left: 1.25rem;
+      margin-top: 0.35rem;
+    }
+
+    .eq-display {
+      text-align: center;
+      margin: 0.5rem 0;
+      font-size: 1.05rem;
+      overflow-x: auto;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      font-family: monospace;
+    }
+    .pill-blue { background: rgba(56, 189, 248, 0.15); color: #38bdf8; }
+    .pill-green { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+    .pill-amber { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
+    .pill-rose { background: rgba(244, 63, 94, 0.15); color: #fb7185; }
+
+    /* SVG Graphics Container */
+    svg.diag {
+      width: 100%;
+      height: 100%;
+      max-height: 480px;
+      overflow: visible;
+    }
+
+    /* Comparison Grid */
+    .compare-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      width: 100%;
+    }
+
+    .compare-box {
+      border-radius: 10px;
+      padding: 0.9rem 1.1rem;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--card-border);
+    }
+    .compare-box.bad { border-top: 3px solid var(--rose); }
+    .compare-box.good { border-top: 3px solid var(--emerald); }
+
+    .compare-box h5 {
+      font-size: 0.9rem;
+      font-weight: 700;
+      margin-bottom: 0.4rem;
+    }
+
+    /* Progress bar at bottom */
+    .progress-bar {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      height: 4px;
+      background: linear-gradient(90deg, var(--accent), var(--cyan));
+      transition: width 0.3s ease;
+    }
+
+    /* Bottom quick navigation dots */
+    footer {
+      height: 40px;
+      background: rgba(11, 15, 25, 0.95);
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.6rem;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--card-border);
+      cursor: pointer;
+      transition: all 0.25s ease;
+    }
+
+    .dot.active {
+      background: var(--accent);
+      transform: scale(1.35);
+      box-shadow: 0 0 10px var(--accent);
+    }
+
+    .key-tip {
+      position: absolute;
+      right: 1.5rem;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+    kbd {
+      background: #1e293b;
+      padding: 0.1rem 0.35rem;
+      border-radius: 4px;
+      border: 1px solid #334155;
+      font-family: inherit;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header with controls -->
+  <header>
+    <div class="brand">
+      <span class="badge">nsa_flow</span>
+      <span>Mathematical Theory & Optimization</span>
+    </div>
+    <div class="header-controls">
+      <span class="slide-counter" id="slideNum">Slide 1 of 5</span>
+      <button class="nav-btn" id="prevBtn" onclick="changeSlide(-1)">❮ Prev</button>
+      <button class="nav-btn" id="nextBtn" onclick="changeSlide(1)">Next ❯</button>
+      <button class="nav-btn" onclick="toggleFullScreen()">⛶ Fullscreen</button>
+    </div>
+  </header>
+
+  <!-- Slide Deck -->
+  <div class="deck-container">
+
+    <!-- ============================================================== -->
+    <!-- SLIDE 1: Core Problem & Non-Negative Stiefel Geometry           -->
+    <!-- ============================================================== -->
+    <div class="slide active" id="slide-1">
+      <div class="slide-header">
+        <div class="slide-title-group">
+          <h2>1. Formulation & Non-Negative Stiefel Geometry</h2>
+          <p>Why non-negativity and orthogonality require a continuous relaxation</p>
+        </div>
+        <span class="slide-tag">Foundation</span>
+      </div>
+      <div class="slide-body">
+        <div class="left-col">
+          <div class="math-card">
+            <h4>The NSA-Flow Energy Functional</h4>
+            <div class="eq-display">
+              $$\min_{Y \ge 0} \; E_w(Y) = (1 - w) \underbrace{\frac{\|Y - X_0\|_F^2}{\|X_0\|_F^2}}_{\text{Fidelity } F(Y)} \;+\; w \underbrace{\frac{\|G - \frac{1}{k} I_k\|_F^2}{1 - \frac{1}{k}}}_{\text{Defect } \tilde{D}(Y)}$$
+            </div>
+            <p>Where $G = \frac{Y^\top Y}{\mathrm{tr}(Y^\top Y)}$ is the trace-normalized Gram matrix. Both terms are <strong>dimensionless and $\mathcal{O}(1)$ by construction</strong>, making $w \in [0, 1]$ a true calibration-free convex weight.</p>
+          </div>
+
+          <div class="math-card emerald">
+            <h4>Proposition: The Rigid Geometry of Non-Negative Orthogonality</h4>
+            <ul>
+              <li><strong>Zero Set:</strong> $\tilde{D}(Y) = 0 \iff Y^\top Y = c I_k$. The columns are pairwise orthogonal and have equal norms.</li>
+              <li><strong>Disjoint Support:</strong> Because $Y \ge 0$, $\langle y_i, y_j \rangle = 0 \iff y_{ri} y_{rj} = 0 \; \forall r$. <em>Every feature belongs to at most one component!</em></li>
+              <li><strong>The Disjoint Disconnect:</strong> The fully constrained set $\mathbb{R}_{>0} \cdot \mathrm{St}(p,k) \cap \{Y \ge 0\}$ is a stratified set of dimension $p-k$. Its top strata are <strong>isolated combinatorial clusterings</strong>, joined only through lower-dimensional rank-deficient boundaries.</li>
+            </ul>
+          </div>
+
+          <div class="math-card amber">
+            <h4>The Need for Relaxation</h4>
+            <p>A descent algorithm confined strictly to the Stiefel manifold cannot jump between clusterings. <strong>NSA-Flow relaxes the manifold constraint into a smooth penalty $\tilde{D}(Y)$</strong>, allowing continuous descent from data reconstruction ($w=0$) to structured disjoint clustering ($w \to 1$).</p>
+          </div>
+        </div>
+
+        <div class="right-col">
+          <!-- SVG Diagram: Manifold and Disjoint Cones -->
+          <svg class="diag" viewBox="0 0 500 440">
+            <defs>
+              <linearGradient id="coneGrad1" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#6366f1" stop-opacity="0.6"/>
+                <stop offset="100%" stop-color="#6366f1" stop-opacity="0.1"/>
+              </linearGradient>
+              <linearGradient id="coneGrad2" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#10b981" stop-opacity="0.6"/>
+                <stop offset="100%" stop-color="#10b981" stop-opacity="0.1"/>
+              </linearGradient>
+              <radialGradient id="targetGlow" cx="50%" cy="50%" r="50%">
+                <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.8"/>
+                <stop offset="100%" stop-color="#38bdf8" stop-opacity="0"/>
+              </radialGradient>
+            </defs>
+
+            <!-- Coordinate Axes -->
+            <line x1="60" y1="380" x2="440" y2="380" stroke="#334155" stroke-width="2"/>
+            <line x1="60" y1="380" x2="60" y2="60" stroke="#334155" stroke-width="2"/>
+            <text x="445" y="385" fill="#64748b" font-size="12">Feature 1</text>
+            <text x="45" y="55" fill="#64748b" font-size="12">Feature 2</text>
+
+            <!-- Disjoint Cones (Axes where one feature is 0) -->
+            <rect x="60" y="70" width="8" height="310" fill="#10b981" rx="4" opacity="0.8"/>
+            <rect x="60" y="372" width="370" height="8" fill="#6366f1" rx="4" opacity="0.8"/>
+
+            <text x="80" y="100" fill="#34d399" font-size="13" font-weight="bold">Disjoint Stratum 1</text>
+            <text x="80" y="118" fill="#94a3b8" font-size="11">(Cluster A: Feature 1 = 0)</text>
+
+            <text x="270" y="360" fill="#818cf8" font-size="13" font-weight="bold">Disjoint Stratum 2</text>
+            <text x="270" y="375" fill="#94a3b8" font-size="11">(Cluster B: Feature 2 = 0)</text>
+
+            <!-- Relaxed Interior Energy Contours -->
+            <ellipse cx="260" cy="210" rx="140" ry="110" fill="none" stroke="#1e293b" stroke-width="2" stroke-dasharray="4"/>
+            <ellipse cx="260" cy="210" rx="95" ry="75" fill="none" stroke="#334155" stroke-width="2" stroke-dasharray="4"/>
+            <ellipse cx="260" cy="210" rx="50" ry="40" fill="none" stroke="#475569" stroke-width="2" stroke-dasharray="4"/>
+
+            <!-- Initial Target X0 -->
+            <circle cx="260" cy="210" r="8" fill="#38bdf8"/>
+            <circle cx="260" cy="210" r="18" fill="url(#targetGlow)"/>
+            <text x="275" y="215" fill="#38bdf8" font-weight="bold" font-size="14">Target X₀</text>
+            <text x="275" y="232" fill="#94a3b8" font-size="11">(e.g. PCA Loadings)</text>
+
+            <!-- Flow Trajectory Path -->
+            <path d="M 260 210 Q 180 230 110 300 Q 70 340 64 374" fill="none" stroke="#f59e0b" stroke-width="3" stroke-linecap="round"/>
+
+            <!-- Current Iterate Y -->
+            <circle cx="125" cy="300" r="7" fill="#f59e0b"/>
+            <text x="140" y="295" fill="#f59e0b" font-weight="bold" font-size="13">NSA Flow Y(w)</text>
+            <text x="140" y="312" fill="#94a3b8" font-size="11">Smooth descent across strata</text>
+
+            <text x="170" y="420" fill="#94a3b8" font-size="12" text-anchor="middle">
+              Relaxation allows the optimizer to travel across disconnected cones
+            </text>
+          </svg>
+        </div>
+      </div>
+      <div class="progress-bar" style="width: 20%;"></div>
+    </div>
+
+    <!-- ============================================================== -->
+    <!-- SLIDE 2: Symmetry Mismatch (Why align=False Over-Constrains)    -->
+    <!-- ============================================================== -->
+    <div class="slide" id="slide-2">
+      <div class="slide-header">
+        <div class="slide-title-group">
+          <h2>2. The Symmetry Mismatch: Why Anchored Fidelity Over-Constrains</h2>
+          <p>The conflict between right-$O(k)$ invariance of defect and rigid coordinate anchoring</p>
+        </div>
+        <span class="slide-tag">The Problem</span>
+      </div>
+      <div class="slide-body">
+        <div class="left-col">
+          <div class="compare-grid">
+            <div class="compare-box good">
+              <h5>✓ Defect $\tilde{D}(Y)$ is Right-$O(k)$ Invariant</h5>
+              <div class="eq-display">
+                $$D(Y Q) = D(Y) \quad \forall Q \in O(k)$$
+              </div>
+              <p style="font-size:0.85rem; color:#cbd5e1;">
+                Gram matrix transforms by conjugation: $G(YQ) = Q^\top G(Y) Q$. The Frobenius norm $\|Q^\top G Q - \frac{1}{k} I\|_F^2$ is invariant. Orthogonality cares only about <em>internal angles</em>, not orientation!
+              </p>
+            </div>
+            <div class="compare-box bad">
+              <h5>✕ Anchored Fidelity $F(Y)$ is Rigid</h5>
+              <div class="eq-display">
+                $$F(Y Q) \ne F(Y) \quad (Q \ne I_k)$$
+              </div>
+              <p style="font-size:0.85rem; color:#cbd5e1;">
+                $\|Y - X_0\|_F^2$ charges full price for any rotation within the subspace. It forces $Y$ to retain the exact arbitrary coordinate axes of $X_0$.
+              </p>
+            </div>
+          </div>
+
+          <div class="math-card rose">
+            <h4>The Statistical Trap with Anchored Fidelity (`align=False`)</h4>
+            <p>
+              When $X_0$ is obtained from PCA or SVD, <strong>only its column span $\mathrm{span}(X_0)$ is statistically meaningful</strong>. The individual axes are arbitrary artifacts of eigenvalue ordering and arbitrary coordinate basis convention.
+            </p>
+            <ul>
+              <li>To achieve non-negativity and disjoint support ($D \to 0$), $Y$ <em>must rotate</em>.</li>
+              <li>Under <code>align=False</code>, the fidelity term resists this rotation with force proportional to $(1-w)$.</li>
+              <li><strong>Result:</strong> $Y$ gets trapped. You pay a heavy accuracy penalty ($F$) simply to preserve an arbitrary rotation that the orthogonality term doesn't even care about!</li>
+            </ul>
+          </div>
+
+          <div class="math-card emerald">
+            <h4>The Question</h4>
+            <p>Can we make the fidelity term invariant to rotations in $O(k)$, measuring distance to the <em>span</em> of $X_0$ rather than the point $X_0$?</p>
+          </div>
+        </div>
+
+        <div class="right-col">
+          <!-- SVG Diagram: Orbit vs Point Anchor -->
+          <svg class="diag" viewBox="0 0 500 440">
+            <!-- Background Orbit Ring -->
+            <ellipse cx="250" cy="220" rx="180" ry="120" fill="rgba(99, 102, 241, 0.05)" stroke="#4f46e5" stroke-width="2" stroke-dasharray="6"/>
+            <text x="250" y="85" fill="#a5b4fc" font-size="13" font-weight="bold" text-anchor="middle">
+              Right-O(k) Group Orbit: { X₀ Q : Q ∈ O(k) }
+            </text>
+            <text x="250" y="103" fill="#64748b" font-size="11" text-anchor="middle">
+              (All share identical span and identical defect D)
+            </text>
+
+            <!-- Fixed Point X0 -->
+            <circle cx="110" cy="220" r="9" fill="#ef4444"/>
+            <text x="110" y="248" fill="#f87171" font-weight="bold" font-size="13" text-anchor="middle">Fixed X₀</text>
+            <text x="110" y="263" fill="#94a3b8" font-size="10" text-anchor="middle">(Arbitrary axes)</text>
+
+            <!-- Rotated point on orbit X0 Q* -->
+            <circle cx="370" cy="260" r="9" fill="#10b981"/>
+            <text x="370" y="290" fill="#34d399" font-weight="bold" font-size="13" text-anchor="middle">Optimal X₀ Q*</text>
+            <text x="370" y="305" fill="#94a3b8" font-size="10" text-anchor="middle">(Same span, best aligned)</text>
+
+            <!-- Current Iterate Y -->
+            <circle cx="340" cy="140" r="9" fill="#f59e0b"/>
+            <text x="340" y="125" fill="#fbbf24" font-weight="bold" font-size="14" text-anchor="middle">Candidate Y</text>
+
+            <!-- Distance vectors -->
+            <!-- Anchored Distance -->
+            <line x1="340" y1="140" x2="110" y2="220" stroke="#ef4444" stroke-width="2.5" stroke-dasharray="4"/>
+            <text x="200" y="165" fill="#f87171" font-size="11" font-weight="bold">
+              align=False: ||Y - X₀|| (Massive Penalty)
+            </text>
+
+            <!-- Aligned Distance -->
+            <line x1="340" y1="140" x2="370" y2="260" stroke="#10b981" stroke-width="3"/>
+            <text x="390" y="195" fill="#34d399" font-size="11" font-weight="bold">
+              align=True: min ||Y - X₀Q||
+            </text>
+            <text x="390" y="210" fill="#94a3b8" font-size="10">
+              (True distance to subspace)
+            </text>
+
+            <rect x="50" y="375" width="400" height="40" rx="8" fill="#1e293b" stroke="#334155"/>
+            <text x="250" y="399" fill="#e2e8f0" font-size="12" text-anchor="middle">
+              <code>align=False</code> punishes rotation; <code>align=True</code> permits rotation within span
+            </text>
+          </svg>
+        </div>
+      </div>
+      <div class="progress-bar" style="width: 40%;"></div>
+    </div>
+
+    <!-- ============================================================== -->
+    <!-- SLIDE 3: Procrustes Alignment (aligned=True) Math & Closed Form-->
+    <!-- ============================================================== -->
+    <div class="slide" id="slide-3">
+      <div class="slide-header">
+        <div class="slide-title-group">
+          <h2>3. Procrustes Alignment (`aligned=True`): Quotienting Out Rotation</h2>
+          <p>Replacing distance-to-point with distance-to-orbit via Orthogonal Procrustes</p>
+        </div>
+        <span class="slide-tag">The Solution</span>
+      </div>
+      <div class="slide-body">
+        <div class="left-col">
+          <div class="math-card emerald">
+            <h4>Aligned Fidelity: Distance to the Orbit</h4>
+            <div class="eq-display">
+              $$F_{\text{aligned}}(Y) = \min_{Q \in O(k)} \frac{\|Y - X_0 Q\|_F^2}{\|X_0\|_F^2}$$
+            </div>
+            <p>
+              Since $\|X_0 Q\|_F = \|X_0\|_F$ for any $Q \in O(k)$, the denominator is unaltered. The term remains <strong>strictly dimensionless</strong>, exactly zero whenever $Y$ is any orthogonal rotation of $X_0$.
+            </p>
+          </div>
+
+          <div class="math-card">
+            <h4>Closed-Form Solution via $k \times k$ SVD</h4>
+            <p>Expanding the Frobenius norm:</p>
+            <div class="eq-display">
+              $$\|Y - X_0 Q\|_F^2 = \|Y\|_F^2 + \|X_0\|_F^2 - 2 \, \mathrm{tr}\bigl(Q^\top (X_0^\top Y)\bigr)$$
+            </div>
+            <p>Let $M = X_0^\top Y \in \mathbb{R}^{k \times k}$ with singular value decomposition $M = U \Sigma V^\top$:</p>
+            <ul>
+              <li><strong>Optimal Rotation:</strong> $Q^* = U V^\top \in O(k)$ (polar factor of $X_0^\top Y$).</li>
+              <li><strong>Aligned Target:</strong> $X_0^{\text{align}} = X_0 Q^* = X_0 U V^\top$.</li>
+              <li><strong>Nuclear Norm Identity:</strong> $\max_{Q \in O(k)} \mathrm{tr}(Q^\top M) = \mathrm{tr}(\Sigma) = \|X_0^\top Y\|_*$.</li>
+            </ul>
+            <div class="eq-display" style="color: #38bdf8;">
+              $$F_{\text{aligned}}(Y) = \frac{\|Y\|_F^2 + \|X_0\|_F^2 - 2 \|X_0^\top Y\|_*}{\|X_0\|_F^2}$$
+            </div>
+          </div>
+
+          <div class="math-card amber">
+            <h4>Negligible Computational Cost</h4>
+            <p>Computing $Q^*$ requires only one <strong>$k \times k$ SVD</strong> per step. For $k=5$ or $10$ and $p=1000$, $k \times k$ SVD takes $\approx 3\,\mu\mathrm{s}$, completely negligible next to the $\mathcal{O}(p k^2)$ matrix multiplications of the solver.</p>
+          </div>
+        </div>
+
+        <div class="right-col">
+          <!-- SVG Diagram: Geometry of Procrustes Projection -->
+          <svg class="diag" viewBox="0 0 500 440">
+            <!-- Orbit Cylinder / Surface -->
+            <path d="M 100 120 C 200 80, 300 80, 400 120 L 400 320 C 300 280, 200 280, 100 320 Z" 
+                  fill="rgba(99, 102, 241, 0.08)" stroke="#6366f1" stroke-width="2"/>
+            <path d="M 100 220 C 200 180, 300 180, 400 220" 
+                  fill="none" stroke="#6366f1" stroke-width="1.5" stroke-dasharray="4"/>
+
+            <text x="250" y="145" fill="#a5b4fc" font-size="13" font-weight="bold" text-anchor="middle">
+              Subspace Orbit Manifold [X₀] = { X₀ Q }
+            </text>
+
+            <!-- The candidate matrix Y (outside the orbit) -->
+            <circle cx="250" cy="370" r="9" fill="#f59e0b"/>
+            <text x="250" y="400" fill="#fbbf24" font-weight="bold" font-size="14" text-anchor="middle">Iterate Y</text>
+
+            <!-- Orthogonal Projection Line to X0 Q* -->
+            <line x1="250" y1="370" x2="250" y2="210" stroke="#10b981" stroke-width="3" stroke-dasharray="2"/>
+            
+            <!-- Procrustes Projection Point X0 Q* -->
+            <circle cx="250" cy="210" r="8" fill="#10b981"/>
+            <text x="265" y="205" fill="#34d399" font-weight="bold" font-size="13">X₀ Q* = X₀ U Vᵀ</text>
+            <text x="265" y="222" fill="#94a3b8" font-size="11">Nearest point on orbit</text>
+
+            <!-- Right Angle Indicator -->
+            <path d="M 250 225 L 265 225 L 265 210" fill="none" stroke="#10b981" stroke-width="1.5"/>
+
+            <!-- Tangent Space of Orbit -->
+            <line x1="120" y1="210" x2="380" y2="210" stroke="#64748b" stroke-width="1.5" stroke-dasharray="3"/>
+            <text x="390" y="205" fill="#64748b" font-size="10">Tangent to orbit</text>
+
+            <!-- Mathematical Callout Box -->
+            <rect x="60" y="20" width="380" height="50" rx="8" fill="#1e293b" stroke="#334155"/>
+            <text x="250" y="42" fill="#e2e8f0" font-size="12" font-weight="bold" text-anchor="middle">
+              Orthogonal Procrustes Projection:
+            </text>
+            <text x="250" y="58" fill="#38bdf8" font-size="11" text-anchor="middle">
+              Q* = argmin ||Y - X₀ Q||_F  ⟹  Q* = U Vᵀ from SVD(X₀ᵀ Y)
+            </text>
+          </svg>
+        </div>
+      </div>
+      <div class="progress-bar" style="width: 60%;"></div>
+    </div>
+
+    <!-- ============================================================== -->
+    <!-- SLIDE 4: Envelope Theorem (Zero SVD Differentiation)           -->
+    <!-- ============================================================== -->
+    <div class="slide" id="slide-4">
+      <div class="slide-header">
+        <div class="slide-title-group">
+          <h2>4. The Gradient via Envelope Theorem (Zero SVD Differentiation)</h2>
+          <p>Why aligning introduces zero numerical instability or autograd bottlenecks</p>
+        </div>
+        <span class="slide-tag">Numerics & Gradient</span>
+      </div>
+      <div class="slide-body">
+        <div class="left-col">
+          <div class="math-card rose">
+            <h4>The Classical SVD Gradient Trap</h4>
+            <p>
+              Normally, differentiating through <code>torch.linalg.svd</code> divides by singular value differences:
+              $$\frac{\partial U}{\partial M} \propto \frac{1}{\sigma_i^2 - \sigma_j^2}$$
+              Whenever singular values coalesce ($\sigma_i \approx \sigma_j$), the backward pass <strong>explodes or returns NaNs</strong>. This is common when matrices become orthogonal.
+            </p>
+          </div>
+
+          <div class="math-card emerald">
+            <h4>Danskin's / Envelope Theorem: SVD Derivative Vanishes!</h4>
+            <p>Since $Q^*(Y)$ is the interior global minimizer of $Q \mapsto \|Y - X_0 Q\|_F^2$:</p>
+            <div class="eq-display">
+              $$\left. \nabla_Q \|Y - X_0 Q\|_F^2 \right|_{Q = Q^*} = 0$$
+            </div>
+            <p>By the chain rule, the total derivative with respect to $Y$ is:</p>
+            <div class="eq-display">
+              $$\frac{d}{dY} F_{\text{aligned}}(Y) = \frac{\partial F}{\partial Y} \;+\; \underbrace{\frac{\partial F}{\partial Q} \cdot \frac{\partial Q^*}{\partial Y}}_{= \; 0 \text{ at optimum!}}$$
+            </div>
+            <div class="eq-display" style="color:#10b981; font-weight: bold;">
+              $$\nabla_Y F_{\text{aligned}}(Y) = \frac{2 (Y - X_0 Q^*)}{\|X_0\|_F^2}$$
+            </div>
+            <p><strong>Profound Numerical Benefit:</strong> You <em>never</em> differentiate the SVD! The gradient is identical in shape to the anchored gradient, simply replacing $X_0$ with its rotated version $X_0 Q^*$.</p>
+          </div>
+
+          <div class="math-card amber">
+            <h4>Scale Preservation Identity: $\langle \nabla D, Y \rangle = 0$</h4>
+            <p>Because $D(Y)$ is homogeneous of degree 0, Euler's theorem yields $\langle \nabla D, Y \rangle = 0$ identically. The orthogonality term <strong>cannot alter scale $\|Y\|_F$</strong>; scale is pinned cleanly by the fidelity term alone.</p>
+          </div>
+        </div>
+
+        <div class="right-col">
+          <!-- SVG Diagram: Envelope Theorem & Gradients -->
+          <svg class="diag" viewBox="0 0 500 440">
+            <!-- Curves of ||Y - X0 Q|| for various Q -->
+            <path d="M 60 140 Q 180 320 440 280" fill="none" stroke="#475569" stroke-width="1.5" stroke-dasharray="3"/>
+            <path d="M 60 280 Q 320 320 440 140" fill="none" stroke="#475569" stroke-width="1.5" stroke-dasharray="3"/>
+            <path d="M 80 200 Q 250 360 420 200" fill="none" stroke="#6366f1" stroke-width="2"/>
+
+            <!-- Lower Envelope curve -->
+            <path d="M 60 160 Q 150 250 250 270 Q 350 250 440 160" fill="none" stroke="#10b981" stroke-width="4"/>
+            <text x="250" y="310" fill="#34d399" font-size="13" font-weight="bold" text-anchor="middle">
+              Lower Envelope: F_aligned(Y) = min_Q ||Y - X₀ Q||²
+            </text>
+
+            <!-- Tangent at point Y0 -->
+            <circle cx="250" cy="270" r="7" fill="#f59e0b"/>
+            <line x1="140" y1="270" x2="360" y2="270" stroke="#f59e0b" stroke-width="2.5"/>
+            <text x="250" y="250" fill="#fbbf24" font-weight="bold" font-size="13" text-anchor="middle">Iterate Y₀</text>
+
+            <!-- Explanation Callout -->
+            <rect x="40" y="30" width="420" height="85" rx="10" fill="#1e293b" stroke="#334155"/>
+            <text x="60" y="55" fill="#f8fafc" font-size="13" font-weight="bold">
+              Why Danskin's Theorem Holds:
+            </text>
+            <text x="60" y="77" fill="#94a3b8" font-size="11">
+              • At Y₀, the envelope touches the smooth curve for optimal rotation Q*.
+            </text>
+            <text x="60" y="97" fill="#94a3b8" font-size="11">
+              • Their tangents coincide: ∇_Y F_aligned(Y₀) = ∇_Y ||Y₀ - X₀ Q*||². Zero SVD drift!
+            </text>
+
+            <!-- Gradient Equation Box -->
+            <rect x="80" y="360" width="340" height="50" rx="8" fill="rgba(16, 185, 129, 0.15)" stroke="#10b981"/>
+            <text x="250" y="385" fill="#34d399" font-size="13" font-weight="bold" text-anchor="middle">
+              ∇_Y E_w = (1 - w) ∇F_aligned + w ∇D̃
+            </text>
+            <text x="250" y="401" fill="#cbd5e1" font-size="10" text-anchor="middle">
+              Fused in a single O(p k²) Gram pass
+            </text>
+          </svg>
+        </div>
+      </div>
+      <div class="progress-bar" style="width: 80%;"></div>
+    </div>
+
+    <!-- ============================================================== -->
+    <!-- SLIDE 5: Spectral Projected Gradient & Trajectory Comparison   -->
+    <!-- ============================================================== -->
+    <div class="slide" id="slide-5">
+      <div class="slide-header">
+        <div class="slide-title-group">
+          <h2>5. Optimization Dynamics: SPG & Trajectory Comparison</h2>
+          <p>Spectral Projected Gradient on the non-negative orthant with and without alignment</p>
+        </div>
+        <span class="slide-tag">Algorithm & Results</span>
+      </div>
+      <div class="slide-body">
+        <div class="left-col">
+          <div class="math-card">
+            <h4>The SPG Optimization Loop (Birgin, Martínez & Raydan 2000)</h4>
+            <ol style="padding-left: 1.2rem; font-size: 0.88rem; line-height: 1.5;">
+              <li><strong>Barzilai-Borwein Spectral Step:</strong>
+                $t_k = \frac{\langle s_k, s_k \rangle}{\langle s_k, r_k \rangle}$ with $s_k = Y_k - Y_{k-1}, \, r_k = g_k - g_{k-1}$.
+              </li>
+              <li><strong>Armijo Backtracking on Projected Direction:</strong>
+                Find step length $t$ such that $Y_+ = \Pi_{\ge 0}(Y - t g_k) = \max(0, Y - t g_k)$ satisfies:
+                $$E_w(Y_+) \le E_w(Y) - \sigma \frac{\|Y_+ - Y\|_F^2}{t}$$
+              </li>
+              <li><strong>Stationarity Certificate:</strong> Stops when gradient-mapping norm $\|G_{\text{map}}\| = \frac{\|Y_+ - Y\|_F}{t} \le \mathrm{tol}$.</li>
+            </ol>
+          </div>
+
+          <div class="compare-grid">
+            <div class="compare-box bad">
+              <h5>Flow with <code>align=False</code></h5>
+              <ul style="font-size:0.82rem; padding-left:1rem; color:#cbd5e1; line-height: 1.4;">
+                <li>$X_0$ is anchored rigidly.</li>
+                <li>Descent path fights against coordinate rotation.</li>
+                <li>Clamps heavily on $\{Y \ge 0\}$, causing loss of rank and degraded reconstruction.</li>
+              </ul>
+            </div>
+            <div class="compare-box good">
+              <h5>Flow with <code>align=True</code></h5>
+              <ul style="font-size:0.82rem; padding-left:1rem; color:#cbd5e1; line-height: 1.4;">
+                <li>$X_0 Q_t^*$ rotates dynamically with $Y_t$.</li>
+                <li>Flow slides effortlessly into non-negative disjoint cones.</li>
+                <li>Retains full subspace expressiveness while discovering sparse, nameable factors.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="math-card emerald">
+            <h4>Key Takeaways</h4>
+            <p style="font-size: 0.85rem;">
+              • <strong>Theoretical Consistency:</strong> $D(Y)$ is $O(k)$-invariant; <code>align=True</code> makes $F(Y)$ $O(k)$-invariant too.<br>
+              • <strong>Auditable & Interpretable:</strong> Turns dense PCA loadings into sparse, disjoint, non-negative factors without heuristic loss weights.
+            </p>
+          </div>
+        </div>
+
+        <div class="right-col">
+          <!-- SVG Diagram: Trajectory Comparison -->
+          <svg class="diag" viewBox="0 0 500 440">
+            <!-- Non-negative Orthant boundary -->
+            <rect x="40" y="40" width="420" height="360" fill="rgba(15, 23, 42, 0.5)" rx="12" stroke="#334155"/>
+            <line x1="80" y1="360" x2="420" y2="360" stroke="#475569" stroke-width="2"/>
+            <line x1="80" y1="360" x2="80" y2="60" stroke="#475569" stroke-width="2"/>
+            <text x="370" y="380" fill="#64748b" font-size="11">Feature Dim 1</text>
+            <text x="60" y="55" fill="#64748b" font-size="11">Feature Dim 2</text>
+
+            <!-- Disjoint target axis -->
+            <rect x="80" y="356" width="320" height="8" fill="#10b981" opacity="0.6"/>
+
+            <!-- Starting Point X0 -->
+            <circle cx="260" cy="180" r="8" fill="#38bdf8"/>
+            <text x="260" y="165" fill="#38bdf8" font-size="12" font-weight="bold" text-anchor="middle">Start: X₀ (PCA)</text>
+
+            <!-- Trajectory 1: align=False (Red, struggling) -->
+            <path d="M 260 180 Q 230 220 200 270 Q 180 310 160 356" fill="none" stroke="#f43f5e" stroke-width="3" stroke-dasharray="4"/>
+            <circle cx="160" cy="356" r="7" fill="#f43f5e"/>
+            <text x="140" y="335" fill="#f43f5e" font-size="11" font-weight="bold" text-anchor="end">
+              align=False: Suboptimal Stagnation
+            </text>
+
+            <!-- Trajectory 2: align=True (Green, smooth glide) -->
+            <path d="M 260 180 Q 300 210 330 260 Q 350 310 360 356" fill="none" stroke="#10b981" stroke-width="3.5"/>
+            <circle cx="360" cy="356" r="7" fill="#10b981"/>
+            <text x="375" y="335" fill="#34d399" font-size="11" font-weight="bold">
+              align=True: Rotates &amp; Glides
+            </text>
+            <text x="375" y="350" fill="#94a3b8" font-size="10">
+              (Disjoint &amp; Low Fidelity Loss)
+            </text>
+
+            <!-- Legend Box -->
+            <rect x="60" y="70" width="380" height="55" rx="8" fill="#131b2e" stroke="#1e293b"/>
+            <circle cx="80" cy="88" r="5" fill="#f43f5e"/>
+            <text x="95" y="92" fill="#cbd5e1" font-size="11"><code>align=False</code>: Fixed orientation creates high resistance</text>
+            <circle cx="80" cy="108" r="5" fill="#10b981"/>
+            <text x="95" y="112" fill="#cbd5e1" font-size="11"><code>align=True</code>: Procrustes rotation follows path of least resistance</text>
+          </svg>
+        </div>
+      </div>
+      <div class="progress-bar" style="width: 100%;"></div>
+    </div>
+
+  </div>
+
+  <!-- Footer Navigation Dots -->
+  <footer>
+    <div class="dot active" onclick="goToSlide(0)"></div>
+    <div class="dot" onclick="goToSlide(1)"></div>
+    <div class="dot" onclick="goToSlide(2)"></div>
+    <div class="dot" onclick="goToSlide(3)"></div>
+    <div class="dot" onclick="goToSlide(4)"></div>
+    <div class="key-tip">Navigate: <kbd>←</kbd> <kbd>→</kbd> or <kbd>Space</kbd></div>
+  </footer>
+
+  <script>
+    let currentSlide = 0;
+    const slides = document.querySelectorAll('.slide');
+    const dots = document.querySelectorAll('.dot');
+    const slideNum = document.getElementById('slideNum');
+    const prevBtn = document.getElementById('prevBtn');
+    const nextBtn = document.getElementById('nextBtn');
+
+    function updateDeck() {
+      slides.forEach((s, idx) => {
+        s.classList.toggle('active', idx === currentSlide);
+      });
+      dots.forEach((d, idx) => {
+        d.classList.toggle('active', idx === currentSlide);
+      });
+      slideNum.textContent = `Slide ${currentSlide + 1} of ${slides.length}`;
+      prevBtn.disabled = currentSlide === 0;
+      nextBtn.disabled = currentSlide === slides.length - 1;
+    }
+
+    function changeSlide(direction) {
+      const next = currentSlide + direction;
+      if (next >= 0 && next < slides.length) {
+        currentSlide = next;
+        updateDeck();
+      }
+    }
+
+    function goToSlide(index) {
+      if (index >= 0 && index < slides.length) {
+        currentSlide = index;
+        updateDeck();
+      }
+    }
+
+    // Keyboard navigation
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') {
+        e.preventDefault();
+        changeSlide(1);
+      } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
+        e.preventDefault();
+        changeSlide(-1);
+      }
+    });
+
+    function toggleFullScreen() {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(() => {});
+      } else {
+        if (document.exitFullscreen) {
+          document.exitFullscreen();
+        }
+      }
+    }
+
+    updateDeck();
+  </script>
+</body>
+</html>

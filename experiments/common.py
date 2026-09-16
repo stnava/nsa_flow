@@ -30,11 +30,13 @@ class NSAPCA(BaseEstimator, TransformerMixin):
     family is indexed by one interpretable parameter.
     """
 
-    def __init__(self, n_components=5, w=0.5, max_iter=5000, tol=1e-10):
+    def __init__(self, n_components=5, w=0.5, max_iter=5000, tol=1e-10,
+                 align=False):
         self.n_components = n_components
         self.w = w
         self.max_iter = max_iter
         self.tol = tol
+        self.align = align
 
     def fit(self, X, y=None):
         pca = PCA(n_components=self.n_components, svd_solver="randomized",
@@ -43,7 +45,7 @@ class NSAPCA(BaseEstimator, TransformerMixin):
         # magnitude of the loading is the meaningful quantity.
         L = np.abs(pca.components_.T)
         res = nsa_flow(torch.as_tensor(L, dtype=F64), w=self.w,
-                       max_iter=self.max_iter, tol=self.tol)
+                       max_iter=self.max_iter, tol=self.tol, align=self.align)
         self.components_ = res.Y.numpy()
         self.defect_ = res.defect
         self.effective_rank_ = res.effective_rank

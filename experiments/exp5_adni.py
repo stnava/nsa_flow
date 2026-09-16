@@ -18,7 +18,7 @@ K = 5
 TASKS = {"CN vs DEM": ("CN", "DEM"), "CN vs MCI": ("CN", "MCI"), "MCI vs DEM": ("MCI", "DEM")}
 
 
-def run(hemisphere="right", n_repeats=10):
+def run(hemisphere="right", n_repeats=10, align=False, seed=0):
     X, meta, regions = load_adni(hemisphere=hemisphere)
     cov = np.column_stack([meta.AGE.to_numpy(float),
                            (meta.SEX.astype(str) == "M").to_numpy(float)])
@@ -27,16 +27,20 @@ def run(hemisphere="right", n_repeats=10):
              ("SparsePCA", lambda: SparsePCALoadings(K, alpha=1.0)),
              ("NMF", lambda: NMFLoadings(K))]
     specs += [(f"NSA-PCA (w={w})", (lambda w=w: NSAPCA(K, w))) for w in WS]
+    if align:
+        specs += [(f"NSA-PCA-align (w={w})", (lambda w=w: NSAPCA(K, w, align=True)))
+                  for w in WS]
 
     for task, (a, b) in TASKS.items():
         m = meta.DX.isin([a, b]).to_numpy()
         Xt, yt, ct = X[m], (meta.DX[m] == b).to_numpy(int), cov[m]
         for name, loader in specs:
             s = cv_score(Xt, yt, loader, n_components=K, n_splits=5,
-                         n_repeats=n_repeats, seed=0, covariates=ct)
+                         n_repeats=n_repeats, seed=seed, covariates=ct)
             s.update(method=name, family=name.split(" (")[0],
                      w=float(name.split("w=")[1][:-1]) if "w=" in name else np.nan,
-                     task=task, dataset="adni", hemisphere=hemisphere,
+                     aligned="align" in name,
+                     task=task, dataset="adni", hemisphere=hemisphere, seed=seed,
                      n=int(m.sum()), p=Xt.shape[1], k=K)
             rows.append(s)
     return pd.DataFrame(rows)
