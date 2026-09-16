@@ -1,0 +1,2565 @@
+---
+title: "Non-Negative Stiefel Approximating Flow: Orthogonalish Matrix Optimization for Interpretable Embeddings"
+author: |
+  Brian B. Avants, Nicholas J. Tustison, and James R. Stone  
+  Department of Radiology and Medical Imaging  
+  University of Virginia, Charlottesville, VA 22903
+date: "October 11, 2025"
+output:
+  pdf_document:
+    keep_tex: true
+    latex_engine: xelatex
+    number_sections: true
+header-includes:
+  - \newcommand{\diag}{\operatorname{diag}}
+  - \newcommand{\fid}{\operatorname{fid}}
+  - \newcommand{\orth}{\operatorname{orth}}
+  - \newcommand{\sym}{\operatorname{sym}}
+  - \newcommand{\sign}{\operatorname{sign}}
+  - \newcommand{\tol}{\operatorname{tol}}
+  - \newcommand{\mean}{\operatorname{mean}}
+  - \newcommand{\cand}{\operatorname{cand}}
+link-citations: yes
+linkcolor: blue
+urlcolor: blue
+bibliography: orth.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE,  warning = FALSE, fig.align = 'center', fig.width = 6, fig.height = 4)
+set.seed(42)
+library(ggplot2); library(gridExtra); library(reshape2); library(pheatmap); library(RColorBrewer)
+library(dplyr); library(tidyr); library(scales); library(knitr); library(DiagrammeR)
+options(width = 120)
+library(ANTsR)          # retained for nsa_flow_flowchart and imaging helpers only
+
+## The NSA-Flow solver now comes from the Python package rather than from
+## ANTsR, whose implementation is the superseded v1.  nsa_shim.R keeps this
+## document's original call signatures and routes them to the current code;
+## see the shim header for what each v1 argument now maps to, and
+## nsa_shim_ignored() for the v1-only arguments that no longer have a referent.
+source("nsa_shim.R")
+NSA_VERSION <- nsa_shim_init(normalizePath(file.path("..")))
+```
+
+
+# Abstract {-}
+
+Interpretable representation learning is a central challenge in modern machine learning, particularly in high-dimensional settings such as neuroimaging, genomics, and text analysis. Current methods often struggle to balance the competing demands of interpretability and model flexibility, limiting their effectiveness in extracting meaningful insights from complex data. We introduce Non-negative Stiefel Approximating Flow (NSA-Flow), a general-purpose matrix estimation framework that unifies ideas from sparse matrix factorization, orthogonalization, and constrained manifold learning. NSA-Flow enforces structured sparsity through a continuous balance between reconstruction fidelity and column-wise decorrelation, parameterized by a single tunable weight. The method operates as a smooth flow near the Stiefel manifold with proximal updates for non-negativity and adaptive gradient control, yielding representations that are simultaneously sparse, stable, and interpretable. Unlike classical regularization schemes, NSA-Flow provides an intuitive geometric mechanism for manipulating sparsity at the level of global structure while simplifying latent features. We demonstrate that the NSA-Flow objective can be optimized smoothly and integrates seamlessly with existing pipelines for dimensionality reduction while improving interpretability and generalization in both simulated and real biomedical data. Empirical validation on the Golub leukemia dataset and in Alzheimer's disease demonstrate that the NSA-Flow constraints can maintain or improve performance over related methods with little additional methodological effort. NSA-Flow offers a scalable, general-purpose tool for interpretable ML, applicable across data science domains.
+
+# Introduction
+
+Modern machine learning increasingly faces the challenge of extracting interpretable structure from high-dimensional, correlated data. In domains such as neuroscience, genomics, or natural language processing, data matrices often encode overlapping sources of variation: voxels representing distributed brain activity, genes co-expressed across pathways or words co-occurring across topics. These correlations hinder modeling, making it difficult to disentangle meaningful latent factors arising from complex phenomena such as gene expression profiles in bioinformatics [@golub1999molecular], term-document frequencies in topic modeling [@blei2003latent], multi-view biological measurements in integrative omics [@strazar2016orthogonal], and user-item interactions in recommender systems [@koren2009matrix]. 
+
+Classical dimensionality reduction techniques like principal component analysis (PCA) and its sparse variants seek low-rank approximations with interpretable bases [@zou2006sparse], while sparse canonical correlation analysis (CCA) extends this to multi-view correlations in biological data [@witten2011]. However, enforcing sparsity and decorrelation remains challenging: traditional methods may over-regularize or lack intuitive controls for partial constraints. Non-negative matrix factorization (NMF) [@lee2001nmf] offers parts-based, additive representations aligned with domain constraints, but suffers from rotational ambiguity, yielding entangled factors [@ding2006orthogonal]. Orthogonal variants improve sparsity and identifiability by aligning factors with disjoint structures, with applications in sparse PCA [@zou2006sparse], sparse CCA [@witten2011], and interpretable neural networks [@henaff2011deep]. Yet, strict orthogonality often sacrifices fidelity, especially in noisy or heterogeneous data and motivates the need for partial decorrelation models.
+
+Soft orthogonalization methods address this by penalizing deviations from orthonormality. Examples include Disentangled Orthogonality Regularization (DOR), which separates Gram matrix components for convolutional kernels [@wu2023towards]; Group Orthogonalization Regularization (GOR), which applies intra-group penalties for vision tasks [@kurtz2023group]; $\lambda$-Orthogonality Regularization, which introduces thresholded penalties for representation learning [@ricci2025orthogonality]; and simpler approaches like Spectral Restricted Isometry Property (SRIP) [@goessmann2020restricted] and Frobenius norm penalties for neural stability [@guo2019frobenius]. However, these methods are typically embedded in neural training pipelines and do not enforce non-negativity, limiting their applicability to domains where measurement units should be preserved. Advanced ONMF variants, such as variational Bayesian approaches [@rahiche2022variational], unilateral factorization [@li2023unilateral], and deep autoencoder frameworks [@yang2021orthogonal], improve robustness but enforce strict orthogonality or require full decomposition, reducing flexibility for one-sided refinement.
+
+In contrast to these soft regularization techniques, Riemannian optimization approaches have been explored primarily for enforcing strict orthogonality constraints on manifolds such as the Stiefel manifold, where the feasible set is equipped with a differential structure for gradient-based updates. For instance, Nonlinear Riemannian Conjugate Gradient (NRCG) methods optimize orthogonal NMF by projecting gradients onto the tangent space and using retractions like QR decomposition to maintain exact orthonormality, while handling non-negativity through coordinate descent on the complementary factor [@Zhang2016EfficientON]. This ensures convergence to critical points with near-perfect orthogonality but incurs higher computational costs compared to soft penalties, and it typically requires full enforcement rather than flexible deviations. Hybrid methods like Feedback Gradient Descent (FGD) attempt to bridge this gap by approximating manifold dynamics in Euclidean space with feedback terms to achieve stable near-orthogonality efficiently, outperforming traditional Riemannian methods in DNN training speed while rivaling soft constraints in overhead [@Bu2022FeedbackGD]. However, adapting such Riemannian-inspired techniques to incorporate soft orthogonality penalties alongside non-negativity remains a less explored avenue.
+
+To address these gaps, we propose **Non-negative Stiefel Approximating Flow (NSA-Flow)**, a variational optimization algorithm that approximates a target ( $X_0$ ) with a non-negative matrix ( $Y \in \mathbb{R}^{p \times k}_{\geq 0}$ ).  NSA-Flow balances fidelity, column orthogonality, and non-negativity through a single tunable parameter ( $w \in [0,1]$ ) influencing proximity to the Stiefel manifold.  The simple parameterization of these constraints means that NSA-Flow allows practitioners to directly encode the desired level of sparsity/decorrelation (which are closely related in this framework) in their embeddings, without the need for complex regularization schemes or full orthogonality constraints. As such, NSA-Flow employs global soft orthogonality constraints to promote disjoint support across columns and foster interpretable bases. Formulated to stay near the Stiefel manifold [@edelman1998geometry], it is inspired by Riemannian gradient descent [@absil2008optimization] with flexible retractions (purely Euclidean, polar retraction or a novel soft interpolation between these). Non-negativity is ensured via proximal projections [@parikh2014proximal], maintaining descent stability and constraint satisfaction. Conceptually, NSA-Flow functions as a soft projection operator that can be inserted into any existing machine learning system to improve interpretability—whether as a regularization layer in a neural network [@henaff2011deep; @ricci2025orthogonality], a refinement step in factor models [@li2023unilateral; @rahiche2022variational], or a sparsity-enforcing module in linear embeddings [@guo2019frobenius; @goessmann2020restricted]. Unlike purely regularization-based methods [@wu2023towards; @kurtz2023group; @ricci2025orthogonality], NSA-Flow may also operate as a one-sided projection operator, preserving input structure while enabling controlled decorrelation.
+
+Our contributions are:
+
+1. A general framework for constrained matrix approximation, parameterized by ( $w$ ) to intuitively control sparsity and orthogonality for interpretable ML.
+
+2. Rigorous empirical validation that demonstrates good convergence properties and reliable benchmark performance compared to baselines.
+
+3. Broad applications, including enhanced disease classification on the Golub leukemia dataset, non-negative sparse PCA for biological integration and interpretable brain network discovery—showcasing NSA-Flow's versatility across ML domains.
+
+4. An [open-source implementation](https://github.com/stnava/nsa-flow) in `pytorch` facilitating easy integration into existing workflows for researchers and practitioners. NSA-flow is also `pip` installable via the `nsa-flow` package and wrapped in `R` via `ANTsR`.
+
+The paper is organized as follows: Section 2 derives the formulation and algorithm; Section 3 details the experimental results; Section 4 discusses limitations and future work; Section 5 gives an overview of software resources.
+
+
+# Methods
+
+We consider the problem of finding a matrix \( Y \in \mathbb{R}^{p \times k} \) that optimally approximates a target matrix \( X_0 \in \mathbb{R}^{p \times k} \) while satisfying column orthogonality and, optionally, non-negativity. This general formulation is central to a wide range of problems in machine learning and signal processing, including orthogonal dictionary learning, Independent Component Analysis (ICA), and the orthogonal Procrustes problem [@lee2001algorithms; @hyvarinen2000independent; @schonemann1966generalized]. The NSA-Flow optimization problem is defined by the minimization of a composite energy function \( E(Y) \):
+
+\[
+\min_{Y \in \mathbb{R}^{p \times k}, Y \ge 0}
+E(Y)
+= (1 - w) \, L_{fid}(Y, X_0)
++ w \, L_{orth}(Y),
+\label{eq:objective}
+\]
+
+where \( w \in [0, 1] \) is a hyperparameter that balances the fidelity loss \(L_{fid}\) against the orthogonality loss \(L_{orth}\). For numerical stability, the loss terms are internally re-weighted based on their initial magnitudes, but we omit these scaling factors for notational clarity. The fidelity term is the standard squared Frobenius norm distance, \( L_{fid}(Y, X_0) = \frac{1}{2} \| Y - X_0 \|_F^2 \). One choice for orthogonality loss is:
+\[
+L_{orth}(Y) = \frac{1}{2} \| Y^\top Y - I_k \|_F^2.
+\]
+This penalty is zero if and only if \( Y \) belongs to the Stiefel manifold \( St(p, k) = \{ Y \in \mathbb{R}^{p \times k} : Y^\top Y = I_k \} \) and grows quadratically with the orthogonality defect. The Euclidean gradient of this objective is:
+\[
+\nabla_Y E(Y) = (1 - w)(Y - X_0) + w \, Y ( Y^\top Y - I_k ).
+\]
+
+## The Optimization Challenge and the NSA-Flow Approach
+
+A standard Euclidean gradient descent step, \( Y \leftarrow Y - \eta \nabla_Y E(Y) \), is ill-suited for this problem as it does not respect the orthogonality constraint. The conventional solution is to employ Riemannian optimization methods, which involve projecting the gradient onto the tangent space of the Stiefel manifold and then using a **retraction** to pull the updated iterate back onto the manifold [@absil2008optimization; @boumal2023intro]. While theoretically sound, full retraction steps can be computationally expensive (requiring an SVD or matrix square root inverse) and can sometimes hinder convergence on the fidelity term by abruptly correcting the geometry of the iterate.
+
+NSA-Flow introduces a **soft-retraction flow** that elegantly circumvents these issues. Instead of enforcing a hard constraint at every step, it defines an update rule that simultaneously descends on the energy landscape and continuously "pulls" the iterates towards the Stiefel manifold. This is achieved by directly linking the update rule's geometry to the objective function's weight parameter \(w\). Figure 1 illustrates the conceptual framework of NSA-Flow, showing how the iterates evolve under different \(w\) settings.
+
+### The Soft-Retraction Method: A Geometrically-Aware Update
+
+Let \( \widetilde{Y}^{(t+1)} \) be the iterate after a standard Euclidean gradient step from \( Y^{(t)} \):
+\[
+\widetilde{Y}^{(t+1)} = Y^{(t)} - \eta \, \nabla_Y E(Y^{(t)}).
+\]
+Let \( Q^{(t+1)} = \mathrm{Retract}(\widetilde{Y}^{(t+1)}) = \widetilde{Y}^{(t+1)} (\widetilde{Y}^{(t+1)\top} \widetilde{Y}^{(t+1)})^{-1/2} \) be the polar retraction of \( \widetilde{Y}^{(t+1)} \), which is the closest point to \( \widetilde{Y}^{(t+1)} \) on the Stiefel manifold in the Frobenius norm [@edelman1998geometry]. The NSA-Flow update is a convex combination of the gradient step and its retraction, where the interpolation parameter is the objective weight \(w\) itself:
+\[
+Y^{(t+1)} = (1 - w) \, \widetilde{Y}^{(t+1)} + w \, Q^{(t+1)}.
+\]
+This design choice creates a powerful, self-consistent algorithm:
+
+*   When \(w\) is small (fidelity is prioritized), the update is mostly a standard Euclidean gradient step.
+
+*   When \(w\) is large (orthogonality is prioritized), the update is strongly pulled towards the manifold via the polar retraction.
+
+This method can be viewed as an instance of an **averaged operator** scheme, which is known to exhibit stable and smooth convergence properties [@bauschke2017convex]. It provides a computationally efficient and geometrically intuitive alternative to full Riemannian optimization, similar in spirit to other fast, retraction-free, or approximate manifold methods [@vary2024optimization; @ablin2022fast].
+
+### Geometric Stability and Convergence
+
+The stability of the soft-retraction flow is guaranteed by its contractive nature with respect to the constraint set.
+
+**Proposition:** Let \( \tilde{Y} \in \mathbb{R}^{p \times k} \), \( Q = \mathrm{Retract}(\tilde{Y}) \), and \( Y_{\text{new}} = (1-w)\tilde{Y} + w Q \) for \( w \in [0, 1] \). The Frobenius distance of the new iterate to the Stiefel manifold is strictly reduced for any \( w > 0 \):
+\[
+\| Y_{\text{new}} - Q \|_F = (1 - w) \| \tilde{Y} - Q \|_F.
+\]
+*Proof.* The proof follows directly from the linearity of the norm:
+\(
+\| Y_{\text{new}} - Q \|_F = \| ((1-w)\tilde{Y} + w Q) - Q \|_F = \| (1-w)(\tilde{Y} - Q) \|_F = (1 - w) \| \tilde{Y} - Q \|_F.
+\)
+Since \(Q\) is the projection of \(\tilde{Y}\) onto the manifold, this proposition shows that each soft-retraction step reduces the iterate's distance to the feasible set. This property, fundamental to proximal point and averaged operator algorithms, ensures that the iterates are progressively and smoothly drawn towards the manifold, preventing divergence and promoting stable convergence [@parikh2014proximal; @combettes2011proximal].
+
+### Scale-Invariant Orthogonality Penalty
+
+To enhance robustness, NSA-Flow's default setting uses a **scale-invariant orthogonality defect**. The standard penalty \( \| Y^\top Y - I \|_F^2 \) is sensitive to the norm of \(Y\), as scaling \(Y \to cY\) scales the penalty by \(c^4\). This can lead to poorly conditioned optimization problems where the learning rate must be carefully tuned. Following the principles in [@wen2013feasible], we use a normalized penalty that is invariant to the global scale of \(Y\):
+\[
+L_{orth, inv}(Y) = \frac{\| Y^\top Y - \text{diag}(\text{diag}(Y^\top Y)) \|_F^2}{\|Y\|_F^4}.
+\]
+This objective purely measures the cosine of the angles between columns, decoupling the orthogonality constraint from the magnitude of the column vectors. This results in a better-conditioned optimization landscape and more consistent convergence behavior.
+
+### Relationship to Alternative Manifold Optimization Methods
+
+*   **Cayley Transform:** An alternative for preserving orthogonality is the **Cayley transform**, which defines an exact retraction-free update. For a skew-symmetric matrix \( A = \text{grad}E(Y) Y^\top - Y (\text{grad}E(Y))^\top \), the update \(Y^{(t+1)} = ( I - \frac{\eta}{2} A )^{-1} ( I + \frac{\eta}{2} A ) Y^{(t)}\) exactly preserves orthogonality [@gao2019parallelizing]. However, it requires solving a \(p \times p\) linear system, making it computationally prohibitive for large \(p\).
+
+*   **Riemannian Optimization Frameworks:** Standard toolboxes like `Manopt` [@boumal2014manopt] implement sophisticated algorithms like Riemannian trust-region and conjugate gradient methods. NSA-Flow's soft-retraction can be seen as a computationally efficient alternative that can be easily integrated into existing, traditional ML or deep learning pipelines and that allows for flexible constraint satisfaction.
+
+### Computational Complexity
+
+```{r complexity_table, echo=FALSE, tbl.width="100%"}
+# Load required library
+library(gt)
+library(dplyr)  # For data manipulation if needed
+
+# Load required packages
+library(caret)    # For createFolds (if needed later)
+library(Rtsne)    # For t-SNE visualization
+library(ggplot2)  # For plotting
+library(dplyr)    # For data manipulation
+
+# Create the data frame
+data <- tibble(
+  Method = c("Euclidean GD", "Full Polar Retraction", "**NSA-Flow (ours)**", "Cayley Transform"),
+  `Dominant Operation` = c("Gradient Computation", "Gradient + SVD / Polar", "Gradient + Polar + Interp.", "Linear Solve (\\(p \\times p\\))"),
+  `Complexity ($p \\ge k$)` = c("\\( O(pk^2) \\)", "\\( O(pk^2) \\)", "\\( O(pk^2) \\)", "\\( O(p^3) \\) or \\( O(pk^2) \\) (w/ low rank)"),
+  Orthogonality = c("✗ (Unstable)", "✓ (Exact)", "≈ (Controlled)", "✓ (Exact)"),
+  Notes = c("Fails to enforce constraints.", "Costly, non-smooth updates.", "Smoother, faster, practical.", "Prohibitive for large \\(p\\).")
+)
+
+# Create the gt table
+gt_table <- data |>
+  gt( caption = "Computational Complexity of NSA-Flow and Related Methods") |>
+  fmt_markdown(columns = everything()) |> tab_options(
+    table.font.size = px(8)
+  )
+# For LaTeX math in PDF output (if using R Markdown to PDF), add this:
+# gt_table <- gt_table |>
+#   fmt_latex(columns = c(`Complexity ($p \\ge k$)`, `Dominant Operation`, Notes))  # Experimental; requires gt >= 0.10.0
+
+# Display the table
+gt_table
+```
+
+For tall-skinny matrices (\( p \gg k \)), the asymptotic cost is dominated by \( O(pk^2) \) matrix multiplications. The primary advantage of the soft-retraction flow is not in its asymptotic complexity but in its superior convergence dynamics, offering a stable and smooth optimization trajectory that effectively balances multiple objectives at a reduced computational cost per iteration.  Practically speaking, as will be shown in the Results section, NSA-Flow provides an intuitive "knob" that allows users to impose orthogonality, non-negativity and sparseness via a consistent and intuitive framework.  Table 1 summarizes these comparisons.
+
+
+```{r pollen, echo = FALSE, fig.cap = "Illustration of the NSA-Flow optimization as a function of $\\omega$.  The colored manifold is a conceptual representation of the Stiefel manifold, with the curves representing optimization paths for evolving $Y$.  When $\\omega$ is small, the retraction is mild, allowing more deviation from orthonormality; when $\\omega$ is large, the retraction strongly enforces orthonormality, pulling $Y$ closer to the manifold."}
+knitr::include_graphics("figs/nsa_flow_manifolds_fig.pdf")
+```
+
+### Implementation
+
+The NSA-Flow algorithm is implemented in `pytorch` (and wrapped in `R`) as a modular, numerically stable framework for optimizing non-negative matrices under orthogonality constraints. The main function, `nsa_flow_orth`, is supported by helper functions for matrix operations, gradient computations, retractions, and optimization. Key design principles include robustness to numerical issues, flexibility in retraction choices, and comprehensive diagnostics for monitoring convergence [@absil2008optimization].
+
+The main function accepts an initial matrix \( Y_0 \), an optional target \( X_0 \), and parameters for the orthogonality weight \( w \), retraction type, maximum iterations, tolerance, and optimizer type (defaulting to Averaged Stochastic Gradient Descent (ASGD)). If no \( X_0 \) is provided, \( Y_0 \) becomes the target. The algorithm initializes scaling factors for fidelity and orthogonality terms based on initial estimates of the optimization landscape, ensuring balanced contributions across matrix sizes and data content.
+
+Each iteration computes the Euclidean gradients for fidelity and orthogonality and then projects them toward the Stiefel manifold's tangent space [@edelman1998geometry], and performs a descent step using an adaptive learning rate.  Retraction (polar, soft, or none) maps the update toward the manifold, followed by an optional non-negativity projection (softplus, ReLu or clamped). Convergence is monitored via gradient norms and energy stability, with diagnostics (iteration, time, fidelity, orthogonality, energy) recorded at user-specified intervals. The best solution (lowest energy) is retained.
+
+Helper functions handle symmetric matrix operations, Frobenius norms, scale-invariant defect calculations, non-negativity violation checks, and stable inverse square root computations (via eigendecomposition with eigenvalue clipping). The optimizer supports momentum-based updates, with safeguards against NaN or infinite values [@parikh2014proximal]. A plotting option generates a dual-axis trace of fidelity and orthogonality over iterations, aiding visualization.
+
+The implementation is designed for research-grade use, with verbose output for debugging and extensibility for alternative optimizers or retractions. It scales efficiently for moderate \( k \), with potential bottlenecks in large \( p \) addressable through batching or, potentially, sparse matrix support in future extensions [@boumal2011rtrmc].  Experimentalists should consider appropriate matrix pre-processing (scaling, centering), parameter tuning for \( w \), learning rates, and tolerances based on their specific applications.  The Figure 2 flowchart visualizes the NSA-Flow algorithm's workflow, highlighting the iterative process, retraction choices, and convergence checks.
+
+```{r nsa_flowchart, fig.cap="NSA-Flow Algorithm Workflow", fig.width=6, fig.height=4,echo=FALSE}
+nsa_flow_flowchart <- function(
+  node_fill_color = "lightblue",
+  node_font_color = "black",
+  edge_color = "navy",
+  font_name = "Helvetica",
+  node_shape = "rectangle",
+  graph_rankdir = "TB",
+  fontsize = 10
+) {
+  library(DiagrammeR)
+  graph_spec <- paste0("
+digraph nsa_flow_algorithm {
+  graph [rankdir = ", graph_rankdir, ", fontsize = ", fontsize, ", splines = ortho]
+  node [shape = ", node_shape, ", style = filled, fillcolor = ", node_fill_color, ", 
+        fontcolor = ", node_font_color, ", fontname = ", font_name, ", fontsize = ", fontsize, "]
+  edge [color = ", edge_color, ", fontsize = ", fontsize, "]
+  A [label = 'Initialize Y_0\\n(Random or SVD-based)']
+  B [label = 'Set Parameters\\n(w, retraction, optimizer)']
+  C [label = 'Compute Euclidean Gradient\\n∇F(Y) = (1-w)∇g(Y) + w∇f(Y)']
+  D [label = 'Project to Tangent Space\\ngrad_ℳ F']
+  E [label = 'Descent Step\\nZ = Y - α grad_ℳ F']
+  F [label = 'Choose Retraction\\n(polar, soft, none)']
+  G [label = 'Apply Retraction\\nMap Z toward Stiefel Manifold']
+  H [label = 'Proximal Projection\\nP_+(Y) = max(Y, 0)']
+  I [label = 'Check Convergence\\n(Energy reduction < tol or grad norm < tol)']
+  J [label = 'Update Y\\nRecord Diagnostics\\n(iter, energy, orth, neg)']
+  K [label = 'Output Final Y\\nand Trace Diagnostics']
+  A -> B [label = 'Setup']
+  B -> C [label = 'Start Iteration']
+  C -> D [label = 'Project']
+  D -> E [label = 'Descend']
+  E -> F [label = 'Select']
+  F -> G [label = 'Retract']
+  G -> H [label = 'Project Non-neg']
+  H -> I [label = 'Evaluate']
+  I -> J [label = 'Not Converged', style = 'dashed']
+  J -> C [label = 'Next Iteration']
+  I -> K [label = 'Converged']
+  subgraph cluster_retraction {
+    style = dashed
+    color = gray
+    label = 'Retraction Options'
+    F1 [label = 'Polar\\n(Z (Z^T Z)^{-1/2})', fillcolor = lightyellow]
+    F2 [label = 'Soft\\n((1-w)I + w(Z^T Z)^{-1/2})', fillcolor = lightyellow]
+    F3 [label = 'None\\n(No retraction)', fillcolor = lightyellow]
+    F -> F1 [style = invis]
+    F -> F2 [style = invis]
+    F -> F3 [style = invis]
+  }
+}
+")
+  grViz(graph_spec)
+}
+nsa_flow_flowchart(node_fill_color = "lightblue", edge_color = "navy", fontsize = 10)
+
+
+
+#' Compute Sparsity Level of a Matrix
+#'
+#' @param M A numeric matrix.
+#' @param tol Numeric tolerance: entries with absolute value below `tol`
+#'        are treated as zero (default = 1e-8).
+#' @return A numeric value between 0 and 1, representing the fraction of
+#'         (near-)zero entries. Higher = more sparse.
+#' @examples
+#' M <- matrix(c(1, 0, 0, 2, 0, 0), nrow = 2)
+#' sparsity_level(M)
+#' # [1] 0.6666667
+sparsity_level <- function(M, tol = 1e-8) {
+  stopifnot(is.matrix(M), is.numeric(M))
+  total <- length(M)
+  zeros <- sum(abs(M) < tol)
+  sparsity <- zeros / total
+  return(sparsity)
+}
+
+```
+
+## Sparse PCA via NSA-Flow
+
+Sparse principal component analysis (SPCA) finds a sparse basis \( Y \in \mathbb{R}^{p \times k} \) that maximizes the variance explained in a data matrix \( X \in \mathbb{R}^{n \times p} \). We can formulate SPCA as a regularized optimization over $Y$ :
+
+\[
+\min_{Y} \left\{ -\frac{1}{2n} \text{tr}(Y^\top X_c^\top X_c Y) + \lambda R(Y) \right\},
+\]
+where \( X_c \) is the data matrix, \( \lambda \ge 0 \) is a regularization parameter controlling the regularization penalty, and \( R(Y) \) is a suitable regularization function.  The smooth component of the objective is the negative explained variance, \( f(Y) = -\frac{1}{2n} \text{tr}(Y^\top S Y) \), where \( S = X_c^\top X_c \) is the covariance matrix. The Euclidean gradient of this term is:
+\[
+\nabla_Y f(Y) = -\frac{1}{n} S Y.
+\]
+
+
+We optimize this energy in two main steps:
+
+**Step 1: Gradient Descent with Line Search**
+A candidate update \( Z^{(t)} \) is computed by taking a step along the negative gradient direction from the current iterate \( Y^{(t)} \):
+\[
+Z^{(t)} = Y^{(t)} - \alpha^{(t)} \nabla_Y f(Y^{(t)}),
+\]
+where the step size \( \alpha^{(t)} \) is determined by an Armijo-type backtracking line search to ensure sufficient decrease in the objective function.
+
+**Step 2: Proximal Step and Orthogonality Enforcement**
+The non-smooth regularization term arising from $R$ is handled in a proximal step. The method supports two types of proximal updates:
+
+*   **`proximal_type = "basic"` (Proximal Thresholding):** A standard soft-thresholding operator is applied to the candidate \( Z^{(t)} \) to induce sparsity, followed by an optional non-negativity projection:
+    \[
+    Y^{(t+1)} = \text{prox}_{\alpha\lambda, \|\cdot\|_1}(Z^{(t)}) = \text{sign}(Z^{(t)}) \odot \max(|Z^{(t)}| - \alpha^{(t)}\lambda, 0).
+    \]
+    This standard approach decouples the sparsity and orthogonality steps. We  re-orthogonalize via QR at the beginning of each iteration when this algorithmic path is taken.
+
+*   **`proximal_type = "nsa_flow"` (Proximal Flow):** A more sophisticated proximal step is performed by invoking the NSA-Flow algorithm. The candidate matrix \( Z^{(t)} \) serves as the target for an inner NSA-Flow optimization loop:
+    \[
+    Y^{(t+1)} = \arg\min_{U \ge 0} \left\{ \frac{1}{2} \| U - Z^{(t)} \|_F^2 (1-w) + \, \text{Orth}(U) w \right\}.
+    \]
+    This subproblem simultaneously encourages fidelity to the gradient-updated iterate \( Z^{(t)} \), promotes sparsity through non-negativity, and enforces column orthogonality via the flow. This approach integrates the constraints more tightly into the optimization, providing a unified update that respects both the geometry and the regularization.
+
+The algorithm terminates when the relative change in energy, the norm of the gradient, and the change in the iterate all fall below a predefined tolerance \( \tau \). An adaptive learning rate scheduler is also employed, which reduces the step size \( \alpha \) if the objective function fails to improve for a set number of iterations (patience), thereby enhancing stability and preventing premature termination at plateaus. The final output is the set of sparse loadings \( Y \) that achieved the lowest energy during the optimization.  This is one example where NSA-Flow can be integrated as a proximal operator within a broader optimization framework to enforce orthogonality and non-negativity.  Other approaches (shown below) more directly use NSA-Flow as a standalone method for matrix approximation; for example, by directly approximating the loading matrix of PCA with the bases derived from NSA-Flow.  Both SPCA and the latter approach are demonstrated in the Results section.  The implementation is available in the `nsa_flow_pca` function within the ANTsR package.  We implement a closely related approach for NSA-flow constrained factor analysis in the `nsa_flow_pca_fa` function which is illustrated in an accompanying documentation article (`ANTsR`).
+
+
+# Results 
+
+We use default settings in the results below along with weighting of \( w = 0.5 \) unless otherwise specified. The defaults include the soft-retraction flow with scale-invariant fidelity and scale-invariant orthogonality penalties, which provide robust convergence across a range of problems.  The fidelity weighting is set relatively small in comparison to the orthogonality penalty; as such, it acts primarily as a weak regularizer.  The initial learning rate is determined by a data-driven estimation method with convergence determined when a maximum of 1000 iterations or a total energy slope of less than \( 1 \times 10^{-6} \) is reached (indicating only very slow reduction in energy).
+
+## Toy Example: Decomposing a Small Mixed-Signal Matrix
+
+To intuitively illustrate NSA-Flow, consider a toy 4x3 matrix \( X_0 \) representing mixed signals: each column is a nonnegative orthogonal basis vector (e.g., distinct patterns), but observed with noise and scaling. NSA-Flow approximates an orthogonal nonnegative basis \( Y \) close to \( X_0 \).  Figure 3 shows the results of applying NSA-Flow to this toy example, starting from a random initialization \( Y_0 \).
+
+```{r toy_example, echo=FALSE, fig.width=6, fig.height=3,fig.cap="NSA-Flow applied to a toy 4x3 matrix with noisy orthogonal nonnegative patterns."}
+set.seed(42)
+# True orthogonal nonnegative basis
+true_Y <- matrix(c(1,0,0,0, 0,1,0,0, 0,0,1,0), 4, 3)  # Nearly orthogonal, nonnegative
+true_Y <- true_Y + matrix(runif(12, 0, 0.1), 4, 3)  # Add small perturbations
+true_Y <- pmax(true_Y, 0)
+true_Y <- true_Y %*% solve(chol(crossprod(true_Y)))  # Orthogonalize
+
+# Noisy target
+X0_toy <- true_Y + matrix(rnorm(12, 0, 0.2), 4, 3)
+X0_toy <- pmax(X0_toy, 0)  # Ensure nonnegative
+
+# Initial random guess
+Y0_toy <- matrix(runif(12, 0, 1), 4, 3)
+
+# Apply NSA-Flow with balanced weights
+# X0_toy=X0_toy/norm(X0_toy, "F")*0.1  # Normalize
+omega_default = 0.5
+# if ( ! exists("ini_default") ) 
+lropts=c('armijo', 'armijo_aggressive', 'exponential', 'linear', 'random', 'adaptive', 'momentum_boost', 'entropy', 'poly_decay', 'bayes')
+ini_default = 'bayes' # 
+optype='lars'
+optype='asgd'
+def_ret = "soft_polar"
+nsa_default <- function(Y0, w = omega_default,
+  X0 = NULL, init=ini_default, agg=0.5, warmup=0L, verbose = FALSE ) {
+  nsa_flow_autograd(
+    Y0 = Y0,
+    X0 = X0,
+    w = w,
+    retraction = def_ret,
+    max_iter = 1000,
+    verbose = verbose,
+    seed = 42,
+    apply_nonneg = TRUE,
+    tol = 1e-8,
+    window_size=10,
+    fidelity_type = "scale_invariant", #"symmetric",
+    orth_type = "scale_invariant",
+    lr_strategy = init,
+    aggression = agg,
+    optimizer = optype,
+    warmup_iters=warmup,
+    plot = TRUE
+  )
+}
+#
+res_toy <- nsa_default(Y0 = X0_toy, X0 = true_Y, w = omega_default )
+# Visualize
+
+library(ggplot2)
+library(reshape2)
+library(patchwork)   # or cowplot
+
+# Helper: convert a matrix to a ggplot heatmap
+make_heatmap <- function(mat, title) {
+  df <- melt(mat)
+  ggplot(df, aes(Var2, Var1, fill = value)) +
+    geom_tile() +
+    scale_fill_viridis_c(option = "plasma") +
+    coord_equal() +
+    theme_minimal(base_size = 8) +
+    theme(
+      axis.title = element_blank(),
+      axis.text = element_blank(),
+      panel.grid = element_blank(),
+      plot.title = element_text(face = "bold", hjust = 0.5)
+    ) + theme(legend.position = "none") +
+    ggtitle(title)
+}
+
+# Create the four ggplots
+p1 <- make_heatmap(X0_toy,  "Noisy Target X0")
+p2 <- make_heatmap(Y0_toy,  "Initial Y0")
+p3 <- make_heatmap(res_toy$Y, "NSA-Flow Y (w=0.5)")
+p4 <- make_heatmap(true_Y,  "True Basis")
+
+# Arrange them in a 1x4 grid for better visibility
+(p1 | p2 | p3 | p4 ) 
+# Metrics
+toy_metrics <- data.frame(
+  Metric = c("Recon Error", "Orth Residual", "Neg Violation"),
+  Value = c(frob(res_toy$Y - X0_toy), orth_residual(res_toy$Y), neg_violation(res_toy$Y))
+)
+# kable(toy_metrics, digits = 4, caption = "Toy Example Metrics")
+```
+
+**Interpretation**: Starting from a random \( Y_0 \), NSA-Flow recovers a basis close to the true orthogonal nonnegative patterns in \( X_0 \), with low reconstruction error and near-zero orthogonality/nonnegativity residuals. This captures the essence: extracting interpretable, disjoint components from noisy data. 
+
+
+```{r pollen2, echo = FALSE, out.width='90%', fig.cap = "The impact of regularization on measures of both orthogonality and fidelity error across different optimizers.  For both metrics, lower values are better. We vary ($\\omega$) from 0.01 (minor orthogonality enforcement) to 0.99 (near full enforcement) and compare standard torch optimizers.  Smoothly reducing curves for orthogonality and increasing curves for fidelity are expected and indicate better performance.  This evaluation as well as comparisons in sparse PCA and factor analysis suggest that LARS and ASGD are most reliable in conjunction with the NSA flow implementation."}
+knitr::include_graphics("figs/nsa_flow_optimizer_comparison_wide_p100_k140.png")
+```
+
+
+
+## Comparing Optimization Methods
+
+A key choice in NSA-Flow is the optimization algorithm. We compare several optimizers: standard gradient descent, Adam, Armijo gradient descent, AdaGrad and others. Each has different convergence properties and sensitivities to hyperparameters and we evaluate them with standard defaults and an automatically estimated learning rate via Armijo condition [@armijo1966minimization]. We evaluate them on synthetic data measuring convergence speed and final orthogonality/fidelity metrics.  Performance across $\omega$ values are shown in Figure 4.  A data-driven ranking of the methods based on execution time and objective values shows that `pytorch` averaged stochastic gradient descent [@polyak1992acceleration] and Layer-wise Adaptive Rate Scaling (LARS) [@you2017large] perform well in terms of both speed and objective values across a variety of problems.
+
+```{r pollen3, echo = FALSE, out.width='90%', fig.cap = "The default optimizer peformance across different values of orthogonality weight indicates that the single parameter provides predictable control of the orthogonality in the outcome.  Higher values lead predictably to more decorrelation at the expense of fidelity."}
+knitr::include_graphics("figs/nsa_flow_optimization_paths_by_w.png")
+```
+
+## Impact of Retraction Strength
+
+The retraction methods define how NSA-Flow projects the updated matrix back onto a constraint manifold.  Our soft polar retraction approach uses the following strategy: For tall matrices (\( p \geq k \)), computes \( T = (Y^\top Y)^{-1/2} \) via eigendecomposition, forms \( T_\omega = (1 - \omega) I_k + \omega T \), then \( Y T_\omega \). For wide matrices (\( p < k \)), falls back to SVD-based \( Q = U V^\top \), then \( (1 - \omega) Y + \omega Q \). By default, we also preserve the Frobenius norm  scaling output \( Y \) by \( \|Y_{\cand}\|_F / \|Y\|_F \) if \( \|Y\|_F > 0 \), focusing optimization on directions.  We systematically vary \( \omega \) from 0 to 1 and compare how the retraction strength impacts the objectives.  Two key metrics are evaluated:
+
+- **Orthogonality Defect**:  
+  \( \delta(Y) = \left\| \frac{Y^\top Y}{\|Y\|_F^2} - \diag\left( \frac{\diag(Y^\top Y)}{\|Y\|_F^2} \right) \right\|_F^2 \) — a scale-invariant measure of deviation from column orthogonality.  
+
+- **Fidelity**:  
+  \( \|Y - Z\|_F \) — measures deviation from the input update.  
+
+Here, we normalize inputs to unit Frobenius norm for consistency.  Figure 5 shows that, as expected, increasing \( \omega \) leads to lower orthogonality defect and higher fidelity error.  Smoothly decreasing orthogonality and increasing fidelity curves indicate smoothly varying performance across $w$ values.
+
+
+```{r compare-retractions, fig.width=8, fig.height=5, echo=FALSE, message=FALSE, warning=FALSE,eval=FALSE}
+library(ggplot2)
+library(reshape2)
+library(patchwork)
+
+
+# --- Data setup for three shapes ---------------------------------------------------
+set.seed(42)
+omegas <- seq(0, 1, by = 0.1)
+
+# Tall (thin): p > k
+p_tall <- 200; k_tall <- 20
+Z_tall <- matrix(rnorm(p_tall * k_tall), p_tall, k_tall)
+Z_tall <- Z_tall / sqrt(sum(Z_tall^2))  # Normalize to unit Frobenius norm
+
+# Wide: p < k
+p_wide <- 20; k_wide <- 200
+Z_wide <- matrix(rnorm(p_wide * k_wide), p_wide, k_wide)
+Z_wide <- Z_wide / sqrt(sum(Z_wide^2))  # Normalize
+
+# Nearly square: p ≈ k
+p_square <- 100; k_square <- 100
+Z_square <- matrix(rnorm(p_square * k_square), p_square, k_square)
+Z_square <- Z_square / sqrt(sum(Z_square^2))  # Normalize
+
+# Function to run evaluation for a given Z (tall, wide, square)
+run_eval <- function(Z, shape_label) {
+  results <- data.frame(
+    omega = omegas,
+    orth_polar = NA, orth_soft_polar = NA,
+    fid_polar = NA, fid_soft_polar = NA
+  )
+  
+  for (i in seq_along(omegas)) {
+    omega <- omegas[i]
+    
+    # Polar
+    Y_polar <- nsa_flow_retract(Z, omega, "polar")
+    results$orth_polar[i] <- invariant_orthogonality_defect(Y_polar)
+    results$fid_polar[i] <- norm(Y_polar - Z, "F")
+    
+    # Soft Polar
+    Y_soft_polar <- nsa_flow_retract(Z, omega, def_ret)
+    results$orth_soft_polar[i] <- invariant_orthogonality_defect(Y_soft_polar)
+    results$fid_soft_polar[i] <- norm(Y_soft_polar - Z, "F")
+  }
+  
+  results$shape <- shape_label
+  results
+}
+
+# Run for each shape
+eval_tall <- run_eval(Z_tall, "Tall (p=200, k=20)")
+eval_wide <- run_eval(Z_wide, "Wide (p=20, k=200)")
+eval_square <- run_eval(Z_square, "Square (p=100, k=100)")
+
+# Combine
+results_all <- rbind(eval_tall, eval_wide, eval_square)
+
+df_melt <- melt(results_all, id.vars = c("omega", "shape"))
+
+# Color palette
+method_colors <- c(
+  "polar" = "#1f78b4", def_ret = "#6a3d9a"
+)
+
+# Prefix for orth, fid
+prefix_color <- function(prefix) {
+  setNames(method_colors, paste0(prefix, "_", names(method_colors)))
+}
+
+orth_colors <- prefix_color("orth")
+fid_colors <- prefix_color("fid")
+
+# --- Plot 1: Orthogonality defect ----------------------------------------
+p1 <- ggplot(subset(df_melt, grepl("orth_", variable)),
+             aes(x = omega, y = value, color = variable)) +
+  geom_line(size = 1.2) + geom_point(size = 2) +
+  scale_color_manual(values = orth_colors, labels = gsub("_", " ", names(orth_colors))) +
+  labs(title = "Orthogonality Defect vs ω",
+       y = "Defect", x = "Orth. weight (ω)", color = "Method") +
+  facet_wrap(~ shape) +
+  theme_minimal(base_size = 11) + theme(legend.position = "top")
+
+# --- Plot 2: Fidelity -----------------------------------------------------
+p2 <- ggplot(subset(df_melt, grepl("fid_", variable)),
+             aes(x = omega, y = value, color = variable)) +
+  geom_line(size = 1.2) + geom_point(size = 2) +
+  scale_color_manual(values = fid_colors, labels = gsub("_", " ", names(fid_colors))) +
+  labs(title = "Fidelity (Deviation from target Z) vs ω",
+       y = "||Y - Z||_F", x = "Orth. weight (ω)", color = "Method") +
+  facet_wrap(~ shape) +
+  theme_minimal(base_size = 11) + theme(legend.position = "top")
+
+# --- Combine plots --------------------------------------------------------
+(p1 / p2) + plot_layout(guides = "collect")
+```
+
+
+
+## Sparsity as a Function of Orthogonality via Weight Parameter \( w \)
+
+Sparsity in the context of matrix factorization refers to the presence of many zero (or near-zero) entries in the factorized matrices. In NSA-Flow, sparsity is not directly enforced through explicit penalties (like L1 regularization) but emerges as a consequence of promoting orthogonality among the columns of the matrix \( Y \).  The parameter $\omega$ serves as a trade-off weight between data fidelity and orthogonality regularization. Orthogonality is measured at the whole-matrix level where lower values indicate closer alignment to an orthogonal (or near-orthogonal) structure.
+
+By adjusting $\omega$, sparsity is indirectly controlled through this global orthogonality constraint:
+
+- **Low \( w \) (e.g., 0.05–0.25)**: Prioritizes fidelity to the input data, resulting in denser matrices with higher entry correlations across columns. Sparsity remains low, as the optimization allows overlapping patterns to preserve original structure, leading to "blurry" approximations.
+
+- **Increasing \( w \) (e.g., 0.5–0.75)**: Strengthens orthogonality enforcement, promoting decorrelated columns. This induces sparsity by concentrating non-zero entries into disjoint patterns, reducing overlap and yielding moderate sparsity.
+
+- **High \( w \) (e.g., 0.95)**: Dominates with orthogonality, forcing near-orthogonal columns that are highly sparse (e.g., $\approx$0.9) and crisp, but potentially over-constrained, risking loss of fidelity to the original data.
+
+This mechanism leverages matrix-level orthogonality to achieve sparsity without explicit per-entry penalties, as demonstrated in synthetic experiments where heatmaps of optimized matrices transition from diffuse (low \( w \)) to sharp and disjoint (high \( w \)) (Figure 6). Convergence plots (Figure 7) further show stable optimization across \( w \) values, confirming the parameter's role in balancing these objectives.  Note that the exact sparsity levels depend on data characteristics and initialization, but the trend of increasing sparsity with higher \( w \) is consistent regardless of whether data is thin, wide, or square.
+
+```{r synth_setup,fig.height=8,fig.width=5.3, echo=FALSE, message=FALSE}
+generate_synth_data <- function(p=40, k=3, corrval=0.3,noise=0.5, sparse_prob=0.2, include_neg=FALSE) {
+  V0 <- qr.Q(qr(matrix(rnorm(p*k), p, k)))
+  Y0 <- V0 + noise * matrix(rnorm(p*k), p, k)
+  Y0 <- matrix(rnorm(p*k), p, k)+1
+  library(MASS)
+  # Target covariance
+  Sigma <- matrix(corrval, k, k)
+  diag(Sigma) <- 1  # variances = 1
+  # Generate correlated datap
+  Y0 <- mvrnorm(n = p, mu = rep(0, k), Sigma = Sigma)
+  if (include_neg) Y0 <- Y0 - 0.5
+  if (sparse_prob > 0) Y0[runif(p*k) < sparse_prob] <- 0
+  X0 <- pmax(Y0 + 0.2 * matrix(rnorm(p*k), p, k), 0)
+  list(Y0=Y0, X0=X0, V0=V0)
+}
+
+set.seed(123)
+p <- 200; k <- 40
+X0 = generate_synth_data( p, k, corrval=0.35, noise=0.05, sparse_prob=0.0, include_neg=FALSE )$Y0
+####
+```
+
+
+```{r stiefel_sweep_full, fig.width=6.5,  echo=FALSE, message=FALSE,fig.cap="A synthetic dataset is generated with controlled correlation and noise levels to evaluate NSA-Flow's performance across different orthogonality weights ($\\omega$). The data matrix $X_0$ is approximated with NSA-Flow to reveal underlying orthogonal structures, allowing assessment of how varying $\\omega$ influences the sparsity and orthogonality of the resulting factorization."}
+###
+w_seq <- c( 0.005,  0.05, 0.1, 0.2, 0.5 )
+w_seq <- c( 0.001,  0.005, 0.01, 0.05, 0.25 )
+w_seq <- c( 0.1,  0.25, 0.5, 0.75, 0.9 )
+mytit = paste0("w = ", round(w_seq,3))
+mats <- list()
+convergeplots <- list()
+for(i in seq_along(w_seq)) {
+  w_val <- w_seq[i]
+  res_soft_w <- nsa_default( X0, w = w_val, warmup=10, verbose = FALSE )
+  mytit[i] <- paste0("w = ", round(w_val, 3), ', orth = ', 
+    round(invariant_orthogonality_defect(res_soft_w$Y),4), ', w.spar = ',
+    1.0-round(sum(res_soft_w$Y/max(res_soft_w$Y) > quantile(res_soft_w$Y,0.1))/length(res_soft_w$Y),3))
+  mats[[i]] <- res_soft_w$Y
+  convergeplots[[i]] <- res_soft_w$plot+labs(title =mytit[i], subtitle = NULL)+
+  theme_minimal(base_size = 8)+theme(legend.position = "top")
+}
+allvals <- unlist(lapply(mats, function(m) as.numeric(m)))
+rng <- c(   
+    quantile(c(as.numeric(X0), allvals), c(0.05), na.rm = TRUE) , 
+    quantile(c(as.numeric(X0), allvals), c(0.95), na.rm = TRUE))
+cols <- rev(colorRampPalette(brewer.pal(9,"YlGnBu"))(120))
+swplots <- vector("list", length(mats)+1)
+rows_show <- 1:nrow(X0)
+ogtit = paste0("Original ",', orth = ', 
+    round(invariant_orthogonality_defect(X0),4), ', w.spar = ',
+    1.0-round(sum(X0/max(X0) > quantile(X0,0.1))/length(X0),3))
+swplots[[1]] <- pheatmap(X0[rows_show,], cluster_rows = FALSE, cluster_cols = FALSE, color = cols, main = ogtit, fontsize=5, silent = TRUE, breaks = seq(rng[1], rng[2], length.out = 121))
+for(i in seq_along(mats)) {
+  swplots[[i+1]] <- pheatmap(mats[[i]][rows_show,], cluster_rows = FALSE, cluster_cols = FALSE, color = cols, main = mytit[i], fontsize=5, silent = TRUE, breaks = seq(rng[1], rng[2], length.out = 121))
+}
+grid.arrange(grobs = lapply(swplots, function(x) x$gtable), ncol = 3)
+if ( length(convergeplots) >=4  ) {
+  grid.arrange(grobs=convergeplots[c(1,2,3,5)], top='Convergence Plots for Different w Values', ncol=2 )
+}
+#########
+# darkk #
+####################
+```
+
+
+<!--
+## Illustration of Weight Parameters
+
+```{r w_fid_sweep,cache=FALSE}
+set.seed(1)
+p_test <- 100; k_test <- 20
+Y0_test <- matrix(rnorm(p_test * k_test), p_test, k_test)
+Y0_test <- Y0_test / frob(Y0_test)
+ws <- c(0:50)/200
+ws[1]=1e-5
+results <- lapply(ws, function(w) {
+  out <- nsa_default(Y0_test, w = w )
+  data.frame(w = w, frob_error = frob(out$Y - Y0_test), orth_error = orth_residual(out$Y))
+})
+df <- do.call(rbind, results)
+# kable(df, digits = 6, caption = "Table 5: Effect of w on fidelity and orthogonality errors")
+#
+#
+# Load libraries
+library(ggplot2)
+library(dplyr)
+library(scales)
+
+# Normalize orth_error for dual-axis plotting
+scale_factor <- max(df$frob_error) / max(df$orth_error)
+df <- df %>% mutate(orth_scaled = orth_error * scale_factor)
+
+# Plot
+ggplot(df, aes(x = w)) +
+  geom_line(aes(y = frob_error, color = "Frobenius Error"), linewidth = 1.3) +
+  geom_point(aes(y = frob_error, color = "Frobenius Error"), size = 2.5) +
+  geom_line(aes(y = orth_scaled, color = "Orthogonality Error"), linewidth = 1.3, linetype = "dashed") +
+  geom_point(aes(y = orth_scaled, color = "Orthogonality Error"), size = 2.5, shape = 17) +
+  scale_y_continuous(
+    name = "Frobenius Error (↓ better)",
+    sec.axis = sec_axis(~ . / scale_factor,
+                        name = "Orthogonality Error (↓ better)")
+  ) +
+  scale_color_manual(values = c("Frobenius Error" = "#1f78b4", "Orthogonality Error" = "#e31a1c")) +
+  labs(
+    title = "Effect of Weight Parameter (w) on Fidelity and Orthogonality",
+    subtitle = "Frobenius and orthogonality errors vs. regularization weight w",
+    x = "Regularization Weight (w)",
+    color = ""
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, color = "gray40"),
+    axis.title.y.left = element_text(color = "#1f78b4", face = "bold"),
+    axis.title.y.right = element_text(color = "#e31a1c", face = "bold"),
+    axis.text = element_text(color = "gray25"),
+    legend.position = "top",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 12)
+  )
+
+
+
+
+
+```
+
+**Interpretation**: As \( w \) increases (more orthogonality emphasis), Frobenius error increases linearly as fidelity is traded off, but orth error decreases, showing the trade-off. At w=0.09, balanced low errors; useful for tuning based on application needs (e.g., high w for decorrelation-heavy tasks).
+
+-->
+
+## Applications
+
+This section demonstrates applications of NSA-Flow in meaningful biomedical contexts.  We first demonstrate performance of Sparse PCA implemented with NSA-Flow on real data from the Golub leukemia dataset [@golub1999molecular].  We then demonstrate the use of NSA-Flow as a direct modifier of the PCA loading matrix derived from neuroimaging measurements and show that NSA-Flow constrained PCA can improve brain-behavior associations and disease classification in Alzheimer's disease.
+
+```{r improved_prediction_setup, warning=FALSE, message=FALSE,fig.cap="Synthetic gene expression data is generated as mixtures of orthogonal nonnegative gene modules associated with each disease subtype, plus noise. NSA-Flow is applied for dimensionality reduction, and the resulting features are used in a multinomial logistic regression classifier to predict disease subtypes. The performance is compared against NMF, PCA (with absolute values), and raw features using 5-fold cross-validation accuracy. Here, t-SNE is used to visualize the raw data as a 2D projection.", fig.width=5,eval=FALSE}
+
+
+
+# Set seed for reproducibility
+set.seed(2025)
+
+# Parameters
+n_samples <- 50      # Number of samples
+n_features <- 10     # Number of features
+k_basis <- 5        # Number of basis components
+n_classes <- 3       # Number of classes (subtypes)
+
+# True nonnegative basis (features x components)
+true_basis <- matrix(0, nrow = n_features, ncol = k_basis)
+rows_per_component <- ceiling(n_features / k_basis)  # Approx rows per component
+for (i in 1:k_basis) {
+  start <- ((i-1) * rows_per_component + 1) %% n_features
+  if (start == 0) start <- n_features  # Handle modulo edge case
+  end <- min(start + rows_per_component - 1, n_features)
+  if (start <= end) {
+    true_basis[start:end, i] <- runif(end - start + 1, 0.5, 1)
+  } else {
+    # Wrap around to beginning if start > end
+    true_basis[start:n_features, i] <- runif(n_features - start + 1, 0.5, 1)
+    true_basis[1:(end %% n_features), i] <- runif((end %% n_features), 0.5, 1)
+  }
+}
+# Normalize to approximate orthonormal basis while preserving nonnegativity
+true_basis <- pmax(true_basis / sqrt(colSums(true_basis^2)), 0)  # Normalize columns to unit length
+
+# Generate subtypes (balanced classes)
+subtypes <- rep(1:n_classes, length.out = n_samples)  # Evenly distribute classes
+subtypes <- sample(subtypes, n_samples)  # Shuffle to randomize order
+labels <- factor(subtypes, labels = c("G0", "G1", "G2"))  # Name classes for clarity
+
+# Mixing coefficients biased by subtype (samples x components)
+mix_coeffs <- matrix(runif(n_samples * k_basis, 0, 1), nrow = n_samples, ncol = k_basis)
+for (i in 1:n_classes) {
+  idx <- subtypes == i
+  component_idx <- ((i-1) %% k_basis) + 1
+  mix_coeffs[idx, component_idx] <- mix_coeffs[idx, component_idx] + 0.5
+}
+mix_coeffs <- pmax(mix_coeffs, 0)  # Ensure nonnegativity
+
+# Generate data (samples x features)
+data_X <- mix_coeffs %*% t(true_basis) + matrix(rnorm(n_samples * n_features, 0, 0.05), n_samples, n_features)
+data_X <- pmax(data_X, 0)  # Ensure nonnegativity
+
+# Verify dimensions and data
+
+# Compute random assignment accuracy (multiclass baseline)
+class_props <- prop.table(table(labels))
+random_accuracy <- sum(class_props^2)
+
+# t-SNE visualization
+tsne_result <- Rtsne(data_X, dims = 2, perplexity = min(30, n_samples/4), verbose = FALSE, max_iter = 500)
+tsne_df <- data.frame(
+  tSNE1 = tsne_result$Y[, 1],
+  tSNE2 = tsne_result$Y[, 2],
+  Subtype = labels
+)
+
+# Plot t-SNE
+p <- ggplot(tsne_df, aes(x = tSNE1, y = tSNE2, color = Subtype)) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("G0" = "#4ECDC4", "G1" = "#FF6B6B", "G2" = "#1F77B4")) +
+  labs(title = "t-SNE Visualization of Synthetic Data by Subtype",
+       x = "t-SNE Dimension 1",
+       y = "t-SNE Dimension 2",
+       color = "Subtype") +
+  theme_minimal( base_size = 8 ) +
+  theme(legend.position = "bottom")
+print(p)
+
+# NMF
+library(NMF)
+nmf_fit <- nmf(t(data_X), rank = k_basis, method = "Frobenius")
+reduced_nmf <- data_X %*% basis(nmf_fit)
+
+# PCA (abs)
+pca_fit <- prcomp(data_X, rank. = k_basis)
+reduced_pca <- (predict(pca_fit, data_X))
+
+# Raw
+reduced_raw <- data_X
+
+# CV accuracy function
+cv_accuracy <- function(features, labels) {
+  if ( is.null(colnames(features)) ) colnames(features) <- paste0("V", 1:ncol(features))
+  train_control <- trainControl(method = "repeatedcv", number = 5, repeats=10)
+  model <- train(features, labels, method = "multinom", trControl = train_control, trace = FALSE)
+  data.frame( Accuracy = mean(model$results$Accuracy), AccuracySD = mean(model$results$AccuracySD ))
+}
+
+
+# NSA-Flow with multiple w for sensitivity
+acc_pca <- cv_accuracy(reduced_pca, labels)
+acc_nmf <- cv_accuracy(reduced_nmf, labels)
+acc_raw <- cv_accuracy(reduced_raw, labels)
+
+w_values = c( 0.2, 0.5 )
+odf=data.frame()
+for ( ww in  w_values ) {
+  res_pred <- nsa_default(data_X,  w = ww )
+  pca_fit <- prcomp(res_pred$Y, rank. = k_basis)
+  reduced_nns <- (predict(pca_fit, res_pred$Y))
+  acc_nns <- cv_accuracy(reduced_nns, labels)
+  odf <- rbind(odf, data.frame(w = ww, accuracy = acc_nns))
+  odf
+}
+# kable(odf, digits = 3, caption = "NSA-Flow Accuracy for Different w Values")
+
+pred_metrics <- data.frame(
+  Method = c("NSA-Flow", "NMF", "PCA", "Raw Features"),
+  CV_Accuracy = c(acc_nns[,'Accuracy'], acc_nmf[,'Accuracy'], acc_pca[,'Accuracy'], acc_raw[,'Accuracy']),
+  CV_Accuracy_SD = c(acc_nns[,'AccuracySD'], acc_nmf[,'AccuracySD'], acc_pca[,'AccuracySD'], acc_raw[,'AccuracySD'])
+)
+
+gt::gt(pred_metrics, caption = "Cross-validated accuracy for disease subtype classification (simulated data)") %>% 
+    gt::fmt_number(columns = where(is.numeric), decimals = 2)
+
+
+```
+
+## Prediction of cancer subtypes via Sparse PCA with NSA-Flow
+
+We contrast the impact of regularization in Sparse PCA based on our framework (parameterized globally at the matrix level) versus a standard $\ell_1$ approach. The "standard" variant uses soft-thresholding as the proximal operator for $\ell_1$ sparsity, which is a common approach in Sparse PCA algorithms (e.g., inspired by proximal gradient methods for variance maximization with $\ell_1$ regularization, as in Zou et al.'s formulation [@zou2006sparse]).  The variant implemented here is identical for both approaches but switches between soft-thresholding and NSA-Flow to provide a controlled comparison.  Evaluations include core metrics (explained variance, sparsity, orthogonality) and prediction impact (cross-validated accuracy in biomedical data from the Golub leukemia dataset [@golub1999molecular]).
+
+
+```{r sparse_pca_soft, echo=FALSE}
+# Global defaults
+DEFAULT_W <- 0.5
+DEFAULT_MAX_ITS <- 200
+DEFAULT_TOL <- 1e-5
+
+
+### Run Comparison on Synthetic Data
+# Per-component explained variance (after orthonormalization)
+explained_variance_components <- function(X, Y, use = "qr") {
+  res <- explained_variance_ratio_by_orthonormalizing(X, Y, use = use)
+  Q <- res$Q
+  Z <- X %*% Q                 # n x k
+  # singular values of Z (unbiased covariance => divide by (n-1) if using cov)
+  s <- svd(Z, nu=0, nv=0)$d    # singular values
+  # Variance per component (singular^2 / (n-1))
+  var_per_comp <- (s^2) / (nrow(X) - 1)
+  total_var <- res$total_var
+  list(var_per_comp = var_per_comp, frac_per_comp = var_per_comp / total_var, Q = Q)
+}
+
+compute_core_metrics <- function(Y, X_or_S) {
+  # Detect if X_or_S is data or covariance
+  if (nrow(X_or_S) == ncol(X_or_S)) {
+    S <- X_or_S                # it's a covariance matrix (p $\times$ p)
+  } else {
+    S <- cov(X_or_S)           # it's raw data (n $\times$ p)
+  }
+  
+  p <- nrow(S)
+  if (nrow(Y) != p)
+    stop("Dimension mismatch: nrow(Y) must equal ncol(S) = number of features")
+  
+  total_var <- sum(diag(S))
+  
+  # --- Raw explained variance ratio (not orthonormalized) ---
+  raw_proj <- sum(diag(t(Y) %*% S %*% Y))
+  raw_ratio <- raw_proj / total_var
+  
+  # --- Orthonormalized version ---
+  orthonorm_res <- explained_variance_ratio_by_orthonormalizing(
+    X = NULL, Y = Y, use = "qr", eps = 1e-12, S = S
+  )
+  
+  # --- Orthogonality residual ---
+  orth_resid <- norm(t(Y) %*% Y - diag(ncol(Y)), "F")
+  
+  list(
+    Expl_Var = orthonorm_res$proj_var/total_var,
+#    orthonorm_ratio = orthonorm_res$ratio,
+#    total_var = total_var,
+#    proj_var = orthonorm_res$proj_var,
+#    orth_resid = orth_resid,
+    Sparsity = sparsity_level(Y),
+    Orth_Residual = invariant_orthogonality_defect(Y)
+  )
+}
+
+# Modified version of explained_variance_ratio_by_orthonormalizing that accepts S directly
+explained_variance_ratio_by_orthonormalizing <- function(X = NULL, Y, use = c("qr","svd"), eps = 1e-12, S = NULL) {
+  use <- match.arg(use)
+  
+  if (is.null(S)) {
+    if (is.null(X)) stop("Provide either X or S (covariance matrix).")
+    S <- cov(X)
+  }
+  total_var <- sum(diag(S))
+  
+  if (use == "qr") {
+    qrY <- qr(Y)
+    Q <- qr.Q(qrY)[, seq_len(min(qrY$rank, ncol(Y))), drop = FALSE]
+  } else {
+    s <- svd(Y, nu = ncol(Y), nv = 0)
+    k <- sum(s$d > eps)
+    Q <- s$u[, seq_len(k), drop = FALSE]
+  }
+  
+  proj_var <- sum(diag(t(Q) %*% S %*% Q))
+  ratio <- max(0, min(proj_var / total_var, 1))
+  
+  list(ratio = ratio, proj_var = proj_var, Q = Q)
+}
+```
+
+
+```{r sparse_pca_soft_B, echo=FALSE,eval=FALSE}
+X=generate_synth_data( p=100, k=20, corrval=0.35)$Y0
+nembed = 4
+# --- Compute results for both methods ---
+res_soft <- nsa_flow_pca( X, nembed, lambda = 0.05,  alpha = 0.05, max_iter = 20, 
+  nsa_w = omega_default, tol = 1e-5, proximal_type='basic', verbose = FALSE )
+res_nns <- nsa_flow_pca( X, nembed, lambda = 0.05,  alpha = 0.05, max_iter = 20, 
+  nsa_w = omega_default, tol = 1e-5, proximal_type='nsa_flow', 
+  nsa_flow_fn = nsa_default, verbose = FALSE )
+
+
+
+# --- Compute variance and metrics ---
+n <- nrow(X)
+A <- t(X) %*% X / n
+total_var <- sum(diag(A))
+m_soft <- compute_core_metrics(res_soft$Y, A )
+m_nns  <- compute_core_metrics(res_nns$Y, A )
+
+core_metrics <- data.frame(
+  Variant = c("Standard (Soft-Thresholding)", "NSA-Flow Approximation"),
+  Explained_Variance_Ratio = c(m_soft$Expl_Var, m_nns$Expl_Var),
+  Sparsity = c(m_soft$Sparsity, m_nns$Sparsity),
+  Orthogonality_Residual = c(m_soft$Orth_Residual, m_nns$Orth_Residual)
+)
+
+# --- Beautiful table output ---
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(reshape2)
+
+core_long <- melt(core_metrics, id.vars = "Variant")
+
+if (FALSE)
+ggplot(core_long, aes(x = Variant, y = value, fill = Variant)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.8, width = 0.6) +
+  facet_wrap(~ variable, scales = "free_y", ncol = 3) +
+  geom_text(aes(label = sprintf("%.3f", value)), vjust = -0.5, size = 3.5) +
+  scale_fill_manual(values = c("#4E79A7", "#E15759")) +
+  theme_minimal(base_size = 8) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(face = "bold", size = 8),
+    axis.title = element_blank(),
+    axis.text.x = element_text(angle = 15, hjust = 1)
+  )
+
+```
+
+We demonstrate the utility of our Sparse PCA implementation on the classic Golub et al. (1999) leukemia gene expression dataset, a benchmark in bioinformatics for cancer classification. The dataset consists of expression levels for 3571 genes across 72 patients: 47 with acute lymphoblastic leukemia (ALL) and 25 with acute myeloid leukemia (AML). Sparse PCA is particularly valuable here, as it identifies a small subset of discriminative genes (biomarkers) while maximizing explained variance, aiding in interpretable cancer subtyping and reducing dimensionality for downstream tasks like classification. We compare our standard soft-thresholding variant (basic proximal) and the nsa_flow approximation (non-negative sparse variant) to vanilla PCA (using `prcomp`). For evaluation:
+
+- **Core Metrics**: Explained variance ratio, sparsity (% zeros), orthogonality residual.
+
+- **Visualization**: 2D projection scatter plot colored by class (ALL/AML) to assess separation.
+
+- **Classification Performance**: Accuracy of a simple k-NN classifier (k=3) on the projected data using 5-fold CV, highlighting improved interpretability with fewer genes.
+
+- **Selected Genes**: List top genes (by loading magnitude) for each component demonstrating biomarker selection.
+
+Data is loaded directly from the URL; genes are rows, samples are columns (transposed for analysis). Classes are assigned as first 47 ALL, last 25 AML based on the dataset structure.  We compare standard PCA, Sparse PCA (soft thresholding) and Sparse PCA (NSA-Flow Approximation) on these wide data with 72 participants $\times$ 7129 gene expression measurements.  We evaluate reconstruction quality, sparsity, orthogonality, and classification performance.  Figure 8 summarizes the classification results and the embeddings for each method.  Figure 9 shows the feature selection and weights for each method where only the top 5 features for each component are shown for clarity. Table 2 summarizes the core metrics and classification results for each method.
+
+```{r golub_data_load, echo=FALSE, message=FALSE, warning=FALSE}
+#########
+get_golub_data <- function() {
+  #' Get the combined Golub leukemia dataset in a samples-by-genes format,
+  #' returning data and gene names separately.
+  #'
+  #' @return A list with two components:
+  #'   `data`: A data frame with samples as rows and genes as columns.
+  #'           The row names are the cancer type (ALL or AML).
+  #'   `genes`: A character vector containing the names of the genes.
+  #' @export
+  #'
+  #' @examples
+  #' golub_data_list <- get_golub_data()
+  #' head(golub_data_list$data[, 1:5])
+  #' head(golub_data_list$genes)
+  library(golubEsets)
+  # Load the separate training and testing sets from golubEsets
+  data(Golub_Train)
+  data(Golub_Test)
+
+  # Extract expression matrices and labels, and transpose the expression data
+  # so that samples are rows and genes are columns.
+  train_exprs <- t(exprs(Golub_Train))
+  train_labels <- pData(Golub_Train)$ALL.AML
+
+  test_exprs <- t(exprs(Golub_Test))
+  test_labels <- pData(Golub_Test)$ALL.AML
+
+  # Get gene names from the column names of the transposed expression matrix
+  gene_names <- colnames(train_exprs)
+
+  # Combine the expression data from both sets
+  combined_exprs <- rbind(train_exprs, test_exprs)
+
+  # Combine the class labels
+  combined_labels <- c(train_labels, test_labels)
+
+  # Create a data frame from the combined data
+  golub_df <- as.data.frame(combined_exprs)
+
+  # Set the row names to be the class labels
+#  rownames(golub_df) <- combined_labels
+
+  # Return the formatted data frame and gene names in a named list
+  result <- list(data = golub_df, genes = gene_names, labels = combined_labels )
+  return(result)
+}
+
+# Example usage:
+# Run the function to get the formatted dataset
+golub_data_list <- get_golub_data()
+
+# Access the data frame
+golub_df <- golub_data_list$data
+
+# Access the gene names
+gene_names <- golub_data_list$genes
+labels <- golub_data_list$labels
+# Standardize data for PCA
+golub_scaled <- scale(data.matrix(golub_df))
+```
+
+
+
+
+```{r golub_sparse_pca_analysis, echo=FALSE, fig.width=5,  message=FALSE, warning=FALSE,cache=FALSE,eval=!exists("golub_metrics")}
+
+
+set.seed(1)
+myk  <- 3
+mxit <- 100
+ss   <- 1:ncol(golub_scaled)
+golub_scaled_ss <- golub_scaled[, ss]
+
+## --- PCA Variants ------------------------------------------------------------
+pca_std <- prcomp(golub_scaled_ss, rank. = myk)
+proj_std <- pca_std$x
+myalph=0.1
+res_basic <- nsa_flow_pca(golub_scaled_ss, myk, lambda = 0.1, alpha = myalph,
+                            max_iter = mxit, proximal_type = "basic", tol = 1e-5,
+                            nsa_w = omega_default, verbose = FALSE )
+res_nns <- nsa_flow_pca(golub_scaled_ss, myk, lambda = 0.1, alpha = myalph,
+                          max_iter = mxit, proximal_type = "nsa_flow", tol = 1e-5,
+                          nsa_w = omega_default, nsa_flow_fn = nsa_default, verbose = FALSE)
+## --- Core Metrics ------------------------------------------------------------
+metrics_pca_g   <- compute_core_metrics(pca_std$rotation, golub_scaled_ss)
+metrics_basic_g <- compute_core_metrics(res_basic$Y, golub_scaled_ss)
+metrics_nns_g   <- compute_core_metrics(res_nns$Y, golub_scaled_ss)
+proj_basic <- golub_scaled_ss %*% res_basic$Y
+proj_nns   <- golub_scaled_ss %*% res_nns$Y
+
+## --- Classification Performance ---------------------------------------------
+cv_acc <- function(proj, labels) {
+  colnames(proj) <- paste0("V", seq_len(ncol(proj)))
+  ctrl <- trainControl(method = "repeatedcv", number = 5, repeats = 50)
+  tune_grid <- expand.grid(mtry = seq(1, ncol(proj), length.out = 5))  # Example: tune mtry over 5 values
+  model <- train(proj, labels, method = "rf",
+                 trControl = ctrl, tuneGrid = tune_grid)
+  tibble(Accuracy = model$results$Accuracy, AccuracySD = model$results$AccuracySD)
+}
+acc_std   <- cv_acc(proj_std, labels)
+acc_basic <- cv_acc(proj_basic, labels)
+acc_nns   <- cv_acc(proj_nns, labels)
+# acc_std
+# acc_basic
+# acc_nns
+
+## --- Integrated Results Table -----------------------------------------------
+golub_metrics <- tibble(
+  Method = c("Standard PCA", "Sparse PCA (Basic)", "Sparse PCA (NSA-Flow)"),
+  Explained_Var_Ratio = c(metrics_pca_g$Expl_Var, metrics_basic_g$Expl_Var, metrics_nns_g$Expl_Var),
+  Sparsity            = c(metrics_pca_g$Sparsity,  metrics_basic_g$Sparsity,  metrics_nns_g$Sparsity),
+  Orth_Residual       = c(metrics_pca_g$Orth_Residual, metrics_basic_g$Orth_Residual, metrics_nns_g$Orth_Residual),
+  CV_Accuracy         = c( mean(acc_std$Accuracy), mean(acc_basic$Accuracy), 
+    mean(acc_nns$Accuracy)),
+  CV_Accuracy_SD      = c( mean(acc_std$AccuracySD), mean(acc_basic$AccuracySD), mean(acc_nns$AccuracySD))
+)
+
+#####
+```
+
+
+```{r golub_sparse_pca_analysis_tbl, echo=FALSE, fig.width=5,  message=FALSE, warning=FALSE,cache=FALSE}
+gt::gt(golub_metrics[,(1:ncol(golub_metrics)-1)], caption = "Core and Random Forest Classification Metrics for PCA Variants (Golub Dataset)") %>%
+  gt::fmt_number(columns = where(is.numeric), decimals = 3) %>%
+  gt::cols_label(
+    Explained_Var_Ratio = "Expl. Var.",
+    Sparsity = "Sparsity",
+    Orth_Residual = "Orthog. Defect",
+    CV_Accuracy = "CV Accuracy"
+  )
+
+```
+
+```{r golub_sparse_pca_analysis_vis, echo=FALSE, fig.width=5,  message=FALSE, warning=FALSE,cache=FALSE,fig.cap='Comparison of PCA Variants on Golub Leukemia Dataset: Core Metrics, 2D Projections, and Classification Performance.'}
+
+
+## --- Visualization: 2D Projections -----------------------------------------
+plot_proj <- function(df, title) {
+  colnames(df)[1:2] <- c("PC1", "PC2")
+  ggplot(df, aes(PC1, PC2, color = Class)) +
+    geom_point(size = 2, alpha = 0.85) +
+    theme_minimal(base_size = 7) +
+    labs(title = title, x = "PC1", y = "PC2") +
+    theme(plot.title = element_text(face = "bold", hjust = 0.5),
+          legend.position = "top")
+}
+
+df_list <- list(
+  "Standard PCA"       = data.frame(proj_std[, 1:2], Class = labels),
+  "Sparse PCA (Basic)" = data.frame(proj_basic[, 1:2], Class = labels),
+  "Sparse PCA (NSA-Flow)" = data.frame(proj_nns[, 1:2], Class = labels)
+)
+
+p_proj <- cowplot::plot_grid(
+  plot_proj(df_list[[1]], "Standard PCA"),
+  plot_proj(df_list[[2]], "Sparse PCA (Basic)"),
+  plot_proj(df_list[[3]], "Sparse PCA (NSA-Flow)"),
+  ncol = 3, labels = NULL, align = "hv"
+)
+
+## --- Visualization: Accuracy Bar Plot --------------------------------------
+p_acc <- ggplot(golub_metrics, aes(x = Method, y = CV_Accuracy, fill = Method)) +
+  geom_col(width = 0.6, color = "black", alpha = 0.9) +
+  geom_errorbar(aes(ymin = CV_Accuracy - CV_Accuracy_SD,
+                    ymax = CV_Accuracy + CV_Accuracy_SD),
+                width = 0.15, linewidth = 0.8) +
+  geom_text(aes(label = sprintf("%.2f", CV_Accuracy),
+                y = CV_Accuracy + CV_Accuracy_SD + 0.02),
+            vjust = 0, size = 3, fontface = "bold") +
+  scale_fill_manual(values = c("#1f78b4", "#33a02c", "#e31a1c")) +
+  coord_cartesian(ylim = c(0, 1.05)) +
+  labs(title = "Cross-Validation Accuracy (random forest, 5-Fold x50)",
+       x = NULL, y = "CV Accuracy") +
+  theme_minimal(base_size = 7) +
+  theme(legend.position = "none",
+        plot.title = element_text(face = "bold", hjust = 0.5))
+
+## --- Combine Plots ----------------------------------------------------------
+cowplot::plot_grid(
+  p_proj,
+  p_acc,
+  ncol = 1,
+  rel_heights = c(2., 1.5)
+)
+
+```
+
+
+
+```{r golub_sparse_pca_analysis_top, echo=FALSE, fig.width=5,  message=FALSE, warning=FALSE,cache=FALSE,fig.cap='Top genes identified by PCA and NSA-Flow SPCA.  Note that several identified markers are shared across components in the PCA results although the signs are opposing.  This complicates interpretation.  NSA-Flow PCA allows a clearer identification of relevant features by providing (soft) orthogonal and unsigned feature maps.'}
+# Top Genes Heatmap
+get_top_genes <- function(Y, gene_names, n_top = 5) {
+  Y=Y/max(abs(Y))
+  top <- lapply(1:ncol(Y), function(i) {
+    ord <- order(abs(Y[,i]), decreasing = TRUE)[1:n_top]
+    data.frame(Component = i, Gene = gene_names[ord], Loading = Y[ord, i])
+  })
+  do.call(rbind, top)
+}
+top_basic <- get_top_genes(res_basic$Y, gene_names[ss]) %>% mutate(Method = "Basic")
+top_nns <- get_top_genes(res_nns$Y, gene_names[ss]) %>% mutate(Method = "NSA-Flow")
+top_combined <- rbind(top_basic, top_nns)
+ggplot(top_combined, aes(x = Component, y = Gene, fill = Loading)) +
+  geom_tile() +
+  facet_wrap(~Method, ncol = 2) +
+  scale_fill_viridis_c(option = "magma") +
+  labs(title = "Top 5 Genes per Component", x = "Component", y = "Gene") +
+  theme_minimal(base_size = 8)
+
+```
+
+
+```{r pca_sens_metrics, echo=FALSE, fig.width=7, fig.height=4, message=FALSE, warning=FALSE,eval=FALSE,cache=FALSE}
+# Sensitivity Sweep (Ω)
+omega_vals <- seq(0.98, 1, by = 0.01)
+omega_vals = c(0.01, 0.1, 0.2, 0.3, 0.4, 0.5, 0.75, 0.9, 0.99 )
+n <- nrow(golub_scaled_ss)
+A <- t(golub_scaled_ss) %*% golub_scaled_ss / n
+Xc <- scale(X, center = TRUE, scale = FALSE)
+total_var <- sum( svd(proj_std/norm(proj_std,"F"))$d )
+if ( ! exists("sens_metrics")) {
+    sens_results <- lapply(omega_vals, function(omega) {
+    res <- nsa_flow_pca(golub_scaled_ss, myk,
+        lambda = 0.1, alpha = 0.001, max_iter = mxit,
+        proximal_type = "nsa_flow", retraction=def_ret,
+        tol = 1e-5, nsa_w = omega, verbose = FALSE)
+    proj <- golub_scaled_ss %*% res$Y
+    acc_res <- cv_acc(proj, labels)
+    loc_var <- sum( svd(proj/norm(proj,"F"))$d )
+    spectral_ratio <- loc_var/total_var
+    xxx=data.frame(
+        Omega = omega,
+        Accuracy = acc_res$Accuracy,
+        Spectral_Ratio = spectral_ratio,
+        Sparsity = sparsity_level(res$Y),
+        Orth_Residual = invariant_orthogonality_defect(res$Y)
+    )
+    print( xxx )
+    xxx
+    })
+    sens_metrics <- do.call(rbind, sens_results)
+}
+sens_long <- sens_metrics %>%
+  pivot_longer(cols = c(Accuracy, Spectral_Ratio, Sparsity, Orth_Residual),
+               names_to = "Metric", values_to = "Value")
+ggplot(sens_long, aes(x = Omega, y = Value, color = Metric)) +
+  geom_line(size = 1.2) + geom_point(size = 2) +
+  facet_wrap(~Metric, scales = "free_y", ncol = 2) +
+  scale_color_brewer(palette = "Set2") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "none",
+        strip.text = element_text(face = "bold", size = 12)) +
+  labs(title = expression("Figure 7: Sensitivity of Sparse PCA to " ~ omega),
+       subtitle = "Trade-offs between accuracy, sparsity, orthogonality, and explained variance",
+       x = expression(omega), y = "Metric Value")
+###########
+```
+
+
+
+**Interpretation**: On this real high-dimensional dataset, the NSA-Flow based Sparse PCA variant achieves high explained variance with substantial sparsity, selecting a small number of genes while maintaining near-orthogonality. Visualizations show clear ALL/AML separation in 2D comparable to or better than standard PCA but with far fewer genes—highlighting practical value for biomarker identification in oncology.  Sensitivity analysis (not shown) indicates higher lambda increases sparsity at the cost of explained variance, allowing users to tune for desired biomarker count. This example underscores how the method enables efficient, interpretable analysis in genomics, with biological relevance confirmed by established roles in leukemia pathogenesis.
+
+
+```{r setupbrain, include=FALSE,echo=FALSE}
+library(ANTsR)
+library(NMF)
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(tidyr)
+library(fmsb)
+library(igraph)
+library(scales)
+library(ggpubr)
+library(tibble)
+set.seed(42)
+```
+
+## Application of NSA-Flow to ADNI Cortical Thickness Data
+
+In this section, we demonstrate the application of NSA-Flow to cortical thickness data.Neuroimaging datasets, such as those from the Alzheimer's Disease Neuroimaging Initiative (ADNI), provide rich multidimensional insights into brain structure, including cortical thickness measurements across numerous regions [@racine_personalized_2018;@sattari_assessing_2022]. However, extracting biologically interpretable patterns from these data remains challenging due to high dimensionality and inherent noise. Traditional methods like Principal Component Analysis (PCA) reduce dimensionality by identifying orthogonal components of maximum variance but often produce dense loadings that obscure regional specificity and network-like structures relevant to neurodegenerative processes. Motivated by the need for more interpretable decompositions, we apply NSA-Flow—a network-structured matrix factorization technique—to refine PCA-derived components. NSA-Flow enforces sparsity and tunable orthogonality, potentially revealing connectome-inspired networks that better align with clinical outcomes, such as cognitive performance and diagnostic status in Alzheimer's disease (AD). This approach aims to bridge the gap between statistical efficiency and biological plausibility, enhancing the utility of neuroimaging features in predictive modeling and hypothesis generation.
+
+## Application of NSA-Flow to PCA Maps
+
+In this application, the brain's cortical thickness data is analgous to a complex puzzle with many overlapping pieces representing different regions. PCA acts like an initial sorting tool, grouping these pieces into a few broad categories (components) based on how much they vary across individuals. However, these categories often include too many pieces, making it hard to see clear patterns. NSA-Flow refines this by "flowing" adjustments over the PCA map: it prunes unnecessary pieces (enforcing sparsity) to focus on key regions per category and fine-tunes how separate these categories are from each other (tuning orthogonality). The result is a set of streamlined "networks" that highlight specific brain areas, much like simplifying a wiring diagram to show only the most important connections. A key parameter, *w*, controls how aggressively this pruning occurs—lower values allow more regions, while higher values create sparser, more focused networks.
+
+Let \( X \in \mathbb{R}^{N \times p} \) denote the centered cortical thickness matrix, where \( N \) is the number of subjects and \( p = 76 \) is the number of regions (bilateral cortical and subcortical areas from ADNI). PCA decomposes \( X \) via singular value decomposition (SVD), yielding loadings \( Y_0 \in \mathbb{R}^{p \times k} \) (with \( k = 5 \) networks), where each column of \( Y_0 \) is a principal component normalized to unit length: \( Y_0 = U \), with \( X \approx U \Sigma V^T \) from \( \text{svd}(X) \), and columns scaled as \( Y_0[:, j] \leftarrow Y_0[:, j] / \| Y_0[:, j] \|_2 \).
+
+NSA-Flow initializes with \( Y_0 \) and directly optimizes for a refined loading matrix \( Y \in \mathbb{R}^{p \times k} \) using manifold optimization near the Stiefel manifold (for orthogonality constraints) with a sparsity-inducing retraction and proximal mapping.  We sampled $q$ random \( w \) values uniformly from [0.01, 0.99] to sample orthogonality configurations. The output \( Y \) provides sparse, near-orthogonal loadings that parameterize regional contributions to each network. Figure 10 shows the NSA-Flow fit to the PCA loadings for a representative \( w = 0.5 \), illustrating enhanced interpretability via focused regional patterns.
+
+To rigorously compare NSA-Flow with PCA, we projected the data onto both sets of loadings: \( \text{proj}_{\text{PCA}} = X Y_0 \) and \( \text{proj}_{\text{NSA}} = X Y \), yielding subject-specific network scores (\( N \times k \)). We evaluated their incremental predictive value for ADNI clinical outcomes beyond baseline covariates (age, gender, education, APOE4 status) using linear models for continuous cognitive variables and extended this to a trinary classification task for diagnosis (control, mild cognitive impairment and Alzheimer's disease).
+
+
+
+
+```{r data-generation}
+N <- 200  # subjects
+p <- 76   # cortical regions
+k <- 6    # number of networks
+
+# Generate data
+X_data <- matrix(rnorm(N * p, mean = 2.5, sd = 0.5), nrow = N, ncol = p)
+X_data[X_data < 0] <- 0
+
+cortical_regions <- c(
+  'bankssts', 'caudalanteriorcingulate', 'caudalmiddlefrontal', 'cuneus', 'entorhinal',
+  'fusiform', 'inferiorparietal', 'inferiortemporal', 'isthmuscingulate', 'lateraloccipital',
+  'lateralorbitofrontal', 'lingual', 'medialorbitofrontal', 'middletemporal', 'parahippocampal',
+  'paracentral', 'parsopercularis', 'parsorbitalis', 'parstriangularis', 'pericalcarine',
+  'postcentral', 'posteriorcingulate', 'precentral', 'precuneus', 'rostralanteriorcingulate',
+  'rostralmiddlefrontal', 'superiorfrontal', 'superiorparietal', 'superiortemporal', 'supramarginal',
+  'frontalpole', 'temporalpole', 'transversetemporal', 'insula'
+)
+regions <- c(paste0('left_', cortical_regions), paste0('right_', cortical_regions))
+subcortical <- c('thalamus', 'caudate', 'putamen', 'hippocampus')
+regions <- c(regions, paste0('left_', subcortical), paste0('right_', subcortical))
+stopifnot(length(regions) == p)
+X <- as.data.frame(X_data)
+colnames(X) <- regions
+#############################
+
+library(readr)
+adnifn="../../multidisorder/data/ppmiadni_filtered.csv"
+use_adni=TRUE
+if ( file.exists(adnifn) ) {
+    use_adni=TRUE
+    ppmiadni=read_csv(adnifn)
+    ppmiadni=ppmiadni[(ppmiadni$studyName=='ADNI'),]
+    ppmiadni=ppmiadni[ppmiadni$yearsbl==0,]
+    regions_OG=subtyper::getNamesFromDataframe( c("T1Hier_thk_","LRAVG"), ppmiadni, exclusions=c('Asym','reference', 'adjusted' ))
+    adni_variables <- c(
+        "MMSE", "CDRSB", "ADAS13", "ADASQ4", 
+        "mPACCdigit", "mPACCtrailsB",
+    #    "RAVLT_immediate", "RAVLT_perc_forgetting", 
+        "FAQ",
+        "EcogPtTotal", "EcogSPTotal"
+    )
+    X = ppmiadni[,regions_OG]
+    X = X[complete.cases(X), ]
+    X = X[, colSums(is.na(X)) == 0]
+    regions=rep(NA,length(regions_OG))
+    for ( x in 1:length(regions_OG ) ) regions[x]=subtyper::decode_antspymm_idp(regions_OG[x])$anatomy
+    colnames(X)=regions
+}
+
+```
+
+
+```{r initialization,cache=FALSE, eval=TRUE, echo=FALSE, message=FALSE, warning=FALSE}
+
+# Center data (important for PCA)
+X_centered <- scale(X, center = TRUE, scale = FALSE)  # N x p
+netrank=6
+# Perform PCA
+pca_res <- prcomp(X_centered, rank. = netrank)  # Keep k components
+
+# PCA scores (N x k) and loadings (p x k)
+# NSA-Flow expects p x k (regions x components)
+Y0_pca <- pca_res$rotation  # columns = components, rows = regions (p x k)
+
+# Optionally scale columns to unit norm
+Y0_pca <- sweep(Y0_pca, 2, sqrt(colSums(Y0_pca^2)), FUN = "/")
+# Scale magnitude to moderate size
+Y0_pca <- Y0_pca * 1.0
+
+# Check dimensions
+
+# Assuming required libraries and data (e.g., Y0_pca, X, ppmiadni, adni_variables) are already loaded/defined.
+
+# List of optimizers
+
+
+# Weights to test (uncomment full list if needed)
+wws <- runif( 25, 0.01, 0.99)
+
+# Initialize a data frame to collect results for comparisons
+results_df <- data.frame(
+  optimizer = character(),
+  w = numeric(),
+  cog = character(),
+  method = character(),
+  log_p = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Loop over optimizers and weights
+for (ww in wws) {
+#    cat(paste0("Running NSA-Flow with optimizer = ", oo, " and w = ", ww, "\n"))
+    
+    M_nsa <- nsa_default( Y0_pca, w = ww,  verbose = FALSE )
+
+    if ( any( apply( M_nsa$Y, FUN=var, MARGIN=2) == 0 ) ) {
+        cat("Warning: zero-variance component detected, skipping this run.\n")
+        next
+    }
+    
+    # Extract NSA projection matrix
+    Ymat <- M_nsa$Y
+    rownames(Ymat) <- rownames(Y0_pca)
+    # Compute projections
+    proj_pca <- as.matrix(X) %*% as.matrix(Y0_pca)
+    colnames(proj_pca) <- paste0("pca_net", 1:ncol(proj_pca))
+    
+    proj_nsa <- as.matrix(X) %*% as.matrix(Ymat)
+    colnames(proj_nsa) <- paste0("nsa_net", 1:ncol(proj_nsa))
+    
+    # Prepare data frame with projections
+    ppmiadni_lm <- cbind(ppmiadni, proj_nsa, proj_pca)
+    
+    # List of projections
+    projs <- list(nsa = proj_nsa, pca = proj_pca)
+    
+    # Loop over cognitive variables
+    for (cog in adni_variables) {
+#      cat(paste0("Cognitive variable: ", cog, " (optimizer: ", oo, ", w: ", ww, ")\n"))
+      
+      # Covariates
+      covars <- c("AGE", "PTGENDER", "PTEDUCAT", "APOE4")
+      covarsf <- paste(covars, collapse = " + ")
+      base_form <- paste(cog, "~", covarsf)
+      
+      # Subset data (improves efficiency and avoids NA issues)
+      temp <- ppmiadni_lm[, c(cog, covars, colnames(proj_nsa), colnames(proj_pca))]
+      
+      # Baseline model
+      base_mod <- lm(as.formula(base_form), data = temp)
+      
+      # Loop over projection methods
+      for (p in rev(seq_along(projs))) {
+        proj <- projs[[p]]
+        pname <- names(projs)[p]
+        
+        # Full model formula
+        proj_terms <- paste(colnames(proj), collapse = " + ")
+        full_form <- paste(cog, "~", covarsf, "+", proj_terms)
+        
+        # Fit full model
+        full_mod <- lm(as.formula(full_form), data = temp)
+        
+        # ANOVA to compare base vs full
+        anv <- anova(base_mod, full_mod)
+        log_p <- log(anv$Pr[2])
+        
+        # Print immediate result
+#        cat(paste0(pname, ": log(p) = ", round(log_p, 4), "\n"))
+        
+        # Collect in results_df
+        results_df <- rbind(results_df, data.frame(
+          optimizer = 'fast',
+          w = ww,
+          cog = cog,
+          method = pname,
+          log_p = log_p
+        ))
+      }
+#      cat("\n")
+    }
+#    Sys.sleep(2)  # Pause for plotting or processing
+  }
+
+
+# After all runs, add comparisons
+# For each combination of optimizer, w, cog: compute NSA improvement over PCA (lower log_p is better, so negative diff means NSA better)
+library(dplyr)  # For easier data manipulation (assume loaded, or add require(dplyr))
+
+comparison_df <- results_df %>%
+  tidyr::pivot_wider(names_from = method, values_from = log_p) %>%
+  mutate(
+    log_p_diff = nsa - pca,  # NSA log_p minus PCA log_p
+    better_method = ifelse(log_p_diff < 0, "NSA", ifelse(log_p_diff > 0, "PCA", "Tie"))
+  )
+
+p3 <- ggplot(comparison_df, aes(x = w, y = log_p_diff, color = better_method)) +
+  geom_point(alpha = 0.6, size = 2) +
+  geom_smooth(method = "loess", se = FALSE, color = "black", linetype = "dotted") +
+  scale_color_manual(values = c("NSA" = "#4ECDC4", "PCA" = "#FF6B6B", "Tie" = "gray")) +
+  labs(title = "Cognitive Assoc. Diff. vs. Weight (w)", x = "w (Orth. Weight)", y = "Log(p) Difference", color = "Better Method")+theme_minimal(base_size = 8) +
+  facet_wrap(~ cog, scales = "free_y", ncol = 3)
+
+# p3
+
+
+# Optional: Summary statistics, e.g., average log_p per method across all
+summary_stats <- results_df %>%
+  group_by(method) %>%
+  summarize(
+    mean_log_p = mean(log_p, na.rm = TRUE),
+    median_log_p = median(log_p, na.rm = TRUE),
+    n_better = sum(log_p == min(log_p[method == "nsa" | method == "pca"]), na.rm = TRUE)  # Simplified count
+  )
+
+library(dplyr)
+library(broom)  # For tidy t-test output
+library(pROC)   # For ROC analysis
+library(caret)  # For cross-validation
+
+# Assume diagnosis variable exists; derive if needed
+ppmiadni$diagnosis <- ppmiadni$joinedDX
+
+# Perform paired t-test for each cog
+t_test_results <- by(comparison_df, comparison_df$cog, function(x) {
+  test_result <- t.test(x$nsa, x$pca, paired = TRUE)
+  cohen_d <- test_result$statistic / sqrt(nrow(x))
+  data.frame(
+    cog = x$cog[1],
+    estimate = test_result$estimate,
+    statistic = test_result$statistic,
+    p.value = test_result$p.value,
+    cohen_d = cohen_d
+  )
+})
+
+# Combine results into a single data frame
+t_test_results <- do.call(rbind, t_test_results)
+
+
+
+```
+
+
+```{r heatmap,echo=FALSE, fig.width=7}
+
+
+map_region_to_lobe <- function(region_names) {
+  # --- Base mapping table (from user-provided list) ------------------------
+  mapping_df <- data.frame(
+    region = c(
+      "CA1", "Dentate Gyrus/CA3", "Anterolateral Entorhinal Cortex",
+      "Posteromedial Entorhinal Cortex", "Parahippocampal Gyrus", "Perirhinal Cortex",
+      "Medial Temporal Lobe", "Caudal Anterior Cingulate", "Caudal Middle Frontal Gyrus",
+      "Cuneus", "Entorhinal Cortex", "Fusiform Gyrus", "Inferior Parietal Lobule",
+      "Inferior Temporal Gyrus", "Insula", "Isthmus Cingulate", "Lateral Occipital Cortex",
+      "Lateral Orbitofrontal Cortex", "Lingual Gyrus", "Medial Orbitofrontal Cortex",
+      "Middle Temporal Gyrus", "Paracentral Cortex", "Pars Opercularis", "Pars Orbitalis",
+      "Pars Triangularis", "Pericalcarine Cortex", "Postcentral Gyrus",
+      "Posterior Cingulate", "Precentral Gyrus", "Precuneus",
+      "Rostral Anterior Cingulate", "Rostral Middle Frontal Gyrus",
+      "Superior Frontal Gyrus", "Superior Parietal Lobule",
+      "Superior Temporal Gyrus", "Supramarginal Gyrus", "Transverse Temporal Gyrus",
+      "Basal Forebrain Ch13", "Nucleus Basalis of Meynert Anterior",
+      "Nucleus Basalis of Meynert Middle", "Nucleus Basalis of Meynert Posterior",
+      "Globus Pallidus External", "Globus Pallidus Internal", "Ventral Pallidum",
+      "Nucleus Accumbens", "Putamen", "Diencephalon / Hypothalamus",
+      "Diencephalon / Hypothalamus Mammillary Nucleus", "Subthalamic Nucleus",
+      "Extended Amygdala", "Red Nucleus", "Substantia Nigra Compacta",
+      "Substantia Nigra Reticulata", "Parabrachial Pigmented Nucleus",
+      "Ventral Tegmental Area", "Thalamus Habenular Nucleus", "Caudate Nucleus"
+    ),
+    lobe = c(
+      "Temporal", "Temporal", "Temporal", "Temporal", "Temporal", "Temporal", "Temporal",
+      "Frontal", "Frontal", "Occipital", "Temporal", "Temporal", "Parietal", "Temporal",
+      "Limbic", "Limbic", "Occipital", "Frontal", "Occipital", "Frontal",
+      "Temporal", "Frontal", "Frontal", "Frontal", "Frontal", "Occipital",
+      "Parietal", "Limbic", "Frontal", "Parietal", "Limbic", "Frontal",
+      "Frontal", "Parietal", "Temporal", "Parietal", "Temporal", "Basal Forebrain",
+      "Basal Forebrain", "Basal Forebrain", "Basal Forebrain",
+      "Basal Ganglia", "Basal Ganglia", "Basal Ganglia",
+      "Basal Ganglia", "Basal Ganglia", "Diencephalon",
+      "Diencephalon", "Diencephalon", "Limbic", "Midbrain",
+      "Midbrain", "Midbrain", "Brainstem", "Midbrain",
+      "Diencephalon", "Basal Ganglia"
+    ),
+    stringsAsFactors = FALSE
+  )
+
+  # --- Extended mapping logic for unknown regions --------------------------
+  infer_lobe <- function(region) {
+    r <- tolower(region)
+    if (grepl("frontal|orbitofrontal|precentral|pars|rostral", r)) return("Frontal")
+    if (grepl("parietal|postcentral|supramarginal|precuneus|angular", r)) return("Parietal")
+    if (grepl("temporal|fusiform|entorhinal|parahippocampal", r)) return("Temporal")
+    if (grepl("occipital|cuneus|lingual|pericalcarine", r)) return("Occipital")
+    if (grepl("cingulate|insula|isthmus", r)) return("Limbic")
+    if (grepl("amygdala|hippocampus", r)) return("Medial Temporal / Limbic")
+    if (grepl("thalamus|habenular", r)) return("Diencephalon")
+    if (grepl("thalamus|habenular", r)) return("Diencephalon")
+    if (grepl("brainstem|parabrachial|midbrain|pons|medulla|tegmental", r)) return("Brainstem")
+    if (grepl("cerebellum", r)) return("Cerebellum")
+    return("Unknown")
+  }
+
+  # --- Color palette (expanded) --------------------------------------------
+  bright_color_map <- c(
+    "Frontal" = "#FF6B6B",      # red
+    "Parietal" = "#45B7D1",     # blue
+    "Temporal" = "#4ECDC4",     # teal
+    "Occipital" = "#96CEB4",    # mint
+    "Limbic" = "#C06C84",       # rose
+    "Medial Temporal / Limbic" = "#E5989B", # pink
+    "Diencephalon" = "#F8B400", # amber
+    "Basal Ganglia" = "#9B59B6",# violet
+    "Basal Forebrain" = "#AF7AC5", # lavender
+    "Midbrain" = "#DDA0DD",     # plum
+    "Brainstem" = "#A3C4BC",    # desaturated cyan
+    "Cerebellum" = "#F7DC6F",   # yellow
+    "Unknown" = "#BDC3C7"       # gray
+  )
+
+  # --- Map regions ---------------------------------------------------------
+  library(dplyr)
+  mapped <- data.frame(region = region_names, stringsAsFactors = FALSE) %>%
+    left_join(mapping_df, by = "region") %>%
+    mutate(
+      lobe = ifelse(is.na(lobe), sapply(region, infer_lobe), lobe),
+      color = bright_color_map[ifelse(is.na(lobe), sapply(region, infer_lobe), lobe)]
+    )
+
+  # --- Return final data frame ---------------------------------------------
+  mapped %>%
+    rename(Region = region, Lobe = lobe, Color = color)
+}
+
+
+Y_norm <- sweep(Ymat, 2, colSums(Ymat), "/")
+Y_df <- as.data.frame(Y_norm) %>% rownames_to_column("Region") %>% pivot_longer(-Region, names_to = "Network", values_to = "Loading")
+####################################################################
+```
+
+```{r nsaflownetworkloadings, fig.width=7,eval=TRUE, fig.cap="Heatmap of Network Loadings Across Brain Regions (NSA-Flow)"}
+Y_df_viz <- Y_df[ Y_df$Network %in% paste0("PC",1:5), ]
+ggplot(Y_df_viz, aes(x = Network, y = Region, fill = Loading)) + 
+  geom_tile(color = "white", size = 0.05) +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  theme_minimal(base_size = 6) +
+  labs( title = "Network Loadings Across Brain Regions (NSA-Flow)", 
+    x = "Network", y = "Region", fill = "Rel. loading") +
+  coord_fixed(ratio = 0.18)
+## 
+```
+
+
+```{r top-bars, fig.height=5.6, fig.width=7,eval=FALSE}
+#### Top Regions per Network (Bar Charts)
+for (net in 1:netrank) {
+  loadings <- Y_norm[, net]
+  top_idx <- head(order(loadings, decreasing = TRUE), 10)
+  load_df <- data.frame(Region = rownames(Y_norm)[top_idx], Loading = loadings[top_idx]) %>% mutate(Region = factor(Region, levels = rev(Region)))
+  p_bar <- ggplot(load_df, aes(x = Loading, y = Region, fill = Loading)) +
+    geom_col(width = 0.7) +
+    scale_fill_gradient(low = "lightblue", high = "darkblue") +
+    theme_minimal() +
+    labs(title = paste("Top 10 Regions — Network", net), x = "Relative loading", y = "") +
+    geom_text(aes(label = round(Loading, 3)), hjust = -0.05, size = 3)
+  print(p_bar)
+}
+
+```
+
+
+
+
+```{r enhanced-stats-dx-0,echo=FALSE,fig.width=7,fig.cap="Multi-class random forest classification results: NSA vs PCA. Two runs of 4-fold cross-validation with results measured by AUC."}
+library( randomForest )
+ppmiadni$diagnosis = as.character(ppmiadni$diagnosis)
+ppmiadni$diagnosis[ppmiadni$diagnosis %in% "SMC"]=NA
+ppmiadni$diagnosis = factor( ppmiadni$diagnosis, levels=c("CN","MCI","AD") )
+# Load required packages
+library(caret) # For createFolds
+library(pROC) # For multiclass.roc and roc
+library(ggplot2) # For plotting
+library(dplyr) # For summarize
+library(nnet) # For multinom
+# Check for required variables
+if (!exists("X") || !exists("Y0_pca") || !exists("ppmiadni") || !exists("covars") || !exists("nsa_default")) {
+stop("One or more required variables (X, Y0_pca, ppmiadni, covars, nsa_default) are not defined.")
+}
+if (!all(c("diagnosis", covars) %in% names(ppmiadni))) {
+stop("ppmiadni must contain 'diagnosis' and all variables in covars.")
+}
+set.seed(1) # For reproducibility
+# Initialize data frame for logistic results and ROC lists
+log_results_df <- data.frame()
+roc_nsa_list <- list()
+roc_pca_list <- list()
+mywws = seq(0.0, 0.5, by = 0.05 )
+# Loop over weight values
+for ( run in 1:2 )
+for (ww in mywws ) {
+# Run NSA (assumes nsa_default is a custom function)
+  M_nsa <- nsa_default(Y0 = Y0_pca, w = ww)
+  Ymat <- M_nsa$Y
+  proj_nsa <- as.matrix(X) %*% Ymat
+  proj_pca <- as.matrix(X) %*% Y0_pca
+colnames(proj_nsa) <- paste0("nsa", 1:ncol(proj_nsa))
+colnames(proj_pca) <- paste0("pca", 1:ncol(proj_pca))
+# Combine data with covariates and projections
+  temp <- cbind(ppmiadni[, c("diagnosis", "AGE", "PTGENDER")], proj_nsa, proj_pca)
+  temp$AGE = antsrimpute( temp$AGE )
+  dx2 <- "AD"
+  dx1 <- "MCI"
+  dx0 <- "CN"
+# Set diagnosis as a factor with three levels
+  temp$diagnosis <- factor(temp$diagnosis, levels = c(dx0, dx1, dx2))
+  temp <- temp[!is.na(temp$diagnosis), ] # Remove NA diagnoses
+# 4-fold cross-validation
+  nfold <- 4
+  folds <- createFolds(temp$diagnosis, k = nfold, list = TRUE, returnTrain = FALSE)
+  auc_nsa <- auc_pca <- auc_random <- numeric(nfold)
+  
+  # NEW: Initialize pairwise AUC vectors for NSA and PCA
+  auc_nsa_cn_mci <- auc_nsa_cn_ad <- auc_nsa_mci_ad <- numeric(nfold)
+  auc_pca_cn_mci <- auc_pca_cn_ad <- auc_pca_mci_ad <- numeric(nfold)
+  
+for (f in 1:nfold) {
+    train <- temp[-folds[[f]], ]
+    test <- temp[folds[[f]], ]
+# Calculate random assignment accuracy for this fold
+    class_props <- prop.table(table(test$diagnosis))
+    auc_random[f] <- sum(class_props^2)
+# Skip fold if fewer than two classes
+if (length(unique(test$diagnosis)) < 2) {
+# cat("Warning: Fold", f, "for weight", ww, "has fewer than 2 classes. Skipping AUC calculation.\n")
+      auc_nsa[f] <- NA
+      auc_pca[f] <- NA
+      
+      # NEW: Skip pairwise too
+      auc_nsa_cn_mci[f] <- auc_nsa_cn_ad[f] <- auc_nsa_mci_ad[f] <- NA
+      auc_pca_cn_mci[f] <- auc_pca_cn_ad[f] <- auc_pca_mci_ad[f] <- NA
+      
+next
+    }
+    mlfun = multinom; ptype="probs"
+    mlfun = randomForest; ptype='prob'
+# mlfun = imbalanced
+# Base model (AGE and PTGENDER)
+    base_mod <- tryCatch(
+      mlfun(as.formula("diagnosis ~ AGE + PTGENDER"), data = train, trace = FALSE),
+error = function(e) {
+        cat("Error in base model for fold", f, "weight", ww, ":", e$message, "\n")
+return(NULL)
+}
+)
+    covarsbin <- "AGE + PTGENDER"
+# NSA full model
+    full_nsa_form <- paste("diagnosis ~", covarsbin, "+", paste(colnames(proj_nsa), collapse = "+"))
+    full_nsa <- tryCatch(
+      mlfun(as.formula(full_nsa_form), data = train, trace = FALSE),
+error = function(e) {
+        cat("Error in NSA model for fold", f, "weight", ww, ":", e$message, "\n")
+return(NULL)
+}
+)
+if (!is.null(full_nsa)) {
+      preds_nsa <- predict(full_nsa, test, type = ptype )
+      roc_nsa <- tryCatch(
+        multiclass.roc(test$diagnosis, preds_nsa, levels = levels(test$diagnosis), quiet = TRUE),
+error = function(e) {
+          cat("Error in NSA ROC for fold", f, "weight", ww, ":", e$message, "\n")
+return(NULL)
+}
+)
+      auc_nsa[f] <- if (!is.null(roc_nsa)) as.numeric(roc_nsa$auc) else NA
+      
+      # NEW: Compute pairwise AUC for NSA
+      # CN vs MCI
+      test_cn_mci <- test[test$diagnosis %in% c("CN", "MCI"), ]
+      if (nrow(test_cn_mci) >= 2 && length(unique(test_cn_mci$diagnosis)) == 2) {
+        response_cn_mci <- as.numeric(test_cn_mci$diagnosis == "MCI")  # 0=CN, 1=MCI
+        preds_cn_mci <- preds_nsa[test$diagnosis %in% c("CN", "MCI"), 2]  # Prob for MCI (column 2)
+        roc_cn_mci_nsa <- tryCatch(roc(response_cn_mci, preds_cn_mci, quiet = TRUE), error = function(e) NULL)
+        auc_nsa_cn_mci[f] <- if (!is.null(roc_cn_mci_nsa)) as.numeric(roc_cn_mci_nsa$auc) else NA
+      } else {
+        auc_nsa_cn_mci[f] <- NA
+      }
+      
+      # CN vs AD
+      test_cn_ad <- test[test$diagnosis %in% c("CN", "AD"), ]
+      if (nrow(test_cn_ad) >= 2 && length(unique(test_cn_ad$diagnosis)) == 2) {
+        response_cn_ad <- as.numeric(test_cn_ad$diagnosis == "AD")  # 0=CN, 1=AD
+        preds_cn_ad <- preds_nsa[test$diagnosis %in% c("CN", "AD"), 3]  # Prob for AD (column 3)
+        roc_cn_ad_nsa <- tryCatch(roc(response_cn_ad, preds_cn_ad, quiet = TRUE), error = function(e) NULL)
+        auc_nsa_cn_ad[f] <- if (!is.null(roc_cn_ad_nsa)) as.numeric(roc_cn_ad_nsa$auc) else NA
+      } else {
+        auc_nsa_cn_ad[f] <- NA
+      }
+      
+      # MCI vs AD
+      test_mci_ad <- test[test$diagnosis %in% c("MCI", "AD"), ]
+      if (nrow(test_mci_ad) >= 2 && length(unique(test_mci_ad$diagnosis)) == 2) {
+        response_mci_ad <- as.numeric(test_mci_ad$diagnosis == "AD")  # 0=MCI, 1=AD
+        preds_mci_ad <- preds_nsa[test$diagnosis %in% c("MCI", "AD"), 3]  # Prob for AD (column 3)
+        roc_mci_ad_nsa <- tryCatch(roc(response_mci_ad, preds_mci_ad, quiet = TRUE), error = function(e) NULL)
+        auc_nsa_mci_ad[f] <- if (!is.null(roc_mci_ad_nsa)) as.numeric(roc_mci_ad_nsa$auc) else NA
+      } else {
+        auc_nsa_mci_ad[f] <- NA
+      }
+      
+    } else {
+      auc_nsa[f] <- NA
+      auc_nsa_cn_mci[f] <- auc_nsa_cn_ad[f] <- auc_nsa_mci_ad[f] <- NA  # NEW
+    }
+# PCA full model
+    full_pca_form <- paste("diagnosis ~", covarsbin, "+", paste(colnames(proj_pca), collapse = "+"))
+    full_pca <- tryCatch(
+      mlfun(as.formula(full_pca_form), data = train, trace = FALSE),
+error = function(e) {
+        cat("Error in PCA model for fold", f, "weight", ww, ":", e$message, "\n")
+return(NULL)
+}
+)
+if (!is.null(full_pca)) {
+      preds_pca <- predict(full_pca, test, type = ptype )
+      roc_pca <- tryCatch(
+        multiclass.roc(test$diagnosis, preds_pca, levels = levels(test$diagnosis), quiet = TRUE),
+error = function(e) {
+          cat("Error in PCA ROC for fold", f, "weight", ww, ":", e$message, "\n")
+return(NULL)
+}
+)
+      auc_pca[f] <- if (!is.null(roc_pca)) as.numeric(roc_pca$auc) else NA
+      
+      # NEW: Compute pairwise AUC for PCA (similar to NSA)
+      # CN vs MCI
+      test_cn_mci <- test[test$diagnosis %in% c("CN", "MCI"), ]
+      if (nrow(test_cn_mci) >= 2 && length(unique(test_cn_mci$diagnosis)) == 2) {
+        response_cn_mci <- as.numeric(test_cn_mci$diagnosis == "MCI")
+        preds_cn_mci <- preds_pca[test$diagnosis %in% c("CN", "MCI"), 2]
+        roc_cn_mci_pca <- tryCatch(roc(response_cn_mci, preds_cn_mci, quiet = TRUE), error = function(e) NULL)
+        auc_pca_cn_mci[f] <- if (!is.null(roc_cn_mci_pca)) as.numeric(roc_cn_mci_pca$auc) else NA
+      } else {
+        auc_pca_cn_mci[f] <- NA
+      }
+      
+      # CN vs AD
+      test_cn_ad <- test[test$diagnosis %in% c("CN", "AD"), ]
+      if (nrow(test_cn_ad) >= 2 && length(unique(test_cn_ad$diagnosis)) == 2) {
+        response_cn_ad <- as.numeric(test_cn_ad$diagnosis == "AD")
+        preds_cn_ad <- preds_pca[test$diagnosis %in% c("CN", "AD"), 3]
+        roc_cn_ad_pca <- tryCatch(roc(response_cn_ad, preds_cn_ad, quiet = TRUE), error = function(e) NULL)
+        auc_pca_cn_ad[f] <- if (!is.null(roc_cn_ad_pca)) as.numeric(roc_cn_ad_pca$auc) else NA
+      } else {
+        auc_pca_cn_ad[f] <- NA
+      }
+      
+      # MCI vs AD
+      test_mci_ad <- test[test$diagnosis %in% c("MCI", "AD"), ]
+      if (nrow(test_mci_ad) >= 2 && length(unique(test_mci_ad$diagnosis)) == 2) {
+        response_mci_ad <- as.numeric(test_mci_ad$diagnosis == "AD")
+        preds_mci_ad <- preds_pca[test$diagnosis %in% c("MCI", "AD"), 3]
+        roc_mci_ad_pca <- tryCatch(roc(response_mci_ad, preds_mci_ad, quiet = TRUE), error = function(e) NULL)
+        auc_pca_mci_ad[f] <- if (!is.null(roc_mci_ad_pca)) as.numeric(roc_mci_ad_pca$auc) else NA
+      } else {
+        auc_pca_mci_ad[f] <- NA
+      }
+      
+    } else {
+      auc_pca[f] <- NA
+      auc_pca_cn_mci[f] <- auc_pca_cn_ad[f] <- auc_pca_mci_ad[f] <- NA  # NEW
+    }
+# Store ROC objects (if valid)
+if (!is.null(roc_nsa)) roc_nsa_list[[paste0("f", f, "_w", sprintf("%.2f", ww))]] <- roc_nsa
+if (!is.null(roc_pca)) roc_pca_list[[paste0("f", f, "_w", sprintf("%.2f", ww))]] <- roc_pca
+  }
+# Store results for this weight
+  random_accuracy <- mean(auc_random, na.rm = TRUE)
+# cat("Weight:", ww, "Random Assignment Accuracy:", random_accuracy, "\n")
+  log_results_df <- rbind(log_results_df, data.frame(
+w = ww,
+auc_nsa = mean(auc_nsa, na.rm = TRUE),
+auc_pca = mean(auc_pca, na.rm = TRUE),
+auc_diff = mean(auc_nsa, na.rm = TRUE) - mean(auc_pca, na.rm = TRUE),
+random_accuracy = random_accuracy,
+
+# NEW: Add pairwise columns
+auc_nsa_cn_mci = mean(auc_nsa_cn_mci, na.rm = TRUE),
+auc_nsa_cn_ad = mean(auc_nsa_cn_ad, na.rm = TRUE),
+auc_nsa_mci_ad = mean(auc_nsa_mci_ad, na.rm = TRUE),
+auc_pca_cn_mci = mean(auc_pca_cn_mci, na.rm = TRUE),
+auc_pca_cn_ad = mean(auc_pca_cn_ad, na.rm = TRUE),
+auc_pca_mci_ad = mean(auc_pca_mci_ad, na.rm = TRUE)
+))
+}
+
+
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(gridExtra)
+library(scales)
+# Add experiment label (two runs)
+log_results_df$experiment <- rep(c("Run 1", "Run 2"), each = length(mywws))
+
+# === Long format for AUC lines ===
+auc_long <- log_results_df %>%
+  dplyr::select(w, experiment, auc_nsa, auc_pca) %>%
+  pivot_longer(cols = c(auc_nsa, auc_pca), names_to = "method", values_to = "auc") %>%
+  mutate(method = ifelse(method == "auc_nsa", "NSA-PCA", "PCA"))
+
+# === Plot 1: AUC vs w (NSA-PCA vs PCA) ===
+p1 <- ggplot(auc_long, aes(x = w, y = auc, color = method, linetype = experiment)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2.5, shape = 21, fill = "white", stroke = 1.2) +
+  scale_color_manual(values = c("NSA-PCA" = "#D55E00", "PCA" = "#0072B2")) +
+  scale_linetype_manual(values = c("Run 1" = "solid", "Run 2" = "dashed")) +
+  geom_hline(yintercept = mean(data$random_accuracy), linetype = "dotted", color = "gray40", size = 1) +
+  annotate("text", x = 0.45, y = mean(data$random_accuracy) + 0.005, 
+           label = "Random Chance (~0.406)", color = "gray40", size = 3.5, hjust = 0) +
+  labs(
+    title = "Cross-Validated AUC for Diagnosis Prediction",
+    subtitle = "NSA-PCA vs PCA across regularization strength (w)",
+    x = "NSA Regularization Weight (w)",
+    y = "Mean AUC (Cross-Validation)",
+    color = "Method",
+    linetype = "Experiment"
+  ) +
+  theme_minimal(base_size = 8) +
+  theme(
+    plot.title = element_text(face = "bold", size = 8),
+    plot.subtitle = element_text(color = "gray50"),
+    legend.position = "top",
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "gray70"),
+    axis.ticks = element_line(color = "gray70")
+  ) +
+  scale_y_continuous(limits = c(0.68, 0.79), breaks = seq(0.68, 0.79, 0.02))
+
+# === Plot 2: AUC Difference (NSA - PCA) ===
+p2 <- ggplot(log_results_df, aes(x = w, y = auc_diff, color = experiment)) +
+  geom_hline(yintercept = 0, linetype = "solid", color = "gray50") +
+  geom_line(size = 1.3) +
+  geom_point(size = 3, shape = 18) +
+  scale_color_manual(values = c("Run 1" = "#D55E00", "Run 2" = "#CC79A7")) +
+  labs(
+    title = "Performance Gain: NSA-PCA − PCA",
+    x = "NSA Regularization Weight (w)",
+    y = "ΔAUC (NSA-PCA − PCA)",
+    color = "Experiment"
+  ) +
+  theme_minimal(base_size = 8) +
+  theme(
+    plot.title = element_text(face = "bold", size = 8),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "gray70"),
+    axis.ticks = element_line(color = "gray70")
+  ) +
+  scale_y_continuous(labels = percent_format(accuracy = 0.1)) +
+  annotate("rect", xmin = -Inf, xmax = Inf, ymin = 0, ymax = Inf, fill = "green", alpha = 0.05)
+
+# === Combine Plots ===
+gridExtra::grid.arrange(p1, p2, ncol = 1, heights = c(1.8, 1))
+```
+
+
+```{r enhanced-stats-dx,echo=FALSE,fig.width=7,fig.cap="Population-level distribution of NSA-based embeddings for different diagnostic groups.  The variables that feed these projections are displayed as radar plots at bottom of the figure."}
+
+# Summary for logistic regression
+log_summary <- log_results_df %>%
+  summarise(
+    mean_auc_nsa = mean(auc_nsa, na.rm = TRUE),
+    mean_auc_pca = mean(auc_pca, na.rm = TRUE),
+    mean_random_accuracy = mean(random_accuracy, na.rm = TRUE),
+    t_stat = tryCatch(
+      t.test(auc_nsa, auc_pca, paired = TRUE)$statistic,
+      error = function(e) NA
+    ),
+    p_value = tryCatch(
+      t.test(auc_nsa, auc_pca, paired = TRUE)$p.value,
+      error = function(e) NA
+    )
+  )
+
+
+
+Y0_pca <- pca_res$rotation  # columns = components, rows = regions (p x k)
+Y0_pca <- sweep(Y0_pca, 2, sqrt(colSums(Y0_pca^2)), FUN = "/")
+Y0_pca <- Y0_pca * 1.0
+if (FALSE) {
+M_nsa <- nsa_default(
+      Y0 = Y0_pca,
+      w = ww
+    )
+} else M_nsa <- nsa_default( Y0_pca, w = ww  )
+Ymat <- M_nsa$Y
+proj_nsa <- as.matrix(X) %*% as.matrix(Ymat)
+proj_pca <- as.matrix(X) %*% Y0_pca
+colnames(proj_nsa) <- paste0("nsa", 1:ncol(proj_nsa))
+colnames(proj_pca) <- paste0("pca", 1:ncol(proj_pca))
+response='diagnosis'
+temp = ppmiadni[, c(response, covars)]
+dx2 <- "AD"
+dx1 <- "MCI"
+dx0 <- "CN"
+temp$diagnosis <- factor(temp$diagnosis, levels = c(dx0, dx1, dx2))
+full_data <- data.frame( cbind(temp, proj_nsa) )
+formula_str <- paste(response, "~", covarsbin, "+", paste(colnames(proj_nsa), collapse = "+"))
+model <- multinom(as.formula(formula_str), data = full_data, trace = FALSE)
+model_summary <- summary(model)
+coefs <- model_summary$coefficients
+std_errs <- model_summary$standard.errors
+z_scores <- coefs / std_errs
+p_values <- 2 * (1 - pnorm(abs(z_scores)))
+results <- tibble(
+    ResponseLevel = rep(rownames(coefs), times = ncol(coefs)),
+    Predictor = rep(colnames(coefs), each = nrow(coefs)),
+    Coefficient = as.vector(coefs),
+    StdError = as.vector(std_errs),
+    Z = as.vector(z_scores),
+    P = as.vector(p_values)
+  )
+  
+nsa_names <- colnames(proj_nsa)
+nsa_results <- data.frame( results[ results$Predictor %in% nsa_names, ] )
+psel = unique( nsa_results$Predictor[  nsa_results$P < 0.05 ] )
+gglist = list()
+for (comp in psel ) {
+    p <- ggplot(full_data, aes_string(x = comp, fill = response)) +
+        geom_density(alpha = 0.6) +
+        labs(title = paste("NSA Component:", comp),
+             x = "Component Value", y = "Density") +
+        theme_minimal(base_size=7)
+      gglist[[comp]] <- p
+    }
+
+
+# Create data frame for pairwise AUCs
+pairwise_df <- data.frame(
+  Comparison = rep(c("CN vs MCI", "CN vs AD", "MCI vs AD"), each = 2),
+  Method = rep(c("NSA", "PCA"), 3),
+  `Fold 1` = c(auc_nsa_cn_mci[1], auc_pca_cn_mci[1],
+               auc_nsa_cn_ad[1], auc_pca_cn_ad[1],
+               auc_nsa_mci_ad[1], auc_pca_mci_ad[1]),
+  `Fold 2` = c(auc_nsa_cn_mci[2], auc_pca_cn_mci[2],
+               auc_nsa_cn_ad[2], auc_pca_cn_ad[2],
+               auc_nsa_mci_ad[2], auc_pca_mci_ad[2]),
+  `Fold 3` = c(auc_nsa_cn_mci[3], auc_pca_cn_mci[3],
+               auc_nsa_cn_ad[3], auc_pca_cn_ad[3],
+               auc_nsa_mci_ad[3], auc_pca_mci_ad[3]),
+  `Fold 4` = c(auc_nsa_cn_mci[4], auc_pca_cn_mci[4],
+               auc_nsa_cn_ad[4], auc_pca_cn_ad[4],
+               auc_nsa_mci_ad[4], auc_pca_mci_ad[4]),
+  check.names = FALSE
+)
+
+# Add Mean column
+pairwise_df$Mean <- rowMeans(pairwise_df[, 3:6], na.rm = TRUE)
+
+# Overall rows
+overall_rows <- data.frame(
+  Comparison = c("Multi-class", "Multi-class", "Random Accuracy", "t-statistic (NSA>PCA)", "p-value (NSA>PCA)"),
+  Method = c("NSA", "PCA", "", "", ""),
+  `Fold 1` = NA,
+  `Fold 2` = NA,
+  `Fold 3` = NA,
+  `Fold 4` = NA,
+  Mean = c(0.765, 0.719, 0.406, 16.479, 1.731e-13),
+  check.names = FALSE
+)
+
+# Combine data frames
+combined_df <- rbind(pairwise_df, overall_rows)
+
+# Create gt table
+combined_gt <- gt(combined_df) |>
+  tab_header(
+    title = "Table 3: Classification Results: NSA vs PCA",
+    subtitle = "Pairwise and Overall Multi-Class Summary Across 4 Folds"
+  ) |>
+  tab_row_group(
+    label = "Overall Summary",
+    rows = (nrow(pairwise_df) + 1):nrow(combined_df)
+  ) |>
+  tab_row_group(
+    label = "Pairwise Results",
+    rows = 1:nrow(pairwise_df)
+  ) |>
+  fmt_number(
+    columns = c("Fold 1", "Fold 2", "Fold 3", "Fold 4", "Mean"),
+    decimals = 3
+  ) |>
+  fmt_scientific(
+    columns = "Mean",
+    rows = Comparison == "p-value",
+    decimals = 3
+  ) |>
+  sub_missing(
+    columns = everything(),
+    missing_text = "-"
+  ) |>
+  tab_options(
+    table.font.size = "small",
+    heading.title.font.size = "medium",
+    heading.subtitle.font.size = "small",
+    row_group.font.weight = "bold"
+  ) |>
+  cols_align(
+    align = "center",
+    columns = everything()
+  ) |>
+  tab_style(
+    style = list(
+      cell_text(weight = "bold")
+    ),
+    locations = cells_column_labels()
+  ) |>
+  tab_style(
+    style = list(
+      cell_fill(color = "lightblue"),
+      cell_text(style = "italic")
+    ),
+    locations = cells_body(
+      columns = "Mean"
+    )
+  )
+
+# To display in R (e.g., in RMarkdown or console)
+combined_gt
+
+
+
+
+# Plot results
+log_results_long <- log_results_df %>%
+  dplyr::select(w, auc_nsa, auc_pca, random_accuracy) %>%
+  pivot_longer(cols = c(auc_nsa, auc_pca, random_accuracy), 
+               names_to = "Metric", 
+               values_to = "Value")
+
+p1 <- ggplot(log_results_long, aes(x = w, y = Value, color = Metric, linetype = Metric)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("auc_nsa" = "#4ECDC4", "auc_pca" = "#FF6B6B", "random_accuracy" = "#555555"),
+                     labels = c("NSA AUC", "PCA AUC", "Random Accuracy")) +
+  scale_linetype_manual(values = c("auc_nsa" = "solid", "auc_pca" = "dashed", "random_accuracy" = "dotted"),
+                        labels = c("NSA AUC", "PCA AUC", "Random Accuracy")) +
+  labs(title = "Model Performance vs. Weight (w) for CN, MCI, AD",
+       x = "Weight (w)",
+       y = "AUC / Accuracy",
+       color = "Metric",
+       linetype = "Metric") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2))
+
+# print(p1)
+
+# Optional: Plot AUC difference
+p2 <- ggplot(log_results_df, aes(x = w, y = auc_diff)) +
+  geom_line(color = "#1F77B4", size = 1) +
+  geom_point(size = 2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  labs(title = "AUC Difference (NSA - PCA) vs. Weight (w)",
+       x = "Weight (w)",
+       y = "AUC Difference") +
+  theme_minimal() +
+  scale_y_continuous(limits = c(min(log_results_df$auc_diff, na.rm = TRUE) - 0.01, 
+                               max(log_results_df$auc_diff, na.rm = TRUE) + 0.01))
+
+
+
+net2display = as.integer( gsub("nsa", "", psel))
+
+# --- Step 8: Connectome-like graph for each network ------------------------
+# Assign lobes (crude mapping)
+lobe_map = map_region_to_lobe( regions )
+library(igraph)
+library(dplyr)
+for (net in net2display ) {
+    netvec=Y_norm[, net]
+    netvec=netvec[netvec>0]
+    threshold <- quantile(netvec, 0.25, na.rm = TRUE)
+    active_idx <- which(Y_norm[, net] > threshold)
+    if (length(active_idx) < 2) next
+    
+    # Extract active region data
+    active_regions <- rownames(Y_norm)[active_idx]
+    loadings_active <- Y_norm[active_idx, net]
+    
+    # Map regions to lobes and colors using the new unified function
+    lobe_info <- map_region_to_lobe(active_regions)
+    lobes_active <- lobe_info$Lobe
+    colors_active <- lobe_info$Color
+    
+    # Create igraph object
+    g <- graph.empty(n = length(active_regions), directed = FALSE)
+    V(g)$name <- active_regions
+    V(g)$loading <- loadings_active
+    V(g)$lobe <- lobes_active
+    V(g)$color <- colors_active
+    V(g)$size <- pmax(5, V(g)$loading * 30)
+    
+    # Add edges among nodes in the same lobe
+    lobe_groups <- split(seq_along(active_regions), lobes_active)
+    for (grp in lobe_groups) {
+        if (length(grp) > 1) {
+        comb_pairs <- t(combn(grp, 2))
+        edge_vec <- as.vector(t(comb_pairs))
+        g <- add_edges(g, edge_vec)
+        }
+    }
+    
+    # Compute layout and plot
+    layout <- layout_with_fr(g)
+    if (FALSE) {
+      plot(
+          g, layout = layout,
+          vertex.label = V(g)$name,
+          vertex.label.cex = 0.7,
+          vertex.label.color = "black",
+          vertex.frame.color = NA,
+          vertex.color = V(g)$color,
+          vertex.size = V(g)$size,
+          edge.color = "gray",
+          edge.width = 1,
+          main = paste("Graph — Network", net)
+      )
+    
+    # Build dynamic legend directly from map_region_to_lobe color map
+#    color_key <- map_region_to_lobe(unique(lobes_active))
+#    legend(
+#        "topright",
+#        legend = unique(color_key$Lobe),
+#        fill = unique(color_key$Color),
+#        title = "Lobes",
+#        cex = 0.8,
+#        bty = "n"
+#    )
+    }
+
+  }
+
+
+####
+
+
+# Load required libraries
+library(ggradar)
+library(gridExtra)
+library(dplyr)  # For data manipulation
+
+# --- Step 7: Radar charts (top 10 regions per network) ----------------------
+
+# Collect all plots in a list
+radar_plots <- list()
+
+# Optional: Find global max for consistent scaling across plots
+global_max <- max(Y_norm[, net2display], na.rm = TRUE) * 1.1
+
+for (net in net2display) {
+  loadings <- Y_norm[, net]
+  if (all(is.na(loadings))) next
+  
+  # Top 10 regions
+  top_idx <- head(order(loadings, decreasing = TRUE), 10)
+  loadings_top <- loadings[top_idx]
+  regions_top <- names(loadings_top)
+  
+  # Prepare data frame for ggradar: add 'group' column
+  radar_df <- data.frame(rbind(loadings_top))
+  colnames(radar_df) <- regions_top
+  radar_df <- cbind(group = "Loading", radar_df)
+  
+  # Create the radar plot with ggradar
+  p <- ggradar(
+    radar_df,
+    values.radar = c("","",""),
+#    values.radar = c("0", sprintf("%.2f", global_max / 2), sprintf("%.2f", global_max)),  # Custom radar labels
+    grid.min = 0,
+    grid.max = global_max,
+    grid.mid = global_max / 2,
+    plot.legend = FALSE,  # No legend needed for single group
+    group.colours = "#008080",
+    group.line.width = 1,
+    group.point.size = 2,
+    background.circle.colour = "white",
+    background.circle.transparency = 0.2,
+    gridline.min.colour = "grey",
+    gridline.mid.colour = "grey",
+    gridline.max.colour = "grey",
+    gridline.min.linetype = "dashed",
+    gridline.mid.linetype = "dashed",
+    gridline.max.linetype = "dashed",
+    axis.label.size = 1,
+    axis.label.offset = 1.1,
+    fill = TRUE,
+    fill.alpha = 0.25
+  ) +
+    ggtitle(paste0("Network ", net)) +theme_minimal(base_size = 8) +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 8, face = "bold"),
+      legend.position = "none"  # Ensure no legend
+    )
+  
+  radar_plots[[length(radar_plots) + 1]] <- p
+}
+
+# Arrange plots in a grid (e.g., 2 columns; adjust based on number of plots)
+n_plots <- length(radar_plots)
+n_cols <- ceiling(sqrt(n_plots))  # For a roughly square grid
+# grid.arrange(grobs = radar_plots, ncol = n_cols)
+# print(p2)
+
+if ( length( gglist ) <2 ) {
+  gglist[[2]] = ggplot() + labs(title="") + theme_void()
+  radar_plots[[2]] = ggplot() + labs(title="") + theme_void()
+}
+
+( gglist[[1]] + gglist[[2]]) / 
+(radar_plots[[1]] + radar_plots[[2]])  + plot_layout(heights = c(0.5, 2.5))
+
+```
+
+
+### Prediction of Cognitive Outcomes
+
+For each of 9 cognitive variables (e.g., MMSE, CDR-SB, ADAS-13, FAQ, ECog totals), we fitted baseline models: \( \text{cog} \sim \text{age} + \text{gender} + \text{education} + \text{APOE4} \). Full models added network scores: \( \text{cog} \sim \text{covariates} + \sum_{j=1}^k \text{proj}_j \). Model comparison used ANOVA, with significance quantified as \( \log(p) \) (lower values indicate stronger improvement; negative infinity for \( p = 0 \)).  Across \( w \) values, NSA-Flow yielded lower \( \log(p) \) than PCA in the majority of brain structure-cognitive pairs (based on the comparison table where `nsa < pca`), suggesting competitive explanatory power. 
+
+We perform paired t-tests on \( \log(p) \) values across runs to test if NSA-Flow consistently outperforms PCA. Across a broad range of cognitive and functional outcomes, the NSA-Flow model shows consistent advantages over PCA for most variables, with a few exceptions. Specifically:
+
+* NSA-Flow outperforms PCA on 5 out of 9 cognitive outcomes on average (CDRSB, ADAS13, ADASQ4, mPACCdigit, EcogSPTotal).
+
+* PCA performs slightly better on FAQ, MMSE and EcogPtTotal which emphasize global cognition and where linear variance-based projections tend to align well with simple latent factor structure.
+
+* The average log-likelihood improvement (Δlog p) for NSA over PCA is between −1.0 and −6.0 units for the majority of outcomes, which corresponds to a meaningful difference in predictive fit under the cross-validation framework.
+
+* The improvement differences (bottom panel Figure 13) vary smoothly with \( w \), indicating well-behaved optimization.
+
+Boxplots in Figure 13 show \( \log(p) \) distributions by method and cognitive variable. Violin plots depict \( \log(p) \) differences (NSA - PCA), with negative values favoring NSA. A scatter plot relates sparsity (tuned by w) to performance gains (Figure 13 bottom panel).  These vary smoothly with w, indicating well-behaved optimization.
+
+### Extension to Diagnosis Prediction
+
+To further rigorously assess NSA-Flow's advantages over PCA, we incorporate a trinary classification task for AD diagnosis between controls (CN) vs. mild cognitive impairment (MCI) vs clinical Alzheimer's disease (AD, most severe symptoms) derived from ADNI diagnostic labels using random forest classification and ROC analysis [@Cuingnet2011]. These additions provide a multifaceted view of utility, including out-of-sample generalizability and clinical relevance. For the diagnosis task, we use 5-fold cross-validation to compute area under the ROC curve (AUC), sensitivity, and specificity, ensuring robustness against overfitting. Table 3 summarizes these results.  NSA-Flow yields an ~4.6% absolute AUC improvement over PCA averaged across all weighting conditions.  Figure 11 demonstrates stability of this effect across different $w$ choices.  While this difference may appear small numerically, it is: 
+
+* Statistically stable across folds (low variance) with the most significant improvement conveyed by NSA-Flow in the most challenging pairwise classification task (CN vs MCI), which is often the clinical focus for early detection and intervention;
+
+* Above random assignment (AUC $\approx$ 0.406) by a wide margin;
+
+* Clinically meaningful, given that diagnosis classification tasks (e.g., CN vs MCI vs AD) often exhibit low reproducibility in reproducible research (refer to [@Aghdam2025] for a discussion of the realistic generalizability of the diagnostic accuracies reported in existing literature e.g. sections 4.3.1 and 4.3.2).
+
+PCA relies on maximal variance projection, which may emphasize noise from demographic or measurement heterogeneity.  NSA-Flow, by contrast, constrains the projection through orthogonality-seeking flow, allowing the diagnostic boundary to align better with underlying disease manifolds. This likely accounts for the modest but systematic AUC gain. These results highlight NSA-Flow's advantages as an easy to use ML method, underscoring its value in extracting clinically predictive, sparse networks from neuroimaging data and biomedical data in general.  
+
+NSA-flow also demonstrates meaningful variable selection.  The regions that are highlighted by the two most predictive components (4th and 5th shown in Figure 12) are consistent with known AD pathology, including frontal, medial temporal lobe structures and cholinergic regions (basal forebrain). This biological plausibility further supports NSA-Flow's utility in extracting relevant features for disease classification via interpretable orthogonalizing flows.
+
+```{r beautiful-viz, fig.height=7, fig.width=7,fig.cap="Comparative visualization of NSA-Flow and PCA performance across cognitive measures. The top panels show (left) boxplots of log-p values for NSA and PCA across cognitive variables and (right) violin plots of their paired differences (NSA - PCA), where negative values indicate improved association under NSA.The lower panel displays scatterplots of log-p differences as a function of the orthogonality weight (w), with trend lines highlighting how NSA performance varies by regularization strength and cognitive domain. Smooth changes in the results with respect to weight parameter suggest that the optimization process is well-behaved."}
+library(ggplot2)
+library(patchwork)  # For combining plots
+theme_set(theme_minimal(base_size = 10) + theme(panel.grid.major = element_line(color = "gray90")))
+
+# Boxplot of log_p by method and cog
+p1 <- ggplot(comparison_df, aes(x = cog, y = nsa, fill = "NSA")) +
+  geom_boxplot(alpha = 0.7) +
+  geom_boxplot(aes(y = pca, fill = "PCA"), alpha = 0.7, position = position_dodge(0.8)) +
+  scale_fill_manual(values = c("NSA" = "#4ECDC4", "PCA" = "#FF6B6B")) +
+  labs(title = "Log(p) by Method and Cognitive Variable", x = "Cognitive Measure", y = "Log(p)", fill = "Method") +theme_minimal(base_size = 8) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Violin plot of differences
+p2 <- ggplot(comparison_df, aes(x = cog, y = log_p_diff)) +
+  geom_violin(trim = FALSE, fill = "#C06C84", alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  stat_summary(fun = median, geom = "point", color = "black") +
+  labs(title = "Distribution of Log(p) Differences (NSA - PCA)", x = "Cognitive Measure", y = "Difference", subtitle = "Negative = NSA better") +theme_minimal(base_size = 8)+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Scatter: w vs diff, colored by better_method
+p3 <- ggplot(comparison_df, aes(x = w, y = log_p_diff, color = better_method)) +
+  geom_point(alpha = 0.6, size = 2) +
+  geom_smooth(method = "loess", se = FALSE, color = "black", linetype = "dotted") +
+  scale_color_manual(values = c("NSA" = "#4ECDC4", "PCA" = "#FF6B6B", "Tie" = "gray")) +
+  labs(title = "Cognitive Assoc. Diff. vs. Weight (w)", x = "w (Orth. Weight)", y = "Log(p) Difference", color = "Better Method")+theme_minimal(base_size = 8) +
+  facet_wrap(~ cog, scales = "free_y", ncol = 3)
+
+# Combine
+(p1 + p2) / p3 + plot_layout(heights = c(1, 1.5))
+```
+
+
+
+# Discussion
+
+The Non-negative Stiefel Approximating Flow (NSA-Flow) provides a robust and flexible framework for optimizing non-negative matrices under tunable orthogonality constraints, addressing the limitations of strict orthogonal NMF [@ding2006orthogonal;@yoo2009orthogonal] and neural regularization methods [@wu2023towards;@kurtz2023group]. Below, we discuss its convergence properties, practical considerations, empirical performance, limitations, and avenues for future work, integrating theoretical insights with empirical outcomes.
+
+NSA-Flow's novelty lies in its manifold-based optimization framework, which parameterizes sparsity (*w*) and orthogonality at the matrix level—unlike component-wise sparse PCA (e.g., via \( \ell_1 \)-penalized SVD), which ignores inter-component network structure. By treating loadings as evolving on a "flow" (gradient trajectory with retractions), it enables fine-grained control over trade-offs: low *w* approximates dense PCA, while high *w* yields ultra-sparse, interpretable factors. The orthogonality defect metric quantifies global separation, allowing users to tune for decorrelated features without full enforcement.
+
+As a general tool in the machine learning arena, NSA-Flow extends beyond neuroimaging to any high-dimensional dataset requiring sparse factorization, such as gene expression matrices (identifying co-regulated modules) or financial portfolios (sparse risk factors). It integrates seamlessly into pipelines—e.g., as a preprocessor before random forests or neural networks—enhancing interpretability without sacrificing performance. Future work could incorporate domain-specific priors (e.g., anatomical constraints) to further boost its applicability in precision medicine.
+
+## Convergence
+
+The objective function is nonconvex due to the quadratic-over-quadratic form of the orthogonality defect and the Stiefel manifold constraints [@edelman1998geometry], precluding global optimality guarantees in general. However, under Lipschitz smoothness of the gradient of \( E(Y) \) and bounded level sets (ensured by the orthogonality penalty), NSA-Flow generates a sequence with monotonically decreasing objective values. The proximal projection \( P_+(Y) = \max(Y, 0) \) is nonexpansive, preserving descent properties [@parikh2014proximal].
+
+Convergence to stationary points is supported by the Kurdyka-Łojasiewicz (KL) inequality, which holds for semi-algebraic functions like polynomials and thus applies to \( E(Y) \) [@bolte2014proximal]. Under the KL property, proximal-gradient methods in nonconvex settings converge to critical points where \( 0 \in \partial E(Y) \), with finite-length trajectories [@bolte2014proximal]. Empirically, NSA-Flow exhibits rapid residual reduction, typically converging within 1000 iterations for \( p \leq 5000, k \leq 50 \). Key failure modes deserve further research but may include poor initialization or ill-conditioning in high-noise regimes.  Future work could derive explicit convergence rates or explore trust-region methods for faster convergence near critical points [@boumal2019global;@boumal2011rtrmc].
+
+## Practical Considerations
+
+NSA-Flow's tunability via \( w \in [0,1] \) enables practitioners to prioritize fidelity or orthogonality based on application needs. For instance, low \( w \) (0.05–0.25) yields moderate orthogonality defect reduction with relatively low fidelity loss in synthetic tests, ideal for clustering tasks requiring minimal decorrelation [@ding2006orthogonal]. Higher \( w \) values suit applications like sparse PCA, where orthogonality enhances feature independence [@yoo2009orthogonal]. The `python` package implementation is modular, with helper functions for stable matrix operations and diagnostics for monitoring convergence [@absil2008optimization]. Backtracking line search ensures robustness to step-size selection [@parikh2014proximal], while adaptive learning rates enhance efficiency. The dual-axis trace plot aids interpretability, revealing trade-offs between fidelity and orthogonality over iterations. Practitioners should calibrate \( w \) via cross-validation, as optimal values depend on data sparsity and noise levels [@strazar2016orthogonal].  The Appendix provides a detailed package description, including installation instructions, core functionality, and API references.
+
+## Empirical Performance
+
+Empirical results highlight NSA-Flow's potential benefits. On the Golub leukemia dataset, NSA-Flow improves classification accuracy by 6% over PCA and and 2% over (standard) sparse PCA, identifying interpretable biomarkers due to its non-negative, semi-orthogonal embeddings [@strazar2016orthogonal].  Qualitatively, the embeddings (projections) also appear to be more separable in this application.  In Alzheimer's disease, NSA-Flow-derived networks yield better cognitive outcome predictions and diagnosis classification (AUC improvements of ~4.6% over PCA), with loadings aligning with known pathology (e.g., medial temporal lobe involvement) [@Chen2024]. These findings suggest that NSA-Flow effectively balances interpretability and predictive power, making it a valuable tool for biomedical data analysis.
+
+## Limitations
+
+Despite its strengths, NSA-Flow faces challenges:
+
+- **Scalability**: The \( O(k^3) \) cost of matrix inversions in retractions limits applicability to large \( k \) [@absil2008optimization]. Sparse matrix support or stochastic methods could mitigate this [@boumal2011rtrmc].
+
+- **Nonconvexity**: Local optima may trap the algorithm in high-noise settings, requiring careful initialization (e.g., SVD-based) [@edelman1998geometry].
+
+- **Parameter Sensitivity**: Optimal \( w \) and retraction choice depend on data characteristics, necessitating domain expertise or automated tuning [@strazar2016orthogonal].
+
+While the implementation seeks to minimize the sensitivity of the method to parameter choices (e.g. optimizer, learning rate, etc), we cannot guarantee these methods will provide stable convergence for all possible data.  Indeed, it is likely that highly ill-conditioned or extremely noisy data may lead to convergence issues or poor local minima.  Further research is needed to characterize these failure modes and provide robust solutions.
+
+## Future Directions
+
+Future extensions include:
+
+- **Sparse and Stochastic Variants**: Leveraging sparse linear algebra or minibatch updates to scale to larger \( p, k \) [@boumal2011rtrmc].
+
+- **Second-Order Methods**: Incorporating Hessian information to accelerate convergence near critical points [@absil2008optimization,boumal2019global].
+
+- **Domain-Specific Adaptations**: Tailoring NSA-Flow for multi-modal data fusion or graph-structured inputs, building on [@Chen2024,henaff2011deep].
+
+NSA-Flow's flexible framework and robust implementation make it a valuable tool for interpretable matrix optimization, with broad potential across machine learning and data science applications.
+
+## Funding 
+
+This work was supported by the Office of Naval Research (ONR) grant N00014-23-1-2317.
+
+# Appendix A: NSA-Flow Package Description
+
+This document is entitled `nsa_flow.Rmd` and is available in the [ANTsR repository](https://github.com/ANTsX/ANTsR).
+
+## Overview
+
+The NSA-Flow package (Non-negative Stiefel Approximating Flow) is a Python library designed for interpretable representation learning in high-dimensional data domains such as neuroimaging, genomics, and text analysis. It provides a unified, differentiable optimization framework that integrates sparse matrix factorization, orthogonalization, and manifold constraints into a single algorithm operating near the Stiefel manifold. This approach balances reconstruction fidelity with column-wise decorrelation, resulting in sparse, stable, and interpretable latent representations. Non-negativity is enforced through proximal updates, while continuous orthogonality control is achieved via manifold retraction techniques (e.g., soft-polar or polar decomposition). Structured sparsity is managed via a tunable weight parameter, and the framework includes adaptive gradient scaling and learning-rate strategies for efficient optimization.
+
+The package is compatible with PyTorch for seamless integration into deep learning workflows and supports joint optimization tasks. It emphasizes simplicity of use and differentiability, making it suitable for applications where interpretability and constraint enforcement are critical.
+
+## Key Features
+
+- **Manifold Approximation**: Implements a smooth geometric flow near the Stiefel manifold to handle orthogonality constraints continuously.
+
+- **Constraint Enforcement**: Incorporates non-negativity via proximal operators and orthogonality through retraction methods.
+
+- **Optimization Flexibility**: Supports various PyTorch optimizers (e.g., ASGD) with adaptive learning rates and strategies like Bayesian optimization for hyperparameter tuning.
+
+- **Metrics and Visualization**: Includes functions for computing orthogonality defects (e.g., invariant_orthogonality_defect and defect_fast) and plotting optimization traces.
+
+- **Validation**: Tested on real-world datasets, including the Golub leukemia gene expression dataset and the Alzheimer’s Disease Neuroimaging Initiative (ADNI) dataset, demonstrating maintained or improved performance with simplified representations.
+
+- **Extensibility**: Offers an autograd-compatible variant for end-to-end differentiable pipelines and a prototype layer for deep learning integration (minimally tested).
+
+## Installation and Dependencies
+
+NSA-Flow can be installed from PyPI using `pip install nsa-flow` or directly from the GitHub repository via `pip install git+https://github.com/stnava/nsa_flow.git`. It requires Python ≥ 3.9, PyTorch ≥ 2.0, NumPy ≥ 1.23, and Matplotlib for visualization. No additional packages are needed for core functionality.
+
+## Core Functionality and High-Level API
+
+The package exposes several key functions for optimization and analysis:
+
+- `nsa_flow.nsa_flow_orth()`: Autograd-friendly NSA-Flow implementation.
+
+- `nsa_flow.nsa_flow_retract_auto()`: Applies manifold retraction to enforce constraints during optimization and adjusts strategies based on the shape of the input matrix.
+
+- `nsa_flow.invariant_orthogonality_defect()`: Calculates a measure of deviation from orthogonality.
+
+- `nsa_flow.get_torch_optimizer()`: Configures and returns a PyTorch optimizer based on user specifications.
+
+- `nsa_flow.estimate_learning_rate_for_nsa_flow()`: Estimates an appropriate initial learning rate for the optimization process.  Used internally when user elects a `lr_strategy`.
+
+- `nsa_flow.get_lr_estimation_strategies()`: Returns the possible learning rate strategies for the optimization process.
+
+- `nsa_flow.test*` `demo_*()`: A suite of demonstration functions illustrating various aspects of the NSA-Flow algorithm, including optimizer tradeoffs and weight parameter effects.  There is a testing suite that can be run to validate core functionality and will automatically call these functions.
+
+- `nsa_flow.plot_nsa_trace()`: Visualizes the optimization trace, showing fidelity and orthogonality metrics over iterations.  Results from this function are shown in Figure 7.
+
+A typical usage example involves initializing a random matrix, running the optimizer, and evaluating the results:
+```python
+import torch
+import nsa_flow
+
+torch.manual_seed(42)
+Y = torch.randn(120, 200) + 1
+print("Initial orthogonality defect:", nsa_flow.invariant_orthogonality_defect(Y))
+
+result = nsa_flow.nsa_flow_orth(
+    Y,
+    w=0.5,
+    optimizer="asgd",
+    max_iter=5000,
+    record_every=1,
+    tol=1e-8,
+    initial_learning_rate=None,
+    lr_strategy='bayes',
+    warmup_iters=10, # standardizes relative weights of fidelity and orthogonality terms
+    verbose=False,
+)
+nsa_flow.plot_nsa_trace(result['traces'])
+print("Final orthogonality defect:", nsa_flow.invariant_orthogonality_defect(result["Y"]))
+```
+
+This demonstrates the package's ability to refine matrices toward orthogonality while imposing non-negativity.
+
+## Specific Demonstrations and Testing
+
+### nsa_flow.demo_nsa_flow_optimizer_tradeoff
+
+This demonstration function showcases tradeoffs in optimizer choices within the NSA-Flow framework. It explores how different optimizers (e.g., ASGD vs. others) affect convergence speed, stability, and the balance between fidelity and orthogonality across different $w$ with default settings. An example result is in Figure 4.  The example can be configured with different parameters passed to the function call.
+
+### nsa_flow.demo_nsa_flow_tradeoff
+
+This function demonstrates general tradeoffs in the NSA-Flow algorithm, particularly the interplay between the  weight `w` and the objective values.  The result is shown in Figure 5. The example can be configured with different parameters passed to the function call.
+
+### Automatic Testing
+The package includes an automatic testing suite that can be executed from the root directory using `python3 tests/run_nsa_flow_tests.py`. This script runs a series of unit tests and examples (with visualizations) to validate core functions, including optimization loops, retraction operators,  defect metrics and deep learning wrappers. It covers prototype features like the NSA-Flow layer for deep learning (e.g., via `tests/test_nsaf_layer.py`). Running these tests ensures the package's stability and correctness across different configurations and datasets.
+
+## License and Citation
+
+NSA-Flow is released under the MIT License. For research use, cite as: Stnava et al. (2025). [NSA-Flow: Non-negative Stiefel Approximating Flow for Interpretable Representation Learning](https://github.com/stnava/nsa_flow).
+
+<!--
+
+# Mathematical Analysis: descent and stationarity
+
+**Setup and notation.**  
+Let $Y\in\mathbb{R}^{p\times k}$. Define the energy
+\[
+E(Y) = (1-w)F(Y) + w\,R(Y),
+\]
+with $F(Y)=\tfrac12\|Y-X_0\|_F^2$ and $R$ an orthogonality penalty (for example $\tfrac12\|Y^\top Y - I_k\|_F^2$ or its scale-invariant variant). Denote $S(Y)=Y^\top Y$ and let $T(Y)$ be a (regularized) inverse square root approximation of $S(Y)$, i.e.\ $T(Y)\approx (S(Y)+\varepsilon I)^{-1/2}$. Define the NSA-Flow operator with strength $\alpha\in[0,1]$
+\[
+\mathcal{M}_\alpha(Y) = Y\bigl((1-\alpha)I_k + \alpha\,T(Y)\bigr) =: Y\,T_\alpha(Y).
+\]
+
+We consider the iterative update
+\[
+Y_{n+1} = \mathcal{M}_\alpha\bigl(Y_n - \eta\,\operatorname{Proj}_{T_{Y_n}}(\nabla E(Y_n))\bigr),
+\]
+where $\operatorname{Proj}_{T_Y}$ is the projection to the Stiefel tangent $G\mapsto G - Y\operatorname{sym}(Y^\top G)$, $\eta>0$ is a step size, and $\alpha\in[0,1]$ the retraction strength.
+
+## Assumptions
+
+1. **Smoothness.** $E$ is $L$-smooth: $\|\nabla E(U) - \nabla E(V)\|_F \le L \|U-V\|_F$ for all $U,V$.
+
+2. **Bounded iterates.** Iterates remain in a compact set $\mathcal{D}$ where $S(Y)+\varepsilon I$ has eigenvalues bounded away from zero.
+
+3. **T approximation quality.** There exist constants $C_T$ and $q\ge1$ such that
+   \[
+   \|T(Y) - (S(Y)+\varepsilon I)^{-1/2}\|_2 \le C_T \,\|S(Y)-I\|_F^q,\qquad \forall Y\in\mathcal{D}.
+   \]
+
+4. **Local Lipschitz of $T_\alpha$.** On $\mathcal{D}$ the map $Y\mapsto T_\alpha(Y)$ is Lipschitz.
+
+## Theorem (Descent and stationarity of NSA-Flow)
+
+Under Assumptions 1–4, pick $0<\eta<2/L$ and any $\alpha\in(0,1]$. Then:
+
+1. (Sufficient descent) There exists $\delta>0$ (depending on $L$, the Lipschitz constants, and $C_T$) such that whenever $\|\operatorname{Proj}_{T_Y}\nabla E(Y)\|_F\ge\delta$ the iteration yields strict decrease:
+   \[
+   E\bigl(\mathcal{M}_\alpha(Y - \eta\,\operatorname{Proj}_{T_Y}\nabla E(Y))\bigr) < E(Y).
+   \]
+
+2. (Subsequential stationarity) The energy $E(Y_n)$ is nonincreasing after finitely many steps and bounded below, hence convergent. Any cluster point $\bar Y$ of $\{Y_n\}$ satisfies
+   \[
+   \operatorname{Proj}_{T_{\bar Y}}(\nabla E(\bar Y)) = 0,
+   \]
+   i.e.\ $\bar Y$ is a constrained critical point on the Stiefel manifold (provided the approximation error of $T$ vanishes as $\|S(Y)-I\|\to 0$).
+
+## Proof sketch
+
+- *Projected gradient descent:* by $L$-smoothness, the projected gradient step $Z=Y-\eta\operatorname{Proj}_{T_Y}\nabla E(Y)$ satisfies
+  \[
+  E(Z) \le E(Y) - \eta\Big(1-\tfrac{L\eta}{2}\Big)\|\operatorname{Proj}_{T_Y}\nabla E(Y)\|_F^2,
+  \]
+  hence strict decrease for $0<\eta<2/L$ when the projected gradient is nonzero.
+
+- *Effect of soft retraction:* using smoothness again,
+  \[
+  E(\mathcal{M}_\alpha(Z)) \le E(Z) + \|\nabla E(Z)\|_F\|\mathcal{M}_\alpha(Z)-Z\|_F + \tfrac{L}{2}\|\mathcal{M}_\alpha(Z)-Z\|_F^2.
+  \]
+  The perturbation $\|\mathcal{M}_\alpha(Z)-Z\|_F = \|Z(T_\alpha(Z)-I)\|_F$ can be bounded, under Assumption 3, by a constant times $\alpha\|\operatorname{Proj}_{T_Y}\nabla E(Y)\|_F$ (plus higher-order terms). Thus the positive terms introduced by the retraction are lower order relative to the negative leading term produced by the projected gradient, and for sufficiently small step size $\eta$ (and/or small $\alpha$) the net effect is a decrease in $E$.
+
+- *Subsequential stationarity:* repeated descent in a bounded domain implies that the projected gradient norm must tend to zero along subsequences; local continuity of the operators and vanishing approximation error imply the projection of the Euclidean gradient vanishes at any cluster point.
+
+> **Remarks.** This proof is local: it shows NSA-Flow behaves like a descent method under standard smoothness conditions and sufficiently accurate inverse-sqrt approximations. It does not claim global linear convergence without further curvature assumptions.
+
+-->
+
+# Session Information
+
+```{r sessioninfo}
+sessionInfo()
+```
+
+
+
+
+# References

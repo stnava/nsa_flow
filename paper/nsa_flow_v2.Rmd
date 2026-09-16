@@ -1,0 +1,360 @@
+---
+title: "Non-negative, Approximately Orthogonal Bases: Methodology and Experiments"
+subtitle: "NSA-Flow v2 --- one functional, one parameter, one solver"
+author: "Research Draft"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      cache = FALSE, fig.width = 9, fig.height = 4.5)
+library(ggplot2); library(dplyr); library(tidyr); library(knitr); library(reticulate)
+Sys.setenv(PYTHONPATH = normalizePath(file.path("..")))
+sup  <- import("experiments.rmd_support")
+nsa  <- import("nsa_flow")
+np   <- import("numpy")
+skp  <- import("sklearn.preprocessing")
+dat  <- import("experiments.data")
+theme_set(theme_minimal(base_size = 11) +
+          theme(panel.grid.minor = element_blank(), legend.position = "bottom"))
+PAL <- c("#1f78b4", "#d9860a", "#33a02c", "#c0392b", "#7b3294", "#888888")
+# reticulate may or may not have already converted the pandas frame
+py_df <- function(x) {
+  if (inherits(x, "data.frame")) return(as.data.frame(x))
+  as.data.frame(py_to_r(x))
+}
+```
+
+# Abstract
+
+We study the problem of approximating a data matrix by a basis that is
+non-negative and *approximately* orthogonal, with the degree of approximation
+controlled by a single interpretable parameter. The contribution is a
+consolidation rather than an addition: one energy in place of a family of
+retraction schemes, one convex weight in place of several calibration constants,
+and one solver with a computable stationarity certificate. We give the
+functional that makes this well posed, show that its zero set under
+non-negativity is exactly a hard clustering of features, and report experiments
+that are deliberately unflattering --- including two places where the method
+does not beat the obvious baseline, and one widely-used preprocessing step that
+we show destroys three quarters of the achievable reconstruction.
+
+# Introduction
+
+A loading matrix that is non-negative and orthogonal is interpretable in a
+specific and useful sense: non-negativity means the entries are magnitudes, and
+orthogonality under non-negativity forces the columns onto *disjoint feature
+supports*, so each component names a set of features and no feature is shared.
+The difficulty is that both conditions together are very rigid. Exactly disjoint
+supports are a combinatorial object; insisting on them turns a smooth problem
+into a clustering problem and discards the data's ability to say that two
+features genuinely belong together.
+
+The method studied here relaxes one of the two. Non-negativity is kept as a hard
+constraint; orthogonality becomes an objective with weight $w \in [0,1]$, so that
+$w \to 0$ returns the unconstrained fit and $w \to 1$ returns the clustering.
+The interesting regime is the interior, and the practical claim is that the
+interior is reachable, cheap, and controlled by one number.
+
+Three things distinguish this version from the earlier retraction-based
+formulation. The orthogonality functional is *complete*, in a sense made precise
+in Section \@ref(functional). There is no factorisation in the solver loop. And
+the parameter needs no calibration, because both terms of the energy are
+dimensionless and share their endpoints.
+
+# Methods
+
+## The functional {#functional}
+
+For $Y \in \mathbb{R}^{p\times k}$ write $G = Y^{\mathsf T}Y / \operatorname{tr}(Y^{\mathsf T}Y)$
+for the trace-normalised Gram matrix. Two candidate measures of "how far from
+orthogonal" are
+
+$$D(Y) = \Big\lVert G - \tfrac{1}{k}I\Big\rVert_F^2, \qquad
+  C(Y) = \frac{1}{k(k-1)}\sum_{i \ne j}\cos^2(y_i, y_j),$$
+
+with $\cos(y_i,y_j) = \langle y_i,y_j\rangle/(\lVert y_i\rVert\lVert y_j\rVert)$.
+These differ in a way that matters. $D$ decomposes as
+
+$$D = \underbrace{\sum_{i\ne j} G_{ij}^2}_{\text{decorrelation}} \;+\;
+      \underbrace{\sum_i \big(G_{ii} - \tfrac1k\big)^2}_{\text{norm balance}},$$
+
+so $D = 0$ requires both mutual orthogonality **and** equal column norms --- that
+is orthoNORMality. $C = 0$ requires only orthogonality, at any norms. The
+earlier formulation used the decorrelation term alone, which is weaker than
+either: a zero column is orthogonal to everything, so that functional is
+minimised by rank collapse.
+
+Which of the three is right depends on what is being asked for, and the
+experiment below is the cleanest way to see it.
+
+```{r properties}
+props <- py_df(sup$properties_table())
+kable(props, digits = 5, col.names = c("case", "D (orthonormality)",
+      "d (v1, off-diagonal)", "C (orthogonality)"),
+      caption = "Each functional evaluated on the structures that separate them. Zero means 'this is what I am looking for'.")
+```
+
+Read the second and third rows. A basis with orthogonal columns of unequal norms,
+and a perfectly disjoint non-negative basis whose components differ in magnitude,
+are both exactly what this method exists to produce --- and $D$ charges them
+$0.69$ and $0.14$ respectively, because their column norms are not equal. Real
+components do differ in magnitude, so $D$ penalises the target. Read the fourth
+row for the opposite failure: the v1 functional scores a rank-collapsed matrix at
+exactly $0$. $C$ is zero on the first three and positive on the last two, which
+is the behaviour wanted.
+
+We therefore use $C$ when orthogonality is the goal, and note that the two
+coincide in the data-anchored setting of Section \@ref(anchors) because the
+reconstruction term already forces the norms to match.
+
+## What $w \to 1$ means
+
+The relaxation is not a convenience. For $Y \ge 0$, $Y^{\mathsf T}Y$ is diagonal
+if and only if the columns have pairwise disjoint supports, so the feasible set
+at $w = 1$ is a set of hard assignments of features to components --- equivalently
+orthogonal non-negative matrix factorisation, which is $k$-means on the features.
+That set is a union of lower-dimensional strata, connected only through
+degenerate configurations. Optimising over it directly is a combinatorial
+problem; the relaxation is what makes gradient information usable, and $w$ is how
+far toward that limit one chooses to go.
+
+## Two anchors {#anchors}
+
+The same orthogonality term supports two different problems, and the distinction
+turned out to matter more than anything else in this study.
+
+**Refinement.** Given a loading matrix $X_0$ that is already trusted, find a
+nearby non-negative, near-orthogonal one:
+
+$$\min_{Y \ge 0}\; (1-w)\,\frac{\lVert Y - X_0\rVert_F^2}{\lVert X_0\rVert_F^2}
+  \;+\; w\,\tilde D(Y).$$
+
+**Estimation.** Given the data $X \in \mathbb{R}^{n \times p}$, find the basis
+directly:
+
+$$\min_{V \ge 0}\; (1-w)\,\frac{\lVert X - XVV^{\mathsf T}\rVert_F^2}{\lVert X\rVert_F^2}
+  \;+\; w\,C(V).$$
+
+Scores are *determined* by projection, $U = XV$, rather than being a second free
+block, so $V$ remains the only variable: one smooth objective on a convex set,
+and an out-of-sample extension $X_{\text{new}}V$.
+
+Both terms are dimensionless and share their endpoints --- each is $0$ at its own
+ideal and exactly $1$ at a natural reference ($V = 0$ for the fidelity, rank one
+for $\tilde D$) --- which is why $w$ requires no calibration constants.
+
+A further convenience: $XVV^{\mathsf T}$ is an orthogonal projection exactly when
+$V^{\mathsf T}V = I$, so the reconstruction term already prefers orthonormal
+columns. Fidelity and orthogonality cooperate here rather than trading off.
+
+## Relaxing into non-negativity, rather than projecting into it
+
+The refinement form needs a non-negative starting point, and the obvious
+construction is wrong. Taking $\lvert L \rvert$ of a signed basis is not the
+projection onto $\{V \ge 0\}$ --- for an entry $-3$ it moves distance $6$ where
+the projection moves $3$ --- and it has no variational characterisation at all.
+More fundamentally, *no* one-shot map can work: a signed component encodes a
+contrast, and a single non-negative column cannot represent a contrast.
+
+We therefore follow a path. With $\mu$ increasing from $0$,
+
+$$\min_V\; E_w(V) \;+\; \mu\,\lVert \min(0,V)\rVert_F^2,$$
+
+each subproblem smooth, each warm-started from the last. At $\mu = 0$ the
+minimiser is the signed basis --- the global optimum of an easy problem --- and
+increasing $\mu$ deforms it continuously into the feasible set.
+
+## Solver
+
+Spectral projected gradient: Barzilai--Borwein step lengths with Armijo
+backtracking on the projected step. The gradient-mapping norm
+$\lVert Y^+ - Y\rVert/t$ is a computable stationarity certificate, and the solver
+reports which stopping rule fired rather than asserting convergence.
+
+No SVD, eigendecomposition or QR appears in the loop. For $p > n$ the Gram matrix
+is never formed either: every quantity follows from $XV$ and $X^{\mathsf T}(XV)$,
+giving $O(npk)$ per iteration.
+
+# Experiments
+
+All experiments run from the installed package. Real-data fits are
+cross-validated with every step --- scaling, covariate adjustment, basis,
+classifier --- estimated inside the training fold.
+
+```{r load-adni}
+adni <- dat$load_adni("right")
+X_raw <- py_to_r(adni[[1]]); meta <- py_to_r(adni[[2]])
+cov_mat <- cbind(1, meta$AGE, as.numeric(as.character(meta$SEX) == "M"))
+beta <- qr.solve(cov_mat, X_raw)
+Xa <- scale(X_raw - cov_mat %*% beta)
+cat(sprintf("ADNI right hemisphere: n = %d subjects, p = %d regions\n",
+            nrow(Xa), ncol(Xa)))
+```
+
+## The cost of a non-negative basis is not what it appears
+
+```{r abs-trap}
+at <- py_df(sup$abs_trap_table(np$array(Xa)))
+kable(at, digits = 4, caption = "Relative reconstruction error of a rank-5 basis, four ways.")
+```
+
+This is the single most consequential measurement in the study. Taking
+`abs()` of the PCA loadings --- a common way to obtain a non-negative basis, and
+the one the earlier version of this work used --- costs a factor of
+`r round(at$cost_vs_signed[2], 2)` in reconstruction error. The correct
+projection is better but still costs `r round(at$cost_vs_signed[3], 2)`.
+Fitting a non-negative basis *to the data* costs
+`r round(at$cost_vs_signed[4], 3)`.
+
+Non-negativity is therefore nearly free; what is expensive is obtaining it by
+mapping a signed basis instead of by fitting. Any accuracy penalty previously
+attributed to the non-negativity constraint on this data was mostly attributable
+to the `abs()`.
+
+## One parameter, monotone in what it controls
+
+```{r dial, fig.height=3.6}
+dl <- py_df(sup$w_dial_table(np$array(Xa)))
+kable(dl, digits = 5, caption = "Sweeping w in the data-anchored form.")
+dl %>%
+  select(w, `reconstruction error` = recon_err, `support overlap` = overlap,
+         `orthogonality defect C` = C) %>%
+  pivot_longer(-w) %>%
+  ggplot(aes(w, value)) + geom_line(colour = PAL[1], linewidth = 0.9) +
+  geom_point(colour = PAL[1], size = 1.6) +
+  facet_wrap(~name, scales = "free_y") +
+  labs(x = "w", y = NULL, title = "w trades reconstruction for disjointness, monotonically")
+```
+
+Over the whole range the orthogonality defect falls by roughly three orders of
+magnitude and support overlap by `r round(dl$overlap[1] / dl$overlap[nrow(dl)], 1)`
+times, at a reconstruction cost of
+`r sprintf("%.1f%%", 100 * (dl$recon_err[nrow(dl)] / dl$recon_err[1] - 1))`.
+Every setting converged on its own certificate.
+
+## The relaxation path, not the iteration budget, decides the answer
+
+```{r homotopy}
+hm <- py_df(sup$homotopy_table(np$array(Xa)))
+kable(hm, digits = 5, caption = "Final objective under coarse and fine mu schedules, at two iteration budgets.")
+```
+
+Refining the path from one stage to nine improves the attained objective by
+roughly a factor of two. Increasing the per-stage iteration budget twenty-fold
+changes it in the fourth decimal. This is worth stating plainly because the fine
+schedule costs about nine times as much work and is therefore tempting to trim:
+trimming it does not cost time, it costs the answer.
+
+## Reproducibility of the basis
+
+```{r spectrum}
+sp <- py_df(sup$adni_spectrum(6L))
+kable(sp, digits = 3, caption = "Leading eigenvalues of the analysis matrix and consecutive gap ratios.")
+```
+
+Component 1 is well separated; components 2--5 have gap ratios between
+`r sprintf("%.2f", min(sp$gap_ratio[2:5]))` and
+`r sprintf("%.2f", max(sp$gap_ratio[2:5]))`. By the Davis--Kahan theorem the error
+of an individual eigenvector scales with the inverse eigengap, so PCA's
+components 2--5 have poorly determined orientation on this data and should move
+between resamples.
+
+```{r repro}
+rp <- py_df(sup$reproducibility_table())
+kable(rp, digits = 5, caption = "Matched |cos| between bases fitted on independent folds; 10 fold pairs.")
+```
+
+Both constrained methods are more reproducible than PCA, and sparse PCA is the
+most reproducible of the three. We had earlier reported this as an advantage
+specific to the method; on the wider evidence that claim does not hold, and the
+honest statement is that a sparsity or disjointness constraint selects a stable
+representative from a degenerate subspace, whichever constraint is used.
+
+## Accuracy against interpretability on real data
+
+```{r frontier, fig.height=4.2}
+fr <- py_df(sup$adni_frontier(n_repeats = 2L))
+kable(fr, digits = 4, caption = "Cross-validated AUC and support overlap, ADNI, k = 5.")
+ggplot(fr, aes(overlap, auc, colour = family, shape = family)) +
+  geom_point(size = 2.6) + facet_wrap(~task, scales = "free_y") +
+  scale_colour_manual(values = PAL) +
+  labs(x = "support overlap (extra components per active feature; lower is more interpretable)",
+       y = "cross-validated AUC",
+       title = "The trade-off, read left-to-right: how much accuracy does disjointness cost?")
+```
+
+The honest reading: at matched overlap the method is level with sparse PCA and
+slightly below PCA, and it does not overtake either. What it does deliver is
+overlap well below what sparse PCA reaches at comparable accuracy, obtained from
+one parameter rather than a penalty that must be tuned per dataset.
+
+## Cost
+
+```{r scaling}
+sc <- py_df(sup$scaling_table())
+kable(sc, digits = 4, caption = "Seconds for a fixed iteration budget, forming the Gram matrix against matrix-free.")
+```
+
+The Gram matrix is $p \times p$, so it is the binding constraint long before the
+arithmetic is: at $p = 8000$ it alone is
+`r sprintf("%.1f GB", sc$gram_GB[nrow(sc)])`. Working from $X$ instead makes each
+iteration $O(npk)$ and removes that allocation entirely.
+
+# Discussion
+
+The consolidation is the contribution. One energy replaces a family of retraction
+schemes; one convex weight replaces several calibration constants; one solver
+carries a certificate and no factorisation. The functional is now the completed
+object rather than one half of it, and the choice between $D$ and $C$ is settled
+by what is being asked for rather than by convention.
+
+Two results deserve emphasis because they are corrections rather than additions.
+The `abs()` measurement shows that a widely-used preprocessing step, not the
+non-negativity constraint, accounts for most of the reconstruction penalty
+usually attributed to non-negative methods on this kind of data. And the homotopy
+result shows that for this objective the relaxation schedule is part of the
+method, not a tuning detail: a coarse schedule converges just as tightly to a
+materially worse answer.
+
+# Limitations
+
+We state these as measured, not as caveats.
+
+**It does not improve prediction.** Across ADNI, a Parkinson's cohort with a
+biomarker-defined label, a high-dimensional expression dataset and several public
+benchmarks, the method is level with sparse PCA and slightly below PCA at matched
+interpretability. It is not a better predictor and should not be presented as one.
+
+**The reproducibility advantage is not structural.** It holds against PCA on this
+data and on some others, but sparse PCA is frequently better, and on two of six
+datasets tested the method was clearly worse.
+
+**Small $p$ relative to $k$ is unfavourable.** Near-disjoint supports need room:
+with $k$ components in $p$ features each gets about $p/k$, and where that is small
+the constraint is costly. The largest losses we measured were at $p = 13$ and
+$p = 66$.
+
+**The objective is non-convex.** The reconstruction term is quartic in $V$, so the
+solver returns a stationary point. The homotopy is what makes the outcome
+reproducible in practice, and its schedule must not be trimmed.
+
+**A signed lifting does not resolve the trade-off.** Writing $V = V^+ - V^-$
+restores a signed basis's reconstruction exactly, confirming the non-negative
+ceiling is representational. But it reproduces PCA's density along with PCA's
+accuracy, and once forced to be sparse it does worse than the plain form,
+because $2k$ disjoint parts need twice the room.
+
+# Appendix: environment
+
+```{r env}
+cat(sprintf("nsa_flow %s\n", nsa$`__version__`))
+cat(sprintf("torch %s | numpy %s\n", import("torch")$`__version__`, np$`__version__`))
+cat(R.version.string, "\n")
+```
