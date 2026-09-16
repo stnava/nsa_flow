@@ -31,9 +31,11 @@ from .energy import (
 )
 from .project import project_nonneg, project_scaled_stiefel, polar_factor
 from .solve import nsa_flow, NSAResult
+from .reconstruct import (nsa_flow_data, reconstruction_fidelity,
+                          grad_reconstruction_fidelity)
 from .layers import NSAFlowLinear, NSAFlowConv2d, NSAFlowLayer
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 __all__ = [
     # energy
@@ -45,6 +47,7 @@ __all__ = [
     "project_nonneg", "project_scaled_stiefel", "polar_factor",
     # solver
     "nsa_flow", "NSAResult",
+    "nsa_flow_data", "reconstruction_fidelity", "grad_reconstruction_fidelity",
     # layers
     "NSAFlowLinear", "NSAFlowConv2d", "NSAFlowLayer",
     "__version__",

@@ -5,7 +5,8 @@ import math
 import pytest
 import torch
 
-from nsa_flow import grad_energy, nsa_flow
+from nsa_flow import (grad_energy, grad_reconstruction_fidelity, nsa_flow,
+                      nsa_flow_data, reconstruction_fidelity)
 
 F64 = torch.float64
 
@@ -260,3 +261,57 @@ def test_explicit_tol_is_respected():
     tight = nsa_flow(X, w=0.7, tol=1e-12)
     assert loose.iters < tight.iters
     assert loose.grad_map > tight.grad_map
+
+
+# ---------------------------------------------------------------------------
+# Data-anchored variant: min (1-w)||X - XVV'||^2/||X||^2 + w Dtilde(V), V >= 0
+# ---------------------------------------------------------------------------
+
+def test_reconstruction_fidelity_and_gradient_match_the_direct_definition():
+    """Closed forms agree with ||X - XVV'||^2 and its autograd gradient."""
+    torch.manual_seed(0)
+    X = torch.rand(50, 12, dtype=torch.float64)
+    S, c = X.T @ X, X.pow(2).sum()
+    V = torch.rand(12, 4, dtype=torch.float64, requires_grad=True)
+    direct = (X - X @ V @ V.T).pow(2).sum() / c
+    assert abs(float(reconstruction_fidelity(V.detach(), S, c))
+                - float(direct.detach())) < 1e-12
+    direct.backward()
+    closed = grad_reconstruction_fidelity(V.detach(), S, c)
+    assert (V.grad - closed).abs().max() < 1e-10
+
+
+def test_data_anchored_beats_abs_pca_at_reconstruction():
+    """The point of the variant: fitted non-negativity, not abs() of a signed basis."""
+    torch.manual_seed(0)
+    X = torch.rand(200, 20, dtype=torch.float64)
+    X = X - X.mean(0)
+    S, c = X.T @ X, X.pow(2).sum()
+    _, _, Vh = torch.linalg.svd(X, full_matrices=False)
+    abs_pca = Vh[:5].T.abs()
+    fitted = nsa_flow_data(X, k=5, w=0.0).Y
+    assert (reconstruction_fidelity(fitted, S, c)
+            < reconstruction_fidelity(abs_pca, S, c))
+
+
+def test_data_anchored_reports_honest_convergence_and_monotone_defect():
+    torch.manual_seed(1)
+    X = torch.rand(120, 15, dtype=torch.float64)
+    prev = float("inf")
+    for w in (0.0, 0.5, 0.9, 0.99):
+        r = nsa_flow_data(X, k=4, w=w)
+        assert r.converged and r.stop_reason != "max_iter"
+        assert r.raw_defect <= prev + 1e-12      # more w, less defect
+        prev = r.raw_defect
+
+
+def test_data_anchored_rejects_bad_input():
+    X = torch.rand(30, 6, dtype=torch.float64)
+    with pytest.raises(ValueError):
+        nsa_flow_data(X, k=3, w=1.5)
+    with pytest.raises(ValueError):
+        nsa_flow_data(torch.zeros(30, 6, dtype=torch.float64), k=3)
+    with pytest.raises(ValueError):
+        nsa_flow_data(X)                          # neither k nor init
+    with pytest.raises(ValueError):
+        nsa_flow_data(X.unsqueeze(0), k=3)        # 3-D
