@@ -1296,7 +1296,17 @@ colnames(X) <- regions
 #############################
 
 library(readr)
-adnifn="../../multidisorder/data/ppmiadni_filtered.csv"
+## Original path was relative to the ANTsR docs tree; resolve it from an
+## environment variable so the document is portable, falling back to the
+## known location.  The chunk below is guarded by file.exists(), which means a
+## missing file silently skips the section and makes later chunks fail with an
+## undefined object -- so report it instead.
+adnifn <- Sys.getenv("NSA_ADNI_THICKNESS",
+  "~/Library/Mobile Documents/com~apple~CloudDocs/code/multidisorder/data/ppmiadni_filtered.csv")
+adnifn <- path.expand(adnifn)
+if (!file.exists(adnifn))
+  stop("ADNI thickness table not found at ", adnifn,
+       " -- set NSA_ADNI_THICKNESS to its location.")
 use_adni=TRUE
 if ( file.exists(adnifn) ) {
     use_adni=TRUE

@@ -162,3 +162,8 @@ paper/*.fls
 paper/*.fdb_latexmk
 paper/nsaflow.pdf
 experiments/cache/
+
+# knitted paper artefacts (regenerate with Rscript -e 'rmarkdown::render(...)')
+paper/nsa_flow.knit.md
+paper/nsa_flow.utf8.md
+paper/*_files/
