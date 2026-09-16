@@ -27,6 +27,7 @@ import time
 
 import torch
 
+from .angle import angle_defect, grad_angle_defect
 from .energy import stiefel_defect, stiefel_defect_normalised, effective_rank
 from .project import project_nonneg
 from .solve import NSAResult
@@ -146,8 +147,20 @@ def relax_into_nonneg(S, c, k, w, mus=None, max_iter=600, tol=1e-10, sigma=1e-4,
     return V
 
 
-def nsa_flow_data(X, k=None, w=0.5, *, init="relax", max_iter=5000, tol=None,
-                  sigma=1e-4, dtype=None, device=None, verbose=False,
+def _orth_terms(orth, k):
+    """Return (value, grad) for the chosen orthogonality functional."""
+    if orth == "D":                      # orthoNORMality: ||G - I/k||^2, scaled
+        from .energy import grad_stiefel_defect
+        inv = 1.0 / (1.0 - 1.0 / k) if k > 1 else 0.0
+        return (lambda V: stiefel_defect_normalised(V),
+                lambda V: inv * grad_stiefel_defect(V))
+    if orth == "C":                      # orthogonality only: mean cos^2
+        return angle_defect, grad_angle_defect
+    raise ValueError(f"orth must be 'D' or 'C'; got {orth!r}")
+
+
+def nsa_flow_data(X, k=None, w=0.5, *, init="relax", orth="C", max_iter=5000,
+                  tol=None, sigma=1e-4, dtype=None, device=None, verbose=False,
                   keep_trace=False):
     """Fit a non-negative, near-orthonormal basis ``V`` reconstructing ``X``.
 
@@ -209,18 +222,17 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="relax", max_iter=5000, tol=None,
     if V.shape != (p, k):
         raise ValueError(f"init shape {tuple(V.shape)} != [p, k] = {(p, k)}")
 
-    inv_k = 1.0 / (1.0 - 1.0 / k) if k > 1 else 0.0
+    orth_val, orth_grad = _orth_terms(orth, k)
 
     def energy_of(Vv):
         f = reconstruction_fidelity(Vv, S, c, trS)
-        d = stiefel_defect_normalised(Vv)
+        d = orth_val(Vv)
         return (1.0 - w) * f + w * d, f, d
 
     def grad_of(Vv):
-        from .energy import grad_stiefel_defect
         g = (1.0 - w) * grad_reconstruction_fidelity(Vv, S, c)
         if k > 1 and w != 0.0:
-            g = g + (w * inv_k) * grad_stiefel_defect(Vv)
+            g = g + w * orth_grad(Vv)
         return g
 
     V = project_nonneg(V)
@@ -271,6 +283,7 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="relax", max_iter=5000, tol=None,
     return NSAResult(
         Y=V, target=None, w=float(w), energy=E, fidelity=float(F),
         defect=float(D), raw_defect=float(stiefel_defect(V)),
+        angle_defect=float(angle_defect(V)), orth=orth,
         effective_rank=float(effective_rank(V)),
         scale_ratio=float("nan"), iters=it, converged=stop != "max_iter",
         stop_reason=stop, grad_map=float(gmap), seconds=time.time() - t0,

@@ -29,13 +29,15 @@ from .energy import (
     procrustes_rotation,
     aligned_target,
 )
+from .angle import angle_defect, cosine_matrix, grad_angle_defect
 from .project import project_nonneg, project_scaled_stiefel, polar_factor
 from .solve import nsa_flow, NSAResult
 from .reconstruct import (nsa_flow_data, reconstruction_fidelity,
-                          grad_reconstruction_fidelity)
+                          grad_reconstruction_fidelity, relax_into_nonneg)
+from .signed import nsa_flow_signed
 from .layers import NSAFlowLinear, NSAFlowConv2d, NSAFlowLayer
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 
 __all__ = [
     # energy
@@ -43,11 +45,14 @@ __all__ = [
     "fidelity", "grad_fidelity", "energy", "grad_energy",
     "effective_rank", "defect_floor",
     "procrustes_rotation", "aligned_target",
+    # orthogonality (as against orthonormality)
+    "angle_defect", "cosine_matrix", "grad_angle_defect",
     # projections
     "project_nonneg", "project_scaled_stiefel", "polar_factor",
     # solver
     "nsa_flow", "NSAResult",
     "nsa_flow_data", "reconstruction_fidelity", "grad_reconstruction_fidelity",
+    "relax_into_nonneg", "nsa_flow_signed",
     # layers
     "NSAFlowLinear", "NSAFlowConv2d", "NSAFlowLayer",
     "__version__",

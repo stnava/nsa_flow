@@ -41,6 +41,7 @@ import time
 
 import torch
 
+from .angle import angle_defect, grad_angle_defect
 from .energy import (grad_stiefel_defect, stiefel_defect,
                      stiefel_defect_normalised, effective_rank)
 from .project import project_nonneg
@@ -56,9 +57,9 @@ def _split(W):
     return W[..., :k], W[..., k:]
 
 
-def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", max_iter=5000, tol=None,
-                    sigma=1e-4, dtype=None, device=None, verbose=False,
-                    keep_trace=False):
+def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="C", lobe=0.0,
+                    max_iter=5000, tol=None, sigma=1e-4, dtype=None, device=None,
+                    verbose=False, keep_trace=False):
     """Fit ``V = V+ - V-`` with ``[V+|V-] >= 0`` near-disjoint, reconstructing ``X``.
 
     Returns an ``NSAResult`` whose ``Y`` is the signed ``V`` of shape ``[p, k]``;
@@ -107,19 +108,32 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", max_iter=5000, tol=None,
         raise ValueError(f"init shape {tuple(W.shape)} != [p, 2k] = {(p, 2 * k)}")
 
     inv_k = 1.0 / (1.0 - 1.0 / (2 * k))
+    if orth == "D":
+        o_val = stiefel_defect_normalised
+        def o_grad(Wv):
+            return inv_k * grad_stiefel_defect(Wv)
+    elif orth == "C":
+        o_val, o_grad = angle_defect, grad_angle_defect
+    else:
+        raise ValueError(f"orth must be 'D' or 'C'; got {orth!r}")
 
     def parts_energy(Wv):
         Vp, Vm = _split(Wv)
         f = reconstruction_fidelity(Vp - Vm, S, c, c)
-        d = stiefel_defect_normalised(Wv)
-        return (1.0 - w) * f + w * d, f, d
+        d = o_val(Wv)
+        e = (1.0 - w) * f + w * d
+        if lobe:
+            e = e + lobe * (Vp * Vm).sum() / c
+        return e, f, d
 
     def parts_grad(Wv):
         Vp, Vm = _split(Wv)
         gV = (1.0 - w) * grad_reconstruction_fidelity(Vp - Vm, S, c)
         g = torch.cat([gV, -gV], dim=-1)
         if w != 0.0:
-            g = g + (w * inv_k) * grad_stiefel_defect(Wv)
+            g = g + w * o_grad(Wv)
+        if lobe:
+            g = g + (lobe / c) * torch.cat([Vm, Vp], dim=-1)
         return g
 
     W = project_nonneg(W)
