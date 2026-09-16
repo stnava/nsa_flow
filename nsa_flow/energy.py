@@ -1,109 +1,173 @@
+"""NSA-Flow energy: a scale-invariant Stiefel-approximation term plus data fidelity.
+
+All functions accept ``[p, k]`` or batched ``[B, p, k]`` tensors and are autograd
+compatible, but closed-form gradients are provided because the solver does not
+need a tape.
+
+Notation
+--------
+``S = Y'Y`` (Gram), ``t = tr S = ||Y||_F^2``, ``G = S / t`` (normalised Gram,
+``tr G = 1``), ``lambda_i`` the eigenvalues of ``G``.
+"""
 import torch
 
-def invariant_orthogonality_defect(V):
-    """Scale-invariant orthogonality defect. Handles batched [B, p, k] or [p, k]."""
-    if V.ndim == 3:
-        # V: [B, p, k]
-        norms2 = torch.sum(V**2, dim=(1, 2))
-        S = V.mT @ V
-        diagS = torch.diagonal(S, dim1=-2, dim2=-1)
-        off_f2 = torch.sum(S**2, dim=(1, 2)) - torch.sum(diagS**2, dim=1)
-        defects = off_f2 / (norms2**2).clamp_min(1e-12)
-        return torch.mean(torch.where(norms2 <= 1e-12, torch.zeros_like(defects), defects))
+__all__ = [
+    "gram", "stiefel_defect", "stiefel_defect_normalised", "grad_stiefel_defect",
+    "fidelity", "grad_fidelity", "energy", "grad_energy",
+    "effective_rank", "defect_floor",
+]
 
-    # Original 2D case
-    norm2 = torch.sum(V ** 2)
-    if norm2 <= 1e-12:
-        return torch.tensor(0.0, device=V.device, dtype=V.dtype)
-    S = V.T @ V
-    diagS = torch.diag(S)
-    off_f2 = torch.sum(S * S) - torch.sum(diagS ** 2)
-    return off_f2 / (norm2 ** 2).clamp_min(1e-24)
 
-def defect_fast(V):
-    return invariant_orthogonality_defect(V)
+def gram(Y):
+    return Y.transpose(-2, -1) @ Y
 
-def fidelity_basic(Y, X):
-    """||Y - X||²"""
-    return 0.5 * torch.sum((Y - X) ** 2)
 
-def fidelity_scaled(Y, X):
-    """||Y - X||² / ||X||². Handles batched [B, p, k] or [p, k]."""
-    if Y.ndim == 3:
-        num = torch.sum((Y - X)**2, dim=(1, 2))
-        den = torch.sum(X**2, dim=(1, 2)).clamp_min(1e-12)
-        return 0.5 * torch.mean(num / den)
-    denom = torch.sum(X ** 2).clamp_min(1e-12)
-    return 0.5 * torch.sum((Y - X) ** 2) / denom
+def _trace(S):
+    return S.diagonal(dim1=-2, dim2=-1).sum(-1)
 
-def fidelity_symmetric(Y, X):
-    """||Y - X||² / (||X||² + ||Y||²). Handles batched [B, p, k] or [p, k]."""
-    if Y.ndim == 3:
-        num = torch.sum((Y - X)**2, dim=(1, 2))
-        den = 0.5 * (torch.sum(X**2, dim=(1, 2)) + torch.sum(Y**2, dim=(1, 2))).clamp_min(1e-12)
-        return 0.5 * torch.mean(num / den)
-    denom = 0.5 * (torch.sum(X ** 2) + torch.sum(Y ** 2)).clamp_min(1e-12)
-    return 0.5 * torch.sum((Y - X) ** 2) / denom
 
-def energy_fidelity(M, Xc, w):
-    """Smooth fidelity energy used for autograd (no prox)."""
-    n = Xc.shape[0]
-    return -0.5 * w * torch.sum((Xc @ M) ** 2) / n
+def stiefel_defect(Y, eps=0.0):
+    r"""``D(Y) = ||G - I/k||_F^2 = ||Y'Y||_F^2 / ||Y||_F^4 - 1/k``.
 
-def compute_energy(
-    Y, X0, w=0.5,
-    fidelity_type="scale_invariant",
-    orth_type="scale_invariant",
-    fid_eta=1.0,
-    c_orth=1.0,
-    track_grad=True,
-    return_dict=False,
-):
+    Scale invariant, invariant under ``Y -> UYV`` for orthogonal ``U, V``, and
+    zero exactly on ``R_{>0} . St(p, k)``.  Bounds: ``0 <= D <= 1 - 1/k``, with
+    the upper bound attained only at rank one.  If ``rank(Y) = r < k`` then
+    ``D >= 1/r - 1/k``, so rank collapse is penalised rather than rewarded.
+
+    Equivalently ``D = k Var(lambda_i) = 1/EffectiveRank - 1/k``, and it splits as
+
+        D = sum_{i != j} G_ij^2  +  sum_i (G_ii - 1/k)^2
+            \_______________/      \___________________/
+              decorrelation            norm balance
+
+    The first term alone is the older "invariant orthogonality defect"; dropping
+    the second is what made that functional blind to conditioning, sensitive to
+    the choice of basis, and minimised by rank-deficient matrices.
+
+    A consequence used for interpretability: since the first sum is at most ``D``,
+
+        max_{i != j} |<y_i, y_j>|  <=  sqrt(D) . ||Y||_F^2
+
+    so small ``D`` gives quantitatively near-disjoint column supports when
+    ``Y >= 0``.  Computed as ``||G - I/k||_F^2`` directly, which is manifestly
+    non-negative and avoids the cancellation in ``||G||_F^2 - 1/k``.
     """
-    Centralized energy computation for NSA-Flow.
-    Combines fidelity and orthogonality losses into a total energy value.
+    k = Y.shape[-1]
+    S = gram(Y)
+    t = _trace(S)
+    if eps:
+        t = t.clamp_min(eps)
+    G = S / t.reshape(*t.shape, 1, 1)
+    I_k = torch.eye(k, dtype=Y.dtype, device=Y.device) / k
+    return (G - I_k).pow(2).sum((-2, -1))
+
+
+def defect_floor(p, k):
+    """Greatest lower bound of ``D`` on ``R^{p x k}``: ``0`` if ``k <= p`` else ``1/p - 1/k``."""
+    return 0.0 if k <= p else 1.0 / p - 1.0 / k
+
+
+def stiefel_defect_normalised(Y, eps=0.0):
+    """``D`` rescaled to ``[0, 1]`` so that ``w`` is a dimensionless convex weight.
+
+    For ``k == 1`` the defect is identically zero and this returns zero.
     """
-    w = float(w)
-    fid_eta = float(fid_eta)
-    c_orth = float(c_orth)
+    k = Y.shape[-1]
+    if k == 1:
+        return torch.zeros(Y.shape[:-2], dtype=Y.dtype, device=Y.device)
+    return stiefel_defect(Y, eps=eps) / (1.0 - 1.0 / k)
 
-    # --- Fidelity term ---
-    if fidelity_type == "basic":
-        fidelity = fidelity_basic(Y, X0) * fid_eta
-    elif fidelity_type == "scale_invariant":
-        fidelity = fidelity_scaled(Y, X0) * fid_eta
-    elif fidelity_type == "symmetric":
-        fidelity = fidelity_symmetric(Y, X0) * fid_eta
-    else:
-        raise ValueError(f"Unknown fidelity_type: {fidelity_type}")
 
-    # --- Orthogonality term ---
-    if orth_type == "basic":
-        if Y.ndim == 3:
-            B, p, k = Y.shape
-            I = torch.eye(k, device=Y.device, dtype=Y.dtype).unsqueeze(0)
-            orth = c_orth * torch.mean((Y.mT @ Y - I) ** 2)
-        else:
-            I = torch.eye(Y.shape[1], device=Y.device, dtype=Y.dtype)
-            orth = c_orth * torch.mean((Y.T @ Y - I) ** 2)
-    elif orth_type == "scale_invariant":
-        orth = c_orth * defect_fast(Y)
-    else:
-        raise ValueError(f"Unknown orth_type: {orth_type}")
+def grad_stiefel_defect(Y, eps=0.0):
+    r"""``grad D = (4 / t^2) [ Y S - (N / t) Y ]`` with ``N = ||S||_F^2``.
 
-    # --- Total energy ---
-    total = fidelity * (1 - w) + orth * w
+    Satisfies ``<grad D, Y> = 0`` (Euler, ``D`` is degree-0 homogeneous), so the
+    defect term cannot alter ``||Y||_F``; and ``||grad D||_F <= 8 / ||Y||_F``.
+    """
+    S = gram(Y)
+    t = _trace(S)
+    if eps:
+        t = t.clamp_min(eps)
+    N = (S * S).sum((-2, -1))
+    t_ = t.reshape(*t.shape, 1, 1)
+    N_ = N.reshape(*N.shape, 1, 1)
+    return (4.0 / t_.pow(2)) * (Y @ S - (N_ / t_) * Y)
 
-    if not track_grad:
-        fidelity = fidelity.detach()
-        orth = orth.detach()
-        total = total.detach()
 
-    if return_dict:
-        return {
-            "fidelity": fidelity,
-            "orthogonality": orth,
-            "total": total,
-        }
+def effective_rank(Y):
+    """Participation ratio ``1 / sum(lambda_i^2) = k / (k D + 1)``; in ``[1, k]``."""
+    k = Y.shape[-1]
+    return k / (k * stiefel_defect(Y) + 1.0)
 
-    return total
+
+def fidelity(Y, X0, denom=None):
+    """``F(Y) = ||Y - X0||_F^2 / ||X0||_F^2`` -- dimensionless, zero at ``Y = X0``."""
+    d = _trace(gram(X0)) if denom is None else denom
+    return (Y - X0).pow(2).sum((-2, -1)) / d
+
+
+def grad_fidelity(Y, X0, denom=None):
+    """``grad F = 2 (Y - X0) / ||X0||_F^2``."""
+    d = _trace(gram(X0)) if denom is None else denom
+    d_ = d.reshape(*d.shape, 1, 1) if torch.is_tensor(d) else d
+    return 2.0 * (Y - X0) / d_
+
+
+def energy(Y, X0, w=0.5, denom=None, return_parts=False):
+    r"""``E_w(Y) = (1 - w) F(Y) + w Dtilde(Y)``.
+
+    Both terms are dimensionless and ``O(1)``, so ``w in [0, 1]`` is a genuine
+    convex weight requiring no data-dependent calibration constants.
+    """
+    f = fidelity(Y, X0, denom=denom)
+    d = stiefel_defect_normalised(Y)
+    tot = (1.0 - w) * f + w * d
+    if return_parts:
+        return tot, f, d
+    return tot
+
+
+def grad_energy(Y, X0, w=0.5, denom=None):
+    k = Y.shape[-1]
+    g = (1.0 - w) * grad_fidelity(Y, X0, denom=denom)
+    if k > 1 and w != 0.0:
+        g = g + (w / (1.0 - 1.0 / k)) * grad_stiefel_defect(Y)
+    return g
+
+
+def value_and_grad(Y, X0, w=0.5, denom=None, inv_k=None, eye_k=None):
+    r"""Fused ``(E_w, F, Dtilde, grad E_w)`` sharing a single Gram product.
+
+    ``energy`` and ``grad_energy`` each form ``Y'Y``; computing them together
+    halves the work and, more importantly for small matrices, roughly halves the
+    number of kernel launches.  ``inv_k`` and ``eye_k`` may be supplied by the
+    caller to hoist per-call allocations out of a loop.
+    """
+    k = Y.shape[-1]
+    S = gram(Y)
+    t = _trace(S)
+    t_ = t.reshape(*t.shape, 1, 1)
+    G = S / t_
+    if eye_k is None:
+        eye_k = torch.eye(k, dtype=Y.dtype, device=Y.device)
+    Gc = G - eye_k / k
+    D = Gc.pow(2).sum((-2, -1))
+
+    d = _trace(gram(X0)) if denom is None else denom
+    d_ = d.reshape(*d.shape, 1, 1) if torch.is_tensor(d) else d
+    R = Y - X0
+    F = R.pow(2).sum((-2, -1)) / d
+
+    if k == 1:
+        Dn = torch.zeros_like(F)
+        Etot = (1.0 - w) * F
+        grad = (1.0 - w) * (2.0 * R / d_)
+        return Etot, F, Dn, grad
+
+    scale = 1.0 / (1.0 - 1.0 / k) if inv_k is None else inv_k
+    Dn = D * scale
+    Etot = (1.0 - w) * F + w * Dn
+    # grad D = (4/t^2)[Y S - (N/t) Y] = (4/t)[Y G - (||G||_F^2) Y]
+    N2 = (G * G).sum((-2, -1)).reshape(*t.shape, 1, 1)
+    grad = (1.0 - w) * (2.0 * R / d_) + (w * scale) * (4.0 / t_) * (Y @ G - N2 * Y)
+    return Etot, F, Dn, grad

@@ -1,80 +1,48 @@
-from .utils import (
-    safe_to_tensor,
-    apply_nonnegativity,
-    traces_to_dataframe,
-    plot_nsa_trace,
-    run_single_experiment,
-    evaluate,
-    plot_evaluation_summary,
-)
+"""NSA-Flow: Non-negative Stiefel-Approximating Flow.
+
+A single calibration-free energy
+
+    E_w(Y) = (1 - w) ||Y - X0||_F^2 / ||X0||_F^2  +  w Dtilde(Y),   Y >= 0
+
+where ``Dtilde = D / (1 - 1/k)`` and ``D(Y) = ||Y'Y||_F^2 / ||Y||_F^4 - 1/k`` is
+the squared distance from the normalised Gram matrix of ``Y`` to isotropy.
+``D`` vanishes exactly on the scaled Stiefel manifold, equals
+``k Var(lambda) = 1/EffectiveRank - 1/k``, and penalises rank collapse with the
+floor ``D >= 1/r - 1/k`` at rank ``r``.
+
+``w`` is a genuine convex weight: ``w = 0`` gives ``max(0, X0)`` and ``w = 1``
+gives orthogonal columns, which under non-negativity means disjoint supports --
+a hard clustering of the ``p`` features.  The solver is spectral projected
+gradient; ``continuation`` traces the path in ``w``.
+"""
 from .energy import (
-    invariant_orthogonality_defect,
-    defect_fast,
-    fidelity_basic,
-    fidelity_scaled,
-    fidelity_symmetric,
-    compute_energy,
-    energy_fidelity,
+    gram,
+    stiefel_defect,
+    stiefel_defect_normalised,
+    grad_stiefel_defect,
+    fidelity,
+    grad_fidelity,
+    energy,
+    grad_energy,
+    effective_rank,
+    defect_floor,
 )
-from .retraction import (
-    inv_sqrt_sym_adaptive,
-    nsa_flow_retract_newton_schulz,
-    nsa_flow_retract_cayley,
-    nsa_flow_retract_auto,
-)
-from .optimizer import (
-    get_torch_optimizer,
-    get_lr_estimation_strategies,
-    estimate_learning_rate_for_nsa_flow,
-)
-from .flow import (
-    nsa_flow,
-    nsa_flow_autograd,
-    nsa_flow_orth,
-)
-from .layers import (
-    SimpleMLP,
-    NSAFlowLayer,
-    NSAFlowLinear,
-    NSAFlowConv2d,
-)
-from . import legacy
+from .project import project_nonneg, project_scaled_stiefel, polar_factor
+from .solve import nsa_flow, NSAResult
+from .layers import NSAFlowLinear, NSAFlowConv2d, NSAFlowLayer
+
+__version__ = "2.0.0"
 
 __all__ = [
-    # utils
-    "safe_to_tensor",
-    "apply_nonnegativity",
-    "traces_to_dataframe",
-    "plot_nsa_trace",
-    "run_single_experiment",
-    "evaluate",
-    "plot_evaluation_summary",
     # energy
-    "invariant_orthogonality_defect",
-    "defect_fast",
-    "fidelity_basic",
-    "fidelity_scaled",
-    "fidelity_symmetric",
-    "compute_energy",
-    "energy_fidelity",
-    # retraction
-    "inv_sqrt_sym_adaptive",
-    "nsa_flow_retract_newton_schulz",
-    "nsa_flow_retract_cayley",
-    "nsa_flow_retract_auto",
-    # optimizer
-    "get_torch_optimizer",
-    "get_lr_estimation_strategies",
-    "estimate_learning_rate_for_nsa_flow",
-    # flow
-    "nsa_flow",
-    "nsa_flow_autograd",
-    "nsa_flow_orth",
+    "gram", "stiefel_defect", "stiefel_defect_normalised", "grad_stiefel_defect",
+    "fidelity", "grad_fidelity", "energy", "grad_energy",
+    "effective_rank", "defect_floor",
+    # projections
+    "project_nonneg", "project_scaled_stiefel", "polar_factor",
+    # solver
+    "nsa_flow", "NSAResult",
     # layers
-    "SimpleMLP",
-    "NSAFlowLayer",
-    "NSAFlowLinear",
-    "NSAFlowConv2d",
-    # legacy
-    "legacy",
+    "NSAFlowLinear", "NSAFlowConv2d", "NSAFlowLayer",
+    "__version__",
 ]

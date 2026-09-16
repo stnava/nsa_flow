@@ -1,231 +1,159 @@
+"""Torch layers built on the NSA-Flow energy.
+
+Two routes are offered, both theoretically clean:
+
+*penalty* (preferred) -- keep a standard layer and add ``w * layer.defect()`` to
+the task loss.  ``defect()`` is ``O(p k^2)``, needs no factorisation, and its
+gradient is exact, so this is a plain regulariser with no reparameterisation.
+
+*parameterisation* -- set ``w > 0`` and the effective weight becomes
+``(1 - w) W + w P(W)`` where ``P`` is the Euclidean projection onto the scaled
+Stiefel manifold.  Because ``P(W)`` carries a scale matched to ``W`` (it is
+``(sum sigma_i / k) U V'``), ``w`` is a true blend fraction here, unlike a blend
+against a unit-norm polar factor whose effective weight drifts with ``||W||``.
+
+Non-negativity, when requested, uses ``softplus`` rather than a hard clamp: the
+clamp is not surjective onto the positive orthant, so its Jacobian drops rank
+and stationary points of the reparameterised problem need not be stationary for
+the constrained one.
+"""
 import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .retraction import nsa_flow_retract_auto
-from .energy import fidelity_scaled, invariant_orthogonality_defect
+from .energy import stiefel_defect_normalised
+from .project import project_scaled_stiefel
 
-class SimpleMLP(nn.Module):
-    def __init__(self, in_dim, out_dim, hidden):
+__all__ = ["NSAFlowLinear", "NSAFlowConv2d", "NSAFlowLayer"]
+
+
+def _nonneg(W, mode):
+    if mode in (None, False, "none"):
+        return W
+    if mode in (True, "softplus", "soft"):
+        return F.softplus(W)
+    if mode == "hard":
+        return W.clamp_min(0.0)
+    raise ValueError(f"nonneg must be one of None/'none', 'softplus', 'hard'; got {mode!r}")
+
+
+class _NSAMixin:
+    """Shared effective-weight logic.  Subclasses provide ``_pk_view``."""
+
+    def _effective(self, W):
+        if self.w > 0.0:
+            M = self._pk_view(W)
+            M = (1.0 - self.w) * M + self.w * project_scaled_stiefel(M)
+            W = self._pk_unview(M, W)
+        return _nonneg(W, self.nonneg)
+
+    def defect(self):
+        """Normalised Stiefel defect of the effective weight, in ``[0, 1]``."""
+        return stiefel_defect_normalised(self._pk_view(self.effective_weight()))
+
+
+class NSAFlowLinear(_NSAMixin, nn.Module):
+    """``nn.Linear`` whose ``out_features`` filters are driven toward orthogonality.
+
+    Weight layout matches ``nn.Linear`` (``[out_features, in_features]``), so
+    ``state_dict`` is interchangeable.  Orthogonality is measured over the
+    ``out_features`` filters, i.e. on ``W'`` viewed as ``[p, k] = [in, out]``.
+    """
+
+    def __init__(self, in_features, out_features, bias=True, w=0.0, nonneg=None):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, out_dim)
-        )
-    def forward(self, x): 
-        return self.net(x)
-
-class NSAFlowLayer(nn.Module):
-    """
-    Unified NSA Flow layer:
-      - Optional residual MLP transform
-      - Adaptive retraction blend (learnable w_retract)
-      - Optional nonnegativity enforcement ('none', 'soft', 'hard')
-      - Can compute fidelity + orthogonality losses if target provided
-    """
-    def __init__(
-        self,
-        k,
-        hidden=64,
-        w_retract=0.5,
-        retraction_type="soft_polar",
-        apply_nonneg="none",
-        residual=True,
-        use_transform=True,
-    ):
-        super().__init__()
-        self.k = k
-        self.hidden = hidden
-        self.retraction_type = retraction_type
-        self.apply_nonneg = apply_nonneg
-        self.residual = residual
-        self.use_transform = use_transform
-
-        if use_transform:
-            self.transform_net = nn.Sequential(
-                nn.Linear(k, hidden),
-                nn.ReLU(),
-                nn.Linear(hidden, k)
-            )
-        else:
-            self.transform_net = None
-
-        w_init = float(w_retract)
-        w_init = max(1e-6, min(1.0 - 1e-6, w_init))
-        logit_w = math.log(w_init / (1.0 - w_init))
-        self.w_retract = nn.Parameter(torch.tensor(logit_w))
-        self.alpha = nn.Parameter(torch.tensor(0.0))
-
-    def _apply_nonneg(self, Y):
-        if self.apply_nonneg == "soft":
-            return F.softplus(Y)
-        elif self.apply_nonneg == "relu":
-            return F.relu(Y)
-        elif self.apply_nonneg == "hard":
-            return torch.clamp(Y, min=0.0)
-        return Y
-
-    def forward(self, Y, target=None):
-        """
-        Forward pass with Convex Combination Flow:
-        Y_out = (1-w)*Y + w*retract(Y + transform(Y))
-        """
-        w = torch.sigmoid(self.w_retract)
-        
-        if self.use_transform:
-            Y_prop = Y + self.transform_net(Y)
-        else:
-            Y_prop = Y
-
-        Y_orth = nsa_flow_retract_auto(Y_prop, w_retract=1.0, retraction_type=self.retraction_type)
-
-        if self.residual:
-            Y_out = (1.0 - w) * Y + w * Y_orth
-        else:
-            Y_out = Y_orth
-
-        Y_out = self._apply_nonneg(Y_out)
-
-        if target is not None:
-            fid = fidelity_scaled(Y_out, target)
-            orth = invariant_orthogonality_defect(Y_out)
-            w_dyn = torch.sigmoid(self.alpha)
-            total_loss = fid * (1.0 - w_dyn) + orth * w_dyn
-            return Y_out, total_loss, fid, orth, w_dyn
-        else:
-            return Y_out
-
-class NSAFlowLinear(nn.Module):
-    """
-    A linear layer where the parameter matrix W is continuously projected 
-    towards the Stiefel manifold during training, creating an orthogonal-like 
-    basis without requiring exact hard constraints.
-    """
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        bias: bool = True,
-        w_retract: float = 0.5,
-        retraction_type: str = "soft_polar",
-        apply_nonneg: str = "none"
-    ):
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.retraction_type = retraction_type
-        self.apply_nonneg = apply_nonneg
-
-        self.weight_raw = nn.Parameter(torch.empty(in_features, out_features))
-        
-        if bias:
-            self.bias = nn.Parameter(torch.empty(out_features))
-        else:
-            self.register_parameter('bias', None)
-
-        w_init = float(w_retract)
-        w_init = max(1e-6, min(1.0 - 1e-6, w_init))
-        self.w_logit = nn.Parameter(torch.tensor(math.log(w_init / (1.0 - w_init))))
-
+        if not 0.0 <= float(w) <= 1.0:
+            raise ValueError(f"w must lie in [0, 1]; got {w}")
+        self.in_features, self.out_features = in_features, out_features
+        self.w, self.nonneg = float(w), nonneg
+        self.weight = nn.Parameter(torch.empty(out_features, in_features))
+        self.bias = nn.Parameter(torch.empty(out_features)) if bias else None
         self.reset_parameters()
 
     def reset_parameters(self):
-        nn.init.orthogonal_(self.weight_raw)
-        if self.bias is not None:
-            fan_in = self.in_features
-            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-            nn.init.uniform_(self.bias, -bound, bound)
-
-    def _apply_nonneg(self, W):
-        if self.apply_nonneg == "soft":
-            return F.softplus(W)
-        elif self.apply_nonneg == "relu":
-            return F.relu(W)
-        elif self.apply_nonneg == "hard":
-            return torch.clamp(W, min=0.0)
-        return W
-
-    def get_manifold_weight(self):
-        w = torch.sigmoid(self.w_logit)
-        W_orth = nsa_flow_retract_auto(self.weight_raw, w_retract=1.0, retraction_type=self.retraction_type)
-        W_eff = (1.0 - w) * self.weight_raw + w * W_orth
-        return self._apply_nonneg(W_eff)
-
-    def forward(self, x):
-        W_eff = self.get_manifold_weight()
-        out = torch.matmul(x, W_eff)
-        if self.bias is not None:
-            out = out + self.bias
-        return out
-
-class NSAFlowConv2d(nn.Conv2d):
-    """
-    A 2D convolutional layer where the filter weights are continuously projected 
-    towards the Stiefel manifold.
-    """
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size,
-        stride=1,
-        padding=0,
-        dilation=1,
-        groups=1,
-        bias=True,
-        padding_mode='zeros',
-        w_retract: float = 0.5,
-        retraction_type: str = "soft_polar",
-        apply_nonneg: str = "none"
-    ):
-        super().__init__(
-            in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias, padding_mode
-        )
-        self.retraction_type = retraction_type
-        self.apply_nonneg = apply_nonneg
-
-        w_init = float(w_retract)
-        w_init = max(1e-6, min(1.0 - 1e-6, w_init))
-        self.w_logit = nn.Parameter(torch.tensor(math.log(w_init / (1.0 - w_init))))
-
-        self._reset_orthogonal_parameters()
-
-    def _reset_orthogonal_parameters(self):
         nn.init.orthogonal_(self.weight)
         if self.bias is not None:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
-            if fan_in != 0:
-                bound = 1 / math.sqrt(fan_in)
-                nn.init.uniform_(self.bias, -bound, bound)
+            bound = 1.0 / math.sqrt(self.in_features) if self.in_features > 0 else 0.0
+            nn.init.uniform_(self.bias, -bound, bound)
 
-    def _apply_nonneg(self, W):
-        if self.apply_nonneg == "soft":
-            return F.softplus(W)
-        elif self.apply_nonneg == "relu":
-            return F.relu(W)
-        elif self.apply_nonneg == "hard":
-            return torch.clamp(W, min=0.0)
-        return W
+    @staticmethod
+    def _pk_view(W):
+        return W.transpose(-2, -1)          # [in, out] = [p, k]
 
-    def get_manifold_weight(self):
-        w = torch.sigmoid(self.w_logit)
-        W_flat = self.weight.view(self.weight.size(0), -1).T
-        W_orth_flat = nsa_flow_retract_auto(W_flat, w_retract=1.0, retraction_type=self.retraction_type)
-        W_eff_flat = (1.0 - w) * W_flat + w * W_orth_flat
-        W_eff = W_eff_flat.T.view_as(self.weight)
-        return self._apply_nonneg(W_eff)
+    @staticmethod
+    def _pk_unview(M, _like):
+        return M.transpose(-2, -1)
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        from torch.nn.modules.utils import _pair
-        W_eff = self.get_manifold_weight()
-        
-        if self.padding_mode != 'zeros':
-            return F.conv2d(F.pad(input, self._reversed_padding_repeated_twice, mode=self.padding_mode),
-                            W_eff, self.bias, self.stride,
-                            _pair(0), self.dilation, self.groups)
-        return F.conv2d(input, W_eff, self.bias, self.stride,
-                        self.padding, self.dilation, self.groups)
+    def effective_weight(self):
+        return self._effective(self.weight)
+
+    def forward(self, x):
+        return F.linear(x, self.effective_weight(), self.bias)
+
+    def extra_repr(self):
+        return (f"in_features={self.in_features}, out_features={self.out_features}, "
+                f"bias={self.bias is not None}, w={self.w}, nonneg={self.nonneg!r}")
+
+
+class NSAFlowConv2d(_NSAMixin, nn.Conv2d):
+    """``nn.Conv2d`` whose ``out_channels`` filters are driven toward orthogonality.
+
+    Filters are flattened to ``[out_channels, in_channels * kh * kw]`` and
+    measured as ``[p, k] = [in * kh * kw, out]``.
+    """
+
+    def __init__(self, *args, w=0.0, nonneg=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not 0.0 <= float(w) <= 1.0:
+            raise ValueError(f"w must lie in [0, 1]; got {w}")
+        self.w, self.nonneg = float(w), nonneg
+        nn.init.orthogonal_(self.weight)
+
+    @staticmethod
+    def _pk_view(W):
+        return W.reshape(W.shape[0], -1).transpose(0, 1)
+
+    @staticmethod
+    def _pk_unview(M, like):
+        return M.transpose(0, 1).reshape(like.shape)
+
+    def effective_weight(self):
+        return self._effective(self.weight)
+
+    def forward(self, x):
+        return self._conv_forward(x, self.effective_weight(), self.bias)
+
+
+class NSAFlowLayer(nn.Module):
+    """Per-sample NSA transform of a batch of matrices, ``[B, p, k] -> [B, p, k]``.
+
+    Each sample is transformed independently.  Input must be 3-D: a 2-D input is
+    ambiguous (is the first axis samples or features?) and the old behaviour of
+    treating a ``[N, k]`` batch as one ``[p, k]`` matrix coupled every sample to
+    its batch-mates, so that outputs depended on batch composition.  That is
+    rejected rather than guessed at.
+    """
+
+    def __init__(self, w=0.5, nonneg=None):
+        super().__init__()
+        if not 0.0 <= float(w) <= 1.0:
+            raise ValueError(f"w must lie in [0, 1]; got {w}")
+        self.w, self.nonneg = float(w), nonneg
+
+    def forward(self, Y):
+        if Y.ndim != 3:
+            raise ValueError(
+                f"NSAFlowLayer expects batched [B, p, k] input; got {tuple(Y.shape)}. "
+                "Add a leading batch axis to state the intended per-sample semantics."
+            )
+        if self.w > 0.0:
+            Y = (1.0 - self.w) * Y + self.w * project_scaled_stiefel(Y)
+        return _nonneg(Y, self.nonneg)
+
+    def defect(self, Y):
+        return stiefel_defect_normalised(self.forward(Y))
+
+    def extra_repr(self):
+        return f"w={self.w}, nonneg={self.nonneg!r}"

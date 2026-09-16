@@ -1,22 +1,29 @@
-.PHONY: help install test benchmark clean
+.PHONY: help install test theory experiments paper clean
 
 help:
-	@echo "Available make targets:"
-	@echo "  install   - Install package in editable mode with dependencies"
-	@echo "  test      - Run the pytest suite"
-	@echo "  benchmark - Run the retraction performance benchmark"
-	@echo "  clean     - Remove build artifacts, cache, and temp files"
+	@echo "install      - editable install with experiment + test extras"
+	@echo "test         - run the full test suite (theory, solver, layers)"
+	@echo "theory       - run only the theory property battery"
+	@echo "experiments  - run all paper experiments, writing paper/results/"
+	@echo "paper        - build paper/nsaflow.pdf (runs experiments if needed)"
+	@echo "clean        - remove build artefacts and caches"
 
 install:
-	pip install -e .
+	pip install -e ".[experiments,test]"
 
 test:
-	PYTHONPATH=. pytest
+	PYTHONPATH=. pytest tests/
 
-benchmark:
-	PYTHONPATH=. python tests/benchmark_retractions.py
+theory:
+	PYTHONPATH=. pytest tests/test_theory.py -v
+
+experiments:
+	PYTHONPATH=. python experiments/run_all.py
+
+paper:
+	$(MAKE) experiments
+	cd paper && latexmk -pdf -quiet nsaflow.tex
 
 clean:
-	rm -rf build/ dist/ *.egg-info/ .pytest_cache/ retraction_benchmark_results.csv
-	find . -name "*.pyc" -delete
-	find . -name "__pycache__" -delete
+	rm -rf build/ dist/ *.egg-info/ .pytest_cache/ paper/*.aux paper/*.log paper/*.out paper/*.fls paper/*.fdb_latexmk
+	find . -name "__pycache__" -type d -prune -exec rm -rf {} +
