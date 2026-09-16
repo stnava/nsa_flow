@@ -5,7 +5,6 @@
 Outputs land in paper/results/ (CSV + .tex) and paper/figs/ (PDF).
 """
 import argparse
-import sys
 import time
 import warnings
 from pathlib import Path
@@ -152,7 +151,6 @@ def main(quick=False):
     c = cal["calibration"]
     v1c = (c[c.version == "v1"].groupby(["fidelity_type", "orth_type"])
            [["fid_ratio", "orth_ratio"]].mean().reset_index())
-    v2c = c[c.version == "v2"][["fid_term", "orth_term"]].agg(["min", "max"])
     tex(v1c.rename(columns={"fidelity_type": "fidelity", "orth_type": "orthogonality",
                             "fid_ratio": "fid/target", "orth_ratio": "orth/target"}),
         "e2_calibration_table",
@@ -264,8 +262,8 @@ def main(quick=False):
     print("\n[E5] ADNI")
     from experiments import exp5_adni
     r5 = save(exp5_adni.run(hemisphere="right", n_repeats=reps), "e5_adni")
-    r5b = save(exp5_adni.run(hemisphere="both", n_repeats=max(2, reps // 2)),
-               "e5_adni_both_hemispheres")
+    save(exp5_adni.run(hemisphere="both", n_repeats=max(2, reps // 2)),
+         "e5_adni_both_hemispheres")
 
     def add_delta(df, by=None):
         """Signed AUC difference from the PCA baseline, within each task."""

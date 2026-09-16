@@ -17,7 +17,7 @@ from sklearn.model_selection import RepeatedStratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from nsa_flow import nsa_flow, stiefel_defect_normalised, effective_rank
+from nsa_flow import nsa_flow, stiefel_defect_normalised
 
 F64 = torch.float64
 

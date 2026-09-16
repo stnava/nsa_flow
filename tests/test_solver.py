@@ -5,7 +5,7 @@ import math
 import pytest
 import torch
 
-from nsa_flow import energy, grad_energy, nsa_flow, stiefel_defect
+from nsa_flow import grad_energy, nsa_flow
 
 F64 = torch.float64
 
@@ -59,7 +59,8 @@ def test_w_zero_without_nonneg_is_the_identity():
 
 
 def test_w_one_reaches_disjoint_supports(prob):
-    r = nsa_flow(prob, w=1.0, max_iter=60000, tol=1e-15)
+    with pytest.warns(RuntimeWarning, match="scale"):
+        r = nsa_flow(prob, w=1.0, max_iter=60000, tol=1e-15)
     assert r.raw_defect < 1e-12
     Y, k = r.Y, prob.shape[1]
     thresh = 1e-6 * Y.abs().max()
@@ -87,10 +88,29 @@ def test_overlap_bound_holds_at_the_solution(prob):
 
 
 # --------------------------------------------------------- scale and uniqueness
-@pytest.mark.parametrize("w", [0.5, 0.9, 0.99])
-def test_scale_stays_bounded(w, prob):
-    r = nsa_flow(prob, w=w, max_iter=5000)
-    assert 0.1 < r.Y.norm().item() / prob.norm().item() < 10.0
+@pytest.mark.parametrize("w", [0.0, 0.5, 0.9])
+def test_scale_stays_bounded_for_moderate_w(w, prob):
+    """For w <= 0.9 the fidelity term pins the scale; see the bound in the paper."""
+    r = nsa_flow(prob, w=w, max_iter=20000, tol=1e-11)
+    assert 0.5 < r.scale_ratio < 1.05
+    assert abs(r.scale_ratio - r.Y.norm().item() / prob.norm().item()) < 1e-12
+
+
+def test_w_one_is_scale_degenerate_and_says_so(prob):
+    """D is scale-invariant, so w=1 leaves ||Y|| unconstrained. The solver must
+    warn and report the drift rather than silently return a rescaled answer."""
+    with pytest.warns(RuntimeWarning, match="scale"):
+        r = nsa_flow(prob, w=1.0, max_iter=20000, tol=1e-12)
+    assert r.raw_defect < 1e-12            # still a valid D = 0 point
+    assert r.scale_ratio > 1.2             # and the scale really has drifted
+
+
+def test_nonconvergence_near_w_one_is_reported_not_hidden():
+    """Conditioning degrades as w -> 1; a run that runs out of iterations must
+    say so."""
+    X = torch.rand(2000, 20, dtype=F64)
+    r = nsa_flow(X, w=0.999, max_iter=200, tol=1e-11)
+    assert r.stop_reason == "max_iter" and not r.converged
 
 
 def test_solution_is_data_scale_equivariant(prob):
@@ -145,7 +165,8 @@ def test_wide_matrix_does_not_silently_produce_row_orthonormality():
     """k > p: the reported defect must be the true floor, not a hidden zero."""
     p, k = 20, 50
     X = torch.rand(p, k, dtype=F64)
-    r = nsa_flow(X, w=1.0, max_iter=40000, tol=1e-14)
+    with pytest.warns(RuntimeWarning):
+        r = nsa_flow(X, w=1.0, max_iter=40000, tol=1e-14)
     assert r.raw_defect >= 1.0 / p - 1.0 / k - 1e-9
     assert torch.isfinite(r.Y).all()
 

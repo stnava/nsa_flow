@@ -14,13 +14,11 @@ from nsa_flow import (
     defect_floor,
     effective_rank,
     energy,
-    fidelity,
     gram,
     grad_energy,
     grad_stiefel_defect,
     project_scaled_stiefel,
     stiefel_defect,
-    stiefel_defect_normalised,
 )
 from nsa_flow.energy import value_and_grad
 

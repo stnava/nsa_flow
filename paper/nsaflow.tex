@@ -351,16 +351,24 @@ supports; Corollary~\ref{cor:overlap} quantifies the approach.
 \begin{remark}\label{rem:w1}
 At $w = 1$ exactly the energy is scale-free and its minimiser set is all of
 $\Rpos\cdot\st(p,k) \cap \mathcal{C}$ --- every clustering, at every scale, is
-optimal. The useful regime is therefore $w<1$, where the fidelity term selects
-among clusterings. Together with Remark~\ref{rem:whyrelax} this identifies $w<1$
+optimal. This is not a technicality: run at $w=1$, the solver returns a valid
+$D=0$ point whose norm has drifted by as much as four orders of magnitude,
+because nothing in the objective opposes the drift. The useful regime is
+therefore $w<1$, where the fidelity term both fixes the scale and selects among
+clusterings. Together with Remark~\ref{rem:whyrelax} this identifies $w<1$
 as necessary both for exploration and for identifiability.
 \end{remark}
 
 \paragraph{Boundedness of scale.} For $w<1$, monotone descent from $Y^0$ gives
 $F(Y) \le E_w(Y)/(1-w) \le w\tilde D(X_0)/(1-w)$, hence
 $\Fnorm{Y} \ge \Fnorm{X_0}\big(1 - \sqrt{w\tilde D(X_0)/(1-w)}\big)$, which is
-bounded away from zero whenever $w\tilde D(X_0) < 1-w$. Across every experiment
-reported here $\Fnorm{Y}/\Fnorm{X_0}$ remained in $[0.55, 0.95]$.
+bounded away from zero whenever $w\tilde D(X_0) < 1-w$. Note the bound degrades
+as $w\to1$ and is vacuous at $w=1$, as it must be: measured over $84$ solves
+spanning $p \in [40, 2000]$ and $k \in [5,20]$, $\Fnorm{Y}/\Fnorm{X_0}$ lay in
+$[0.59, 0.93]$ for $w \le 0.9$, fell to $\approx 0.37$ by $w=0.999$, and at
+$w=1$ exactly ranged over four orders of magnitude (up to $\sim\!10^4$). The
+solver warns at $w=1$ and reports the realised ratio rather than silently
+rescaling; see Remark~\ref{rem:w1}.
 
 \section{Algorithm}\label{sec:algorithm}
 
@@ -384,6 +392,16 @@ report rather than asserting convergence.
 \paragraph{Cost.} $\nabla E_w$ requires the Gram product $Y^\top Y$ and the
 product $YG$: $O(pk^2)$, with \emph{no} SVD, eigendecomposition or QR in the
 loop. Value and gradient are computed together from one Gram product.
+
+Iteration counts depend strongly on $w$, and honestly so: the problem becomes
+ill-conditioned as it approaches the combinatorial limit. Across
+$p \in [40,7129]$ we observe tens of iterations at $w=0.5$ (19--40), hundreds at
+$w=0.9$ (116--1162), and thousands beyond $w=0.99$, with $w=0.999$ at $p=2000$
+failing to meet a $10^{-11}$ gradient-mapping tolerance within $20\,000$
+iterations. The solver reports \texttt{stop\_reason}, which distinguishes a
+gradient-mapping certificate from a line-search stall from exhausting
+\texttt{max\_iter}, so a non-converged run is visible rather than asserted to
+have converged.
 
 \paragraph{Why not a retraction?} It is tempting to enforce orthogonality by
 composing the objective with a projection onto $\st(p,k)$ and optimising the
@@ -551,6 +569,17 @@ from essentially zero to over $0.76$. Sparse PCA achieves part of the same
 readability gain, at intermediate sparsity and without non-negativity or a
 clustering interpretation.
 
+We also ran the comparison without the gene filter, at the full $p=7129$
+(\texttt{results/e4\_golub\_unfiltered\_p7129.csv}). Every method scores lower
+there --- PCA reaches AUC $0.961$ rather than $0.992$, so the high-variance genes
+carry most of the signal --- and the gap between PCA and NSA-PCA closes to
+nothing: the best NSA-PCA setting attains $0.962$ against PCA's $0.961$, a
+difference far inside the cross-validation spread. The readability gain is
+unchanged (overlap $3.99 \to 0.17$). The honest summary is therefore that
+NSA-PCA is \emph{not better} than PCA on this dataset --- indistinguishable at
+full $p$, slightly worse after filtering --- and that the interpretability gain
+is robust to the choice.
+
 \input{results/e4_table.tex}
 
 \subsection{ADNI regional brain volumes}\subsection{ADNI regional brain volumes}
@@ -673,6 +702,9 @@ End-to-end time to convergence on matched problems.}
   correction and do not repeat them.
 \item Uniqueness for $w<1$ is an empirical finding on the problem families tested,
   not a theorem; $E_w$ is not convex, and $w\to1$ is provably combinatorial.
+\item Conditioning degrades as $w \to 1$: iteration counts grow from tens to
+  thousands, and at $w=1$ the scale is unconstrained. The regime $w \ge 0.99$ is
+  usable but slow, and $w=1$ should be avoided.
 \item $k$ is not selected by the method. The effective-rank identity
   (Proposition~\ref{prop:D}(iv)) suggests a diagnostic, but we do not develop it.
 \item The ADNI analysis uses grey-matter volumes, not cortical thickness, and one

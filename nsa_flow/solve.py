@@ -5,7 +5,8 @@ The problem solved is
     minimise   E_w(Y) = (1 - w) ||Y - X0||_F^2 / ||X0||_F^2  +  w Dtilde(Y)
     subject to Y >= 0                                        (when ``nonneg``)
 
-with ``Dtilde = D / (1 - 1/k)`` and ``D(Y) = ||Y'Y||_F^2 / ||Y||_F^4 - 1/k``.
+with ``Dtilde = D / (1 - 1/k)`` and ``D(Y) = ||G - I/k||_F^2`` for the
+trace-normalised Gram matrix ``G = Y'Y / tr(Y'Y)``.
 
 The method is Spectral Projected Gradient (Birgin, Martinez & Raydan 2000):
 Barzilai-Borwein step lengths safeguarded by an Armijo backtracking line search
@@ -18,12 +19,12 @@ Cost per iteration is two ``[p,k] x [k,k]`` products plus one Gram: ``O(p k^2)``
 No SVD, eigendecomposition or QR appears in the loop.
 """
 import time
+import warnings
 
 import torch
 
-from .energy import (energy, grad_energy, gram, stiefel_defect, effective_rank,
-                     value_and_grad)
-from .project import project_nonneg, project_scaled_stiefel
+from .energy import energy, stiefel_defect, effective_rank, value_and_grad
+from .project import project_nonneg
 
 __all__ = ["nsa_flow", "NSAResult"]
 
@@ -143,6 +144,14 @@ def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=2000, tol=1e-9,
     tol : float
         Stop when the projected-gradient mapping norm falls below this.
 
+    Notes
+    -----
+    Conditioning degrades as ``w -> 1``, where the problem approaches the
+    combinatorial limit: convergence takes tens of iterations at ``w = 0.5``,
+    hundreds at ``w = 0.9``, and thousands or more beyond ``w = 0.99``.  Raise
+    ``max_iter`` accordingly and check ``stop_reason``, which reports
+    ``"max_iter"`` rather than claiming convergence.
+
     Returns
     -------
     NSAResult
@@ -159,6 +168,14 @@ def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=2000, tol=1e-9,
         raise ValueError(f"target must be 2-D [p, k]; got shape {tuple(X0.shape)}")
     if not (0.0 <= float(w) <= 1.0):
         raise ValueError(f"w must lie in [0, 1]; got {w}")
+    if float(w) == 1.0:
+        warnings.warn(
+            "w=1 drops the fidelity term, and D is scale-invariant, so the scale "
+            "of the returned Y is unconstrained and arbitrary (observed "
+            "||Y||/||X0|| up to ~1e4). Every scaled Stiefel matrix is optimal, so "
+            "nothing selects among clusterings either. Use w slightly below 1, or "
+            "rescale the result yourself; result['scale_ratio'] reports the drift.",
+            RuntimeWarning, stacklevel=2)
     if not torch.isfinite(X0).all():
         raise ValueError("target contains non-finite values")
 
@@ -189,7 +206,8 @@ def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=2000, tol=1e-9,
     return NSAResult(
         Y=Y, target=X0, w=float(w), energy=float(tot), fidelity=float(f),
         defect=float(dd), raw_defect=float(stiefel_defect(Y)),
-        effective_rank=float(effective_rank(Y)), iters=total_iters,
+        effective_rank=float(effective_rank(Y)),
+        scale_ratio=float(Y.norm() / X0.norm()), iters=total_iters,
         converged=stop != "max_iter", stop_reason=stop, grad_map=float(gmap),
         seconds=time.time() - t0,
         w_schedule=ws, trace=trace, nonneg=bool(nonneg),
