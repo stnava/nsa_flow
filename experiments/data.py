@@ -72,7 +72,13 @@ def load_adni(hemisphere="right", min_complete=0.95):
 
     vol = pd.read_csv(ADNI_VOLUMES)
     vol["RID"] = vol["ID"].str.extract(r"_S_(\d+)$")[0].astype(int)
-    vol = vol.drop_duplicates("RID")
+    # The volumes table is longitudinal: 2932 scans over 816 subjects, up to 12
+    # each.  Select the baseline scan explicitly as the smallest ADNI image UID,
+    # which within a subject increases with acquisition date.  The file happens
+    # to arrive sorted, so a plain drop_duplicates picks the same rows today,
+    # but that is a property of the delivery and not of the data.
+    vol["_iuid"] = vol["image id"].str.extract(r"^I(\d+)$")[0].astype(int)
+    vol = vol.loc[vol.groupby("RID")["_iuid"].idxmin()].drop(columns="_iuid")
 
     master = pd.read_csv(
         ADNI_MASTER, usecols=["RID", "AGE", "SEX", "EDUC", "APOE", "DX"], low_memory=False
