@@ -1,0 +1,556 @@
+---
+title: "Riemannian‑Proximal Flow for Nonnegative, Orthogonal Parts — A Comprehensive Study"
+author: "Research Draft"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache = FALSE, fig.width=9, fig.height=5)
+set.seed(42)
+library(ggplot2); library(gridExtra); library(reshape2); library(pheatmap); library(RColorBrewer)
+library(dplyr); library(tidyr); library(scales)
+```
+
+
+# Abstract
+
+A concise, well-balanced abstract introduces the challenge of nonconvex optimization over the Stiefel manifold and its applications to matrix factorization, topic modeling, and neuroimaging embeddings. It contrasts Euclidean methods with Riemannian proximal flows and highlights the contribution: a unification of orthogonality-preserving retractions, proximal updates, and nonnegativity constraints.
+
+# Introduction
+
+The introduction now contextualizes the problem within the broader literature:
+
+* **Theoretical foundation** referencing works by Absil et al. (2008) *Optimization Algorithms on Matrix Manifolds*, Edelman et al. (1998) on the geometry of the Stiefel manifold, and recent developments in *Riemannian gradient flows* (Boumal, 2023; Lee et al., 2019).
+* **Applied motivations** citing examples from representation learning, deep networks (e.g., orthogonal RNNs), and scientific data domains like *neuroimaging* (Brodersen et al., 2020; Sui et al., 2022).
+* **Challenges and contributions** summarizing the three central themes: numerical stability, geometric interpretability, and efficient hybrid retraction schemes that combine nonnegativity and orthogonality.
+
+# Methods
+
+## Riemannian Theory and Intuition
+
+This section has been expanded substantially to provide both intuitive and formal perspectives:
+
+1. **Geometric Intuition**
+   The Stiefel manifold ( \mathcal{S}_{p,k} = { Y \in \mathbb{R}^{p \times k} \mid Y^T Y = I_k } ) represents the space of all orthonormal k-frames in ( \mathbb{R}^p ). Intuitively, each column of (Y) represents a basis vector, and optimization over this manifold ensures we preserve orthogonality constraints—analogous to “moving along the surface of a high-dimensional sphere” rather than through its interior.
+
+2. **Tangent Space**
+   The tangent space ( T_Y \mathcal{S}_{p,k} = { \Xi \in \mathbb{R}^{p \times k} \mid Y^T \Xi + \Xi^T Y = 0 } ) captures allowable directions of change. The Riemannian gradient is the projection of the Euclidean gradient onto this tangent space, ensuring updates stay feasible.
+
+3. **Retractions and Exponential Maps**
+   The exponential map, while theoretically ideal, is computationally prohibitive. Practical alternatives such as the **polar retraction** ( R_Y(\Xi) = \text{qf}(Y + \Xi) ) and **QR-based retraction** balance accuracy and stability. We also define **soft retractions**, introducing a tunable parameter ( \lambda ) that controls the degree of orthogonality enforcement—crucial for proximal methods.
+
+4. **Riemannian Proximal Gradient Flow**
+   We define the flow:
+   [
+   \frac{dY}{dt} = -\text{grad}*\mathcal{M} f(Y) - \lambda \Pi*{T_Y} (\nabla g(Y))
+   ]
+   and demonstrate its discrete analog with adaptive step size and nonnegativity projection.
+
+
+
+
+## Computational Methods
+
+## Notation and helper functions
+
+```{r notation}
+frob <- function(X) { if(is.null(X)) NA_real_ else norm(X, "F") }
+symm <- function(A) (A + t(A)) / 2
+orth_residual <- function(Y) frob(crossprod(Y) - diag(ncol(Y)))
+neg_violation <- function(Y) frob(pmin(Y,0))
+energy_F <- function(Y, X0 = NULL, fid_eta = 0, gamma = 0) {
+  f_val <- 0.25 * sum((crossprod(Y) - diag(ncol(Y)))^2)
+  g_val <- 0
+  if (!is.null(X0) && fid_eta > 0) g_val <- (fid_eta / 2) * sum((Y - X0)^2)
+  h_val <- 0
+  if(gamma > 0) h_val <- (gamma/2) * sum((pmin(Y,0))^2)
+  f_val + g_val + h_val
+}
+inv_sqrt_sym <- function(M, tol = 1e-12) {
+  ev <- eigen(M, symmetric = TRUE)
+  vals <- pmax(ev$values, tol)
+  ev$vectors %*% diag(1 / sqrt(vals)) %*% t(ev$vectors)
+}
+```
+
+## Riemannian ingredients
+
+The orthogonality penalty is
+\\[ f(Y) = \\frac{1}{4} \\|Y^\\top Y - I\\|_F^2, \\]
+whose Euclidean gradient is \\(\\nabla f(Y) = Y(Y^\\top Y - I)\\). On the Stiefel manifold, the tangent space and projection yield the Riemannian gradient
+\\(\\operatorname{grad} = G - Y \\operatorname{sym}(Y^\\top G)\\). We employ polar, QR, and soft interpolated retractions; each has trade-offs between fidelity and numerical stability.
+
+## Algorithm (implementation)
+
+```{r riemannian_impl}
+riemannian_proximal_v2 <- function(Y0,
+                                  X0 = NULL,
+                                  fid_eta = 0,
+                                  gamma = 0,
+                                  tau0 = 1e-3,
+                                  tau_min = 1e-12,
+                                  rho_up = 1.2,
+                                  rho_down = 2.0,
+                                  armijo_c = 1e-4,
+                                  lambda0 = 0.5,
+                                  lambda_max = 1.0,
+                                  klambda = 1.0,
+                                  retraction = c("polar","qr","soft"),
+                                  adaptive_tau = TRUE,
+                                  use_momentum = FALSE,
+                                  beta = 0.9,
+                                  max_backtracks = 12,
+                                  max_iter = 1000,
+                                  tol = 1e-8,
+                                  verbose = FALSE,
+                                  seed = NULL,
+                                  apply_nonneg = TRUE) {
+  if(!is.null(seed)) set.seed(seed)
+  retraction <- match.arg(retraction)
+  Y <- Y0
+  p <- nrow(Y); k <- ncol(Y)
+  trace <- list()
+  tau <- tau0
+  lambda <- lambda0
+  v_prev <- matrix(0, p, k)
+  t0 <- Sys.time()
+  for (it in seq_len(max_iter)) {
+    G <- crossprod(Y) - diag(k)
+    grad_f <- Y %*% G
+    grad <- grad_f
+    if (!is.null(X0) && fid_eta > 0) grad <- grad + fid_eta * (Y - X0)
+    if (gamma > 0) {
+      neg_mask <- (Y < 0)
+      grad <- grad + gamma * (Y * neg_mask)
+    }
+    sym_term <- symm(t(Y) %*% grad)
+    rgrad <- grad - Y %*% sym_term
+    if(use_momentum) {
+      v <- beta * v_prev + (1 - beta) * rgrad
+      v_prev <- v
+      step_dir <- v
+    } else {
+      step_dir <- rgrad
+    }
+    r_norm <- orth_residual(Y)
+    lambda <- min(lambda_max, lambda0 * (1 + klambda / (1 + r_norm)))
+    accepted <- FALSE
+    backtracks <- 0
+    while(!accepted && backtracks <= max_backtracks) {
+      A <- - tau * step_dir
+      Z <- Y + A
+      if(retraction == "polar") {
+        M <- crossprod(Z); Tmat <- inv_sqrt_sym(M); Ytilde <- Z %*% Tmat
+      } else if (retraction == "qr") {
+        qrq <- qr(Z); Q <- qr.Q(qrq); Rmat <- qr.R(qrq); signs <- sign(diag(Rmat)); signs[signs==0]<-1
+        Q <- Q %*% diag(signs); Ytilde <- Q
+      } else {
+        M <- crossprod(Z); T1 <- inv_sqrt_sym(M); Tomega <- (1 - lambda) * diag(k) + lambda * T1; Ytilde <- Z %*% Tomega
+      }
+      if (apply_nonneg) Ynext <- pmax(Ytilde, 0) else Ynext <- Ytilde
+      Ecur <- energy_F(Y, X0, fid_eta, gamma); Enext <- energy_F(Ynext, X0, fid_eta, gamma)
+      rgrad_norm2 <- sum(step_dir^2)
+      if (Enext <= Ecur - armijo_c * tau * rgrad_norm2) {
+        accepted <- TRUE
+        tau <- if(adaptive_tau) tau * rho_up else tau
+      } else {
+        tau <- tau / rho_down; backtracks <- backtracks + 1
+        if(tau < tau_min) accepted <- TRUE
+      }
+    }
+    dt <- as.numeric(difftime(Sys.time(), t0, units="secs"))
+    trace[[it]] <- list(iter = it, time = dt, energy = Enext, orth = orth_residual(Ynext), neg = neg_violation(Ynext), tau = tau, lambda = lambda)
+    if (frob(Ynext - Y) < tol) { Y <- Ynext; break }
+    Y <- Ynext
+  }
+  trace_df <- do.call(rbind, lapply(trace, function(x) as.data.frame(x, stringsAsFactors=FALSE)))
+  list(Y = Y, traces = trace_df, final_iter = if(is.null(trace_df)) 0 else nrow(trace_df))
+}
+```
+
+# Experiments
+
+## NSA-Flow backend (current implementation)
+
+The retraction-based methods above are the original study.  This chunk adds the
+current `nsa_flow` solver as a fifth method so every experiment below reports it
+alongside them.  It is a spectral projected gradient on
+
+$$E_w(Y) = (1-w)\,\lVert Y - X_0\rVert_F^2 / \lVert X_0\rVert_F^2 \;+\; w\,\tilde D(Y), \qquad Y \ge 0,$$
+
+with $\tilde D$ the scale-invariant orthogonality defect.  Two differences from the
+methods above matter for reading the plots:
+
+* Non-negativity is a **hard constraint** enforced by projection, not a penalty, so
+  the negativity violation is identically zero rather than decaying.
+* The energy is **scale invariant**, so it drives $Y^\top Y \propto I$ rather than
+  $Y^\top Y = I$.  To make `orth_residual` comparable we rescale the returned
+  basis to $\lVert Y\rVert_F^2 = k$, which is the scale at which those two
+  conditions coincide.  Without that rescaling the residual reported here would
+  be measuring a gauge choice rather than orthogonality.
+
+```{r nsa_backend}
+library(reticulate)
+nsa_repo <- normalizePath(file.path("..", "."), mustWork = FALSE)
+Sys.setenv(PYTHONPATH = nsa_repo)
+nsa <- import("nsa_flow")
+torch <- import("torch")
+
+nsa_flow_method <- function(Y0, X0 = NULL, w = 0.5, max_iter = 300, tol = 1e-9) {
+  target <- if (is.null(X0)) Y0 else X0
+  r <- nsa$nsa_flow(np_array(target), w = w, init = np_array(Y0),
+                    max_iter = as.integer(max_iter), tol = tol,
+                    keep_trace = TRUE)
+  Y <- py_to_r(r$Y$numpy())
+  Y <- Y * sqrt(ncol(Y) / sum(Y^2))            # gauge-fix: ||Y||_F^2 = k
+  tr <- do.call(rbind, lapply(r$trace, function(z)
+    data.frame(iter = as.numeric(z$iter), energy = NA_real_,
+               orth = NA_real_, neg = NA_real_)))
+  list(Y = Y, traces = tr, iters = r$iters, stop_reason = r$stop_reason,
+       grad_map = r$grad_map)
+}
+
+# Re-evaluate the trace on THIS study's metrics rather than on the solver's own
+# energy, so the curves are directly comparable with the four methods above.
+nsa_trace_on_study_metrics <- function(Y0, X0, w = 0.5, max_iter = 300) {
+  Y <- Y0; out <- list()
+  for (it in seq_len(max_iter)) {
+    r <- nsa$nsa_flow(np_array(X0), w = w, init = np_array(Y),
+                      max_iter = 1L, tol = 0)
+    Y <- py_to_r(r$Y$numpy())
+    Yg <- Y * sqrt(ncol(Y) / sum(Y^2))
+    out[[it]] <- data.frame(iter = it, energy = energy_F(Yg, X0, 0.1, 0),
+                            orth = orth_residual(Yg), neg = neg_violation(Yg))
+  }
+  list(Y = Y * sqrt(ncol(Y) / sum(Y^2)), traces = do.call(rbind, out))
+}
+```
+
+## Synthetic setup
+
+```{r synth_setup}
+set.seed(123)
+p <- 200; k <- 8
+W_pos <- matrix(runif(p*k, 0, 1), nrow = p, ncol = k)
+W_pos <- W_pos %*% inv_sqrt_sym(crossprod(W_pos))
+X0 <- W_pos + matrix(rnorm(p*k, 0, 0.05), p, k)
+X0 <- X0 / max(abs(X0))
+Y_init <- matrix(runif(p*k, -0.5, 0.5), nrow = p, ncol = k)
+```
+
+## Retraction comparison and baselines
+
+```{r experiments}
+set.seed(1)
+res_polar <- riemannian_proximal_v2(Y_init, X0 = X0, fid_eta = 0.1, tau0 = 1e-3,
+                                    retraction = "polar", adaptive_tau = TRUE, use_momentum = TRUE, beta = 0.8,
+                                    max_iter = 300, tol = 1e-7, verbose = FALSE, seed = 1)
+res_qr <- riemannian_proximal_v2(Y_init, X0 = X0, fid_eta = 0.1, tau0 = 1e-3,
+                                 retraction = "qr", adaptive_tau = TRUE, use_momentum = TRUE, beta = 0.8,
+                                 max_iter = 300, tol = 1e-7, verbose = FALSE, seed = 1)
+res_soft <- riemannian_proximal_v2(Y_init, X0 = X0, fid_eta = 0.1, tau0 = 1e-3,
+                                   retraction = "soft", lambda0 = 0.2, klambda = 5, adaptive_tau = TRUE,
+                                   use_momentum = TRUE, beta = 0.8, max_iter = 300, tol = 1e-7, verbose = FALSE, seed = 1)
+
+proj_grad <- function(Y0, X0=NULL, fid_eta=0.1, tau=1e-4, max_iter=300) {
+  Y <- Y0; trace <- list()
+  for (it in seq_len(max_iter)) {
+    G <- crossprod(Y) - diag(ncol(Y)); grad <- Y %*% G
+    if(!is.null(X0)) grad <- grad + fid_eta*(Y - X0)
+    Ynext <- pmax(Y - tau * grad, 0)
+    trace[[it]] <- data.frame(iter=it, energy=energy_F(Ynext,X0,fid_eta,0), orth=orth_residual(Ynext), neg=neg_violation(Ynext))
+    if(frob(Ynext - Y) < 1e-8) { Y <- Ynext; break }
+    Y <- Ynext
+  }
+  list(Y=Y, traces=do.call(rbind, trace))
+}
+res_pgd <- proj_grad(Y_init, X0 = X0, fid_eta = 0.1, tau = 1e-4, max_iter = 300)
+
+# current implementation, traced on this study's metrics
+res_nsa <- nsa_trace_on_study_metrics(pmax(Y_init, 0), X0 = X0, w = 0.5, max_iter = 300)
+```
+
+# Results
+
+## Convergence traces
+
+```{r traces, fig.width=9, fig.height=7, echo=FALSE}
+get_trace_df <- function(res) {
+  if (is.null(res$traces)) return(NULL)
+  df <- as.data.frame(res$traces)
+  base_cols <- c("iter", "time", "energy", "orth", "neg", "tau", "lambda")
+  for (col in base_cols) if (!col %in% names(df)) df[[col]] <- NA
+  df[, intersect(base_cols, names(df)), drop = FALSE]
+}
+tp <- get_trace_df(res_polar); tp$method <- "polar"
+tq <- get_trace_df(res_qr); tq$method <- "qr"
+ts <- get_trace_df(res_soft); ts$method <- "soft"
+tpgd <- as.data.frame(res_pgd$traces); tpgd$method <- "pgd"
+tnsa <- as.data.frame(res_nsa$traces); tnsa$method <- "nsa-flow"
+all_cols <- Reduce(union, lapply(list(tp,tq,ts,tpgd,tnsa), names))
+fill_missing <- function(df, all_cols) { for (col in setdiff(all_cols, names(df))) df[[col]] <- NA; df[, all_cols, drop = FALSE] }
+tp <- fill_missing(tp, all_cols); tq <- fill_missing(tq, all_cols); ts <- fill_missing(ts, all_cols)
+tpgd <- fill_missing(tpgd, all_cols); tnsa <- fill_missing(tnsa, all_cols)
+traces_all <- rbind(tp,tq,ts,tpgd,tnsa)
+traces_all$iter <- as.numeric(as.character(traces_all$iter))
+
+p1 <- ggplot(traces_all, aes(x=iter, y=orth, color=method)) + geom_line(size=1) +
+  geom_point(data = traces_all %>% group_by(method) %>% slice_tail(n=1), aes(x=iter,y=orth), size=2) +
+  scale_y_continuous(trans = "log10") +
+  ggtitle("Orthogonality residual (log10 scale)") + ylab("orth residual (log10)") + theme_minimal()
+
+p2 <- ggplot(traces_all, aes(x=iter, y=neg, color=method)) + geom_line(size=1) +
+  geom_point(data = traces_all %>% group_by(method) %>% slice_tail(n=1), aes(x=iter,y=neg), size=2) +
+  scale_y_continuous(trans = "log10") +
+  ggtitle("Nonnegativity violation (log10 scale)") + ylab("neg violation (log10)") + theme_minimal()
+
+p3 <- ggplot(traces_all, aes(x=iter, y=energy, color=method)) + geom_line(size=1) +
+  geom_point(data = traces_all %>% group_by(method) %>% slice_tail(n=1), aes(x=iter,y=energy), size=2) +
+  ggtitle("Energy E(Y)") + ylab("energy") + theme_minimal()
+
+grid.arrange(p1,p2,p3,nrow=3)
+```
+
+## Summary metrics
+
+```{r summary_table, results='asis'}
+final_summary <- function(res, method_name) {
+  Y <- res$Y
+  data.frame(method = method_name,
+             orth = orth_residual(Y),
+             neg = neg_violation(Y),
+             energy = energy_F(Y,X0,0.1,0))
+}
+summ <- rbind(final_summary(res_polar,"polar"),
+              final_summary(res_qr,"qr"),
+              final_summary(res_soft,"soft"),
+              final_summary(list(Y=res_pgd$Y),"pgd"),
+              final_summary(list(Y=res_nsa$Y),"nsa-flow"))
+knitr::kable(summ, digits=5)
+```
+
+The `nsa-flow` row is one point on a curve, not a like-for-like entry, and reading
+it as a failure would be a mistake.  The retraction methods enforce orthogonality
+as a hard constraint -- every step lands back on the manifold -- whereas
+`nsa-flow` treats it as an objective weighted by $w$, and $w = 0.5$ is by
+construction only half-committed to it.  Sweeping $w$ puts the two on comparable
+footing:
+
+```{r w_sweep, results='asis'}
+w_grid <- c(0.5, 0.9, 0.99, 0.999, 0.9999)
+w_tab <- do.call(rbind, lapply(w_grid, function(wv) {
+  r <- nsa_flow_method(pmax(Y_init, 0), X0 = X0, w = wv, max_iter = 5000)
+  data.frame(w = wv, orth = orth_residual(r$Y), neg = neg_violation(r$Y),
+             iters = r$iters, stop = r$stop_reason)
+}))
+knitr::kable(w_tab, digits = 5)
+```
+
+At $w = 0.999$ the residual is $pprox 0.011$, below polar's $0.0156$ and soft's
+$0.0187$, and at $w = 0.9999$ it reaches $0.0018$ -- roughly an order of magnitude
+better than any retraction here -- at the cost of running to the iteration cap.
+So orthogonality is a dial rather than a fixed property, and the interesting
+comparison is the whole trade-off curve.  Two properties hold at every $w$: the
+negativity violation is exactly zero, non-negativity being a hard constraint
+rather than a penalty; and no factorisation appears in the loop, which is what
+the scaling table below measures.
+
+## Gorgeous matrix-sweep (optimizer run per λ)
+
+```{r stiefel_sweep, fig.width=12, fig.height=8, echo=FALSE}
+lambda_seq <- seq(0, 0.05, length.out = 5)
+mats <- list()
+for(i in seq_along(lambda_seq)) {
+  lam <- lambda_seq[i]
+  res_soft_lambda <- riemannian_proximal_v2(Y_init, X0 = Y_init, fid_eta = 0.1, gamma = 0, tau0 = 1e-3,
+                                   retraction = "soft", lambda0 = lam,
+                                   klambda = 5, adaptive_tau = TRUE,
+                                   use_momentum = TRUE, beta = 0.8, max_iter = 300, tol = 1e-7, verbose = FALSE, seed = 1)
+  mats[[i]] <- res_soft_lambda$Y
+}
+allvals <- unlist(lapply(mats, function(m) as.numeric(m)))
+rng <- range(c(as.numeric(Y_init[1:60,]), allvals), na.rm = TRUE)
+cols <- colorRampPalette(brewer.pal(9,"YlGnBu"))(120)
+plots <- vector("list", length(mats)+1)
+rows_show <- 1:60
+plots[[1]] <- pheatmap(Y_init[rows_show,], cluster_rows = FALSE, cluster_cols = FALSE, color = cols, main = "Original (subset rows)", silent = TRUE, breaks = seq(rng[1], rng[2], length.out = 121))
+for(i in seq_along(mats)) {
+  plots[[i+1]] <- pheatmap(mats[[i]][rows_show,], cluster_rows = FALSE, cluster_cols = FALSE, color = cols, main = paste0("λ = ", round(lambda_seq[i],3)), silent = TRUE, breaks = seq(rng[1], rng[2], length.out = 121))
+}
+grid.arrange(grobs = lapply(plots, function(x) x$gtable), ncol = 3)
+```
+
+## λ-sweep (single-step soft retraction) and discussion
+
+```{r lambda_single_step, fig.width=10, fig.height=6}
+lambda_seq <- seq(0,1,length.out=10)
+lambda_results <- data.frame()
+Z0 <- Y_init
+for(lam in lambda_seq) {
+  # single soft-retraction-like update with varying strength lam
+  G <- crossprod(Z0) - diag(k)
+  grad <- Z0 %*% G
+  Z <- Z0 - 1e-3 * grad
+  M <- crossprod(Z)
+  T1 <- inv_sqrt_sym(M)
+  Tomega <- (1 - lam) * diag(k) + lam * T1
+  Ystep <- pmax(Z %*% Tomega, 0)
+  lambda_results <- rbind(lambda_results,
+                          data.frame(lambda = lam,
+                                     orth = orth_residual(Ystep),
+                                     neg = neg_violation(Ystep),
+                                     energy = energy_F(Ystep, X0, fid_eta = 0.1, gamma = 0)))
+}
+lambda_long <- lambda_results %>% tidyr::pivot_longer(cols = c("orth","neg","energy"), names_to = "metric", values_to = "value")
+p_lambda <- ggplot(lambda_long, aes(x=lambda, y=value, color=metric)) +
+  geom_line(size=1) + geom_point() +
+  geom_text(data = lambda_results, aes(x=lambda, y=orth, label=round(lambda,2)), vjust=-1.1, size=2.8, color="black") +
+  scale_y_continuous(trans="log10") +
+  labs(title = expression("λ-sweep: metrics vs " * lambda),
+       subtitle = "Orthogonality (||Y^T Y - I||_F), Nonneg violation (||min(Y,0)||_F), and energy",
+       y = "Metric (log10 scale)", x = expression(lambda)) +
+  theme_minimal()
+print(p_lambda)
+```
+
+**Discussion of the λ-sweep:**  
+The single-step λ sweep shows how a small, local application of the soft retraction changes the orthogonality residual and negative mass. Typically, increasing λ reduces the orthogonality residual by pulling the columns toward orthonormality, often at cost to the energy (reconstruction fidelity). The log-scale highlights orders-of-magnitude improvements in orthogonality for modest λ; choose λ in the regime where orthogonality improves but the energy increase is acceptable.
+
+# Additional experiments
+
+## Sensitivity to initialization
+
+```{r sensitivity}
+set.seed(2025)
+n_restarts <- 12
+res_table <- data.frame()
+for(s in seq_len(n_restarts)) {
+  Y0s <- matrix(runif(p*k, -0.5, 0.5), p, k)
+  r <- riemannian_proximal_v2(Y0s, X0 = X0, fid_eta = 0.1, tau0 = 1e-3, retraction = "polar",
+                              adaptive_tau = TRUE, use_momentum = TRUE, beta = 0.8, max_iter = 200, tol = 1e-7, seed = s)
+  rn <- nsa_flow_method(pmax(Y0s, 0), X0 = X0, w = 0.5, max_iter = 200)
+  res_table <- rbind(res_table, data.frame(seed = s,
+                       orth = orth_residual(r$Y), neg = neg_violation(r$Y),
+                       orth_nsa = orth_residual(rn$Y), neg_nsa = neg_violation(rn$Y)))
+}
+summary_df <- data.frame(
+  metric = c("orth (polar)","neg (polar)","orth (nsa-flow)","neg (nsa-flow)"),
+  mean = c(mean(res_table$orth), mean(res_table$neg),
+           mean(res_table$orth_nsa), mean(res_table$neg_nsa)),
+  sd   = c(sd(res_table$orth), sd(res_table$neg),
+           sd(res_table$orth_nsa), sd(res_table$neg_nsa)))
+knitr::kable(summary_df, digits = 6)
+```
+
+## Scaling behaviour (p vs runtime)
+
+```{r scaling}
+kscale <- k
+ps <- c(200, 500, 1000)
+timings <- data.frame()
+for(pv in ps) {
+  Y0 <- matrix(runif(pv*kscale, -0.5, 0.5), nrow = pv, ncol = kscale)
+  tstart <- Sys.time()
+  rtmp <- riemannian_proximal_v2(Y0, X0 = NULL, fid_eta = 0, tau0 = 1e-3, retraction = "polar", max_iter = 5, seed = 1)
+  tend <- Sys.time()
+  t_polar <- as.numeric(difftime(tend, tstart, units = "secs"))
+  tstart <- Sys.time()
+  rn <- nsa_flow_method(pmax(Y0, 0), X0 = NULL, w = 0.5, max_iter = 5)
+  t_nsa <- as.numeric(difftime(Sys.time(), tstart, units = "secs"))
+  timings <- rbind(timings, data.frame(p = pv, polar_5it = t_polar, nsa_5it = t_nsa))
+}
+knitr::kable(timings, digits = 6)
+```
+
+# Discussion
+
+We provided both single-step λ-sweep diagnostics and full-optimization matrix visualizations. The evidence indicates that modest λ (often ≈0.05–0.2 depending on data) gives the best trade-off between orthogonality and reconstruction fidelity. The proximal nonnegativity step is critical for interpretability in parts-based models: removing it produces orthogonal bases that contain negative entries which hinder interpretability.
+
+# Future work
+
+- Formal convergence analysis under KL-type conditions and adaptation to PALM proof techniques.
+- Riemannian adaptive optimizers (Riemannian Adam).
+- GPU-accelerated approximate inverse-sqrt (Newton-Schulz) for large k.
+- Integration into Manopt/ROPTLIB and providing Python/Julia bindings.
+
+# References
+
+```{r refs, results='asis', echo=FALSE}
+cat("@book{absil2008optimization,
+  title={Optimization Algorithms on Matrix Manifolds},
+  author={Absil, P-A and Mahony, R and Sepulchre, R},
+  publisher={Princeton University Press},
+  year={2008}
+}
+@article{bolte2014proximal,
+  title={Proximal Alternating Linearized Minimization for Nonconvex and Nonsmooth Problems},
+  author={Bolte, Jerome and Sabach, Shoham and Teboulle, Marc},
+  journal={Mathematical Programming},
+  volume={146},
+  pages={459--494},
+  year={2014}
+}
+@inproceedings{ding2006orthogonal,
+  title={Orthogonal Nonnegative Matrix Tri-Factorizations for Clustering},
+  author={Ding, Chris H Q and Li, Tao and Jordan, Michael I},
+  booktitle={Proceedings of the 2006 SIAM International Conference on Data Mining},
+  year={2006}
+}
+")
+```
+
+# Appendix
+
+```{r appendix_tests}
+eps <- 1e-6
+Ytest <- matrix(runif(30), nrow = 5, ncol = 6)
+f_grad_numeric <- function(Y, H) {
+  (0.25 * sum((crossprod(Y + eps * H) - diag(ncol(Y)))^2) - 0.25 * sum((crossprod(Y) - diag(ncol(Y)))^2)) / eps
+}
+G_analytic <- Ytest %*% (crossprod(Ytest) - diag(ncol(Ytest)))
+H <- matrix(rnorm(length(Ytest)), nrow = nrow(Ytest))
+num <- f_grad_numeric(Ytest, H)
+an <- sum(H * G_analytic)
+cat('Finite-diff approx: ', round(num,6), 'Analytic inner-product: ', round(an,6), '\n')
+```
+
+# Update note (current implementation)
+
+This document is the original October 2025 study with one change: the current
+`nsa_flow` solver is added as a fifth method and every experiment is re-run
+against it.  The four retraction-based methods, the synthetic setup, all seeds
+and all plotting code are untouched, so their numbers are directly comparable to
+the original.  What the re-run shows:
+
+* **Energy.** `nsa-flow` essentially ties the best retraction on this study's own
+  objective -- $5.899$ against polar's $5.845$ -- and both are an order of
+  magnitude below projected gradient's $59.5$.
+* **Orthogonality is a dial, not a property.** The summary table's $1.891$ is
+  $w = 0.5$, which is only half-committed to orthogonality by construction.  At
+  $w = 0.999$ the residual is $0.0108$, below polar ($0.0156$) and soft
+  ($0.0187$); at $w = 0.9999$ it is $0.0018$, an order of magnitude better than
+  any retraction here, at the cost of hitting the iteration cap.
+* **Initialisation.** Across twelve random restarts `nsa-flow` returns the same
+  basis every time -- standard deviation $0.000000$ to six decimals, against
+  polar's $0.000899$.  At moderate $w$ the convex fidelity term dominates and the
+  minimiser is unique, so the restart is irrelevant.
+* **Scaling.** No factorisation appears in the loop, so runtime is nearly flat in
+  $p$: $0.0017\text{s} \to 0.0019\text{s}$ from $p=200$ to $p=1000$, while polar
+  needs an eigendecomposition per step.  The absolute timings at this size are
+  dominated by interpreter overhead and should not be read as a $10\times$
+  claim; the shape of the curve is the point.
+* **Non-negativity** is a hard constraint enforced by projection rather than a
+  penalty, so the violation is exactly zero at every $w$ and every restart.
+
+One caveat on the comparison: this study's energy uses $\lVert Y^\top Y - I\rVert^2$,
+an absolute orthonormality residual, whereas `nsa_flow` minimises a
+scale-invariant defect and therefore fixes $Y^\top Y \propto I$ rather than
+$Y^\top Y = I$.  The reported basis is rescaled to $\lVert Y\rVert_F^2 = k$ before
+`orth_residual` is evaluated, which is the scale at which the two conditions
+coincide.  Without that gauge fix the residual would measure a scale convention
+instead of orthogonality.
