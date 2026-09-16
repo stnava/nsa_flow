@@ -47,14 +47,23 @@ def _grad_angle(V):
     return (dU - (U * dU).sum(dim=-2, keepdim=True) * U) / nrm
 
 
-def fit_basis(X, k, w=0.9, max_iter=400, tol=1e-8, nonneg=True, mus=(0.0, 1e-2, 1.0, 1e2)):
-    """Data-anchored basis, matrix-free, with a short negativity homotopy."""
+def fit_basis(X, k, w=0.9, max_iter=400, tol=1e-8, nonneg=True,
+              mus=(0.0, 1e-2, 1.0, 1e2), V0=None):
+    """Data-anchored basis, matrix-free, with a short negativity homotopy.
+
+    ``V0`` starts the homotopy somewhere other than the signed PCA basis, so the
+    effect of the starting point can be separated from the effect of running the
+    homotopy at all.
+    """
     X = torch.as_tensor(np.asarray(X), dtype=F64)
     c = X.pow(2).sum()
     n, p = X.shape
     # mu = 0 optimum: leading right singular vectors (signed)
-    _, _, Vh = torch.linalg.svd(X, full_matrices=False)
-    V = Vh[:k].transpose(0, 1).clone()
+    if V0 is None:
+        _, _, Vh = torch.linalg.svd(X, full_matrices=False)
+        V = Vh[:k].transpose(0, 1).clone()
+    else:
+        V = torch.as_tensor(np.asarray(V0), dtype=F64).clone()
 
     def run(mu, hard, iters):
         nonlocal V
