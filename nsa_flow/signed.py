@@ -14,24 +14,56 @@ basis is restored.  Write ``W = [V+ | V-]`` of shape ``[p, 2k]``.  Then
 
     minimise  (1-w) ||X - X V V'||_F^2 / ||X||_F^2  +  w Dtilde(W),   W >= 0
 
-with ``V = V+ - V-``.  ``D`` is applied here to the ``2k`` *parts* rather than to ``V``.  MEASUREMENT SAYS
-THAT IS THE WRONG CHOICE, and the module is kept in this form only to record why.
-``D`` requires ``G_ii = 1/(2k)``, i.e. all ``2k`` parts of EQUAL norm.  But a
-contrast is legitimately asymmetric -- a mostly-positive component has a small
-negative lobe -- so on ADNI the part-norm ratio at ``w = 0`` is ~4e8, ``D(W) = 0.18``
-against a maximum of ``0.9``, and raising ``w`` inflates the near-empty lobes to
-equalise them.  Lobe overlap therefore RISES from 3e-9 to 2.55 between ``w = 0``
-and ``w = 0.25``, the opposite of the intent.  It does reach 2e-3 by ``w = 0.999``,
-but reconstruction error is 0.89 there, worse than the crude ``clamp(PCA)`` at 0.86.
+with ``V = V+ - V-``.  The orthogonality term acts on the ``2k`` *parts*, which is what delivers the
+interpretability: near-disjoint lobe supports mean each component names one set
+of features against a second, and different components use different features.
+Orthogonality of the *signed* ``V`` would not do this, because the
+disjoint-support equivalence needs non-negativity and ``V`` is signed by
+construction.
 
-The diagnosis is that two different requirements were conflated: "the ``k``
-components are orthonormal" and "each component's two lobes are disjoint".  The
-former is a statement about ``V``, so it wants ``Dtilde(V)``; the latter is a
-statement about lobe pairs, so it wants a separate ``sum_i <v+_i, v-_i>`` term.
-Putting ``D`` on ``W`` asks for something neither of them requires -- that every
-lobe carry equal weight -- and that false requirement is what does the damage.
-This is also the first setting where the norm-balance half of ``D`` is harmful;
-on a purely non-negative basis it was measurably free (``exp10``).
+Getting the term right took two corrections, both forced by measurement.
+
+``D = ||G - I/(2k)||^2`` was wrong because it demands ``G_ii = 1/(2k)``, i.e. all
+``2k`` parts of EQUAL norm.  A contrast is legitimately asymmetric -- a
+mostly-positive component has a small or empty negative lobe -- so on ADNI the
+part-norm ratio at ``w = 0`` is ~4e8, and raising ``w`` inflates the near-empty
+lobes to equalise them: lobe overlap ROSE from 3e-9 to 2.55 between ``w = 0`` and
+``w = 0.25``.  Switching to the squared-cosine defect ``C``, which is indifferent
+to norms, cut that to 0.122 -- a 21x improvement for 0.4% reconstruction cost.
+
+``C`` with its diagonal was still wrong, more subtly.  Its diagonal charges
+``1/(2k(2k-1))`` per column whose norm has been floored, which doubles as a
+dead-column penalty -- useful for a plain basis, wrong here, because an empty
+negative lobe is the CORRECT answer for a one-signed component such as global
+atrophy.  The default is therefore ``C`` restricted to off-diagonal angles
+(``angle_defect(..., diagonal=False)``).  Collapse is prevented by the
+reconstruction term instead, which is where that job belongs: a dead component
+reconstructs nothing.
+
+``lobe`` adds ``sum_i <v+_i, v-_i>`` to forbid a component contrasting a feature
+against itself.  The off-diagonal angle term already pushes every pair of lobes
+apart, including each component's own pair, so this is a refinement rather than a
+necessity; ``lobe=1.0`` drives the overlap to exactly zero.
+
+STATUS: EXPERIMENTAL, AND THE RESULT IS NEGATIVE.  With the term corrected the
+mechanism behaves as designed -- lobe overlap goes to exactly 0, empty lobes are
+no longer inflated -- and at ``w = 0.5`` this is the only variant that matches PCA
+on all three ADNI tasks (0.8618 / 0.6895 / 0.7146 against 0.8627 / 0.6890 /
+0.7140, every difference under 0.001).  But it matches PCA by BEING PCA-like:
+support overlap 3.1 of a possible 4, sparsity 0.18.  Raising ``w`` to buy sparsity
+costs more than the plain non-negative basis does -- at overlap 1.18 it scores
+0.8357 where ``nsa_flow_data`` scores 0.8601 at overlap 0.35, i.e. better AND
+three times sparser.  The reason is structural: ``2k`` near-disjoint parts in ``p``
+features leave ``p/2k`` features each, half what the plain form gets, so the
+lifting's capacity advantage becomes a liability exactly when sparsity is wanted.
+``w`` is also inert over ``[0.5, 0.75]`` -- identical solutions -- because the
+reconstruction term dominates there.
+
+Prefer ``nsa_flow_data``.  This module is kept for the ablation and because the
+capacity claim it settles is worth having on record: the lifting reproduces
+signed PCA's reconstruction to the digit (0.5723 against 0.572269), which proves
+the plain non-negative ceiling of 0.591 was representational rather than an
+optimisation failure.
 
 Gradient.  With ``F(V)`` the reconstruction term, ``dF/dV+ = dF/dV`` and
 ``dF/dV- = -dF/dV`` by the chain rule, so the data term costs one extra sign flip
@@ -57,7 +89,7 @@ def _split(W):
     return W[..., :k], W[..., k:]
 
 
-def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="C", lobe=0.0,
+def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Coff", lobe=1.0,
                     max_iter=5000, tol=None, sigma=1e-4, dtype=None, device=None,
                     verbose=False, keep_trace=False):
     """Fit ``V = V+ - V-`` with ``[V+|V-] >= 0`` near-disjoint, reconstructing ``X``.
@@ -108,14 +140,17 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="C", lobe=0.0,
         raise ValueError(f"init shape {tuple(W.shape)} != [p, 2k] = {(p, 2 * k)}")
 
     inv_k = 1.0 / (1.0 - 1.0 / (2 * k))
-    if orth == "D":
+    if orth == "Coff":          # default: pairwise angles only (see module docstring)
+        o_val = lambda Wv: angle_defect(Wv, diagonal=False)
+        o_grad = lambda Wv: grad_angle_defect(Wv, diagonal=False)
+    elif orth == "C":           # angles plus a dead-lobe penalty
+        o_val, o_grad = angle_defect, grad_angle_defect
+    elif orth == "D":           # orthoNORMality; retained only for the ablation
         o_val = stiefel_defect_normalised
         def o_grad(Wv):
             return inv_k * grad_stiefel_defect(Wv)
-    elif orth == "C":
-        o_val, o_grad = angle_defect, grad_angle_defect
     else:
-        raise ValueError(f"orth must be 'D' or 'C'; got {orth!r}")
+        raise ValueError(f"orth must be 'Coff', 'C' or 'D'; got {orth!r}")
 
     def parts_energy(Wv):
         Vp, Vm = _split(Wv)

@@ -48,17 +48,32 @@ def cosine_matrix(V, eps=_EPS):
     return U.transpose(-2, -1) @ U
 
 
-def angle_defect(V, eps=_EPS):
-    r"""``C(V) = mean over ordered pairs i != j of cos^2(v_i, v_j)``, in ``[0, 1]``."""
+def angle_defect(V, eps=_EPS, diagonal=True):
+    r"""``C(V) = mean over ordered pairs i != j of cos^2(v_i, v_j)``, in ``[0, 1]``.
+
+    ``diagonal=True`` subtracts the identity, so a column whose norm has been
+    floored contributes ``cos_ii = 0`` against a target of 1 and is charged
+    ``1/(k(k-1))``.  That doubles as a dead-column penalty and is why ``C`` scores
+    0.2 on a rank-collapsed matrix where the off-diagonal-only defect scores 0.
+
+    ``diagonal=False`` drops that term and measures *only* the pairwise angles.
+    Use it when a dead column is a legitimate outcome and something else keeps
+    the basis non-degenerate -- in the signed lifting an empty negative lobe is
+    correct (global atrophy is one-signed), and the reconstruction term already
+    prevents collapse because a dead component reconstructs nothing.
+    """
     k = V.shape[-1]
     if k == 1:
         return torch.zeros(V.shape[:-2], dtype=V.dtype, device=V.device)
     C = cosine_matrix(V, eps)
-    eye = torch.eye(k, dtype=V.dtype, device=V.device)
-    return (C - eye).pow(2).sum((-2, -1)) / (k * (k - 1))
+    if diagonal:
+        ref = torch.eye(k, dtype=V.dtype, device=V.device)
+    else:
+        ref = torch.diag_embed(C.diagonal(dim1=-2, dim2=-1))
+    return (C - ref).pow(2).sum((-2, -1)) / (k * (k - 1))
 
 
-def grad_angle_defect(V, eps=_EPS):
+def grad_angle_defect(V, eps=_EPS, diagonal=True):
     r"""Closed-form gradient of ``C``.
 
     With ``u_i = v_i / |v_i|`` and ``M = U'U`` the cosine matrix, write
@@ -77,7 +92,8 @@ def grad_angle_defect(V, eps=_EPS):
     U = V / nrm
     M = U.transpose(-2, -1) @ U
     eye = torch.eye(k, dtype=V.dtype, device=V.device)
-    dU = (4.0 / (k * (k - 1))) * (U @ (M - eye))
+    ref = eye if diagonal else torch.diag_embed(M.diagonal(dim1=-2, dim2=-1))
+    dU = (4.0 / (k * (k - 1))) * (U @ (M - ref))
     # remove the radial part of each column, then undo the scaling
     radial = (U * dU).sum(dim=-2, keepdim=True) * U
     return (dU - radial) / nrm

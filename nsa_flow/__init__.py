@@ -52,7 +52,9 @@ __all__ = [
     # solver
     "nsa_flow", "NSAResult",
     "nsa_flow_data", "reconstruction_fidelity", "grad_reconstruction_fidelity",
-    "relax_into_nonneg", "nsa_flow_signed", "GramOperator",
+    "relax_into_nonneg", "GramOperator",
+    # experimental; see nsa_flow/signed.py -- prefer nsa_flow_data
+    "nsa_flow_signed",
     # layers
     "NSAFlowLinear", "NSAFlowConv2d", "NSAFlowLayer",
     "__version__",

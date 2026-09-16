@@ -85,3 +85,32 @@ def test_k_equals_one_is_zero_and_cosine_matrix_is_unit_diagonal():
     M = cosine_matrix(torch.rand(10, 4, dtype=F64))
     assert (M.diagonal() - 1.0).abs().max() < 1e-12
     assert (M - M.T).abs().max() < 1e-14
+
+
+def test_off_diagonal_variant_ignores_dead_columns_but_not_overlap():
+    """``diagonal=False`` is for settings where a dead column is a correct answer.
+
+    In the signed lifting an empty negative lobe is right -- global atrophy is
+    one-signed -- and the reconstruction term, not the orthogonality term, is
+    what keeps the basis non-degenerate.
+    """
+    p, k = 20, 6
+    Q = _orth(p, k)
+    half = torch.zeros(p, k, dtype=F64)
+    half[:, :3] = Q[:, :3]                       # 3 live, 3 dead
+    assert float(angle_defect(half, diagonal=True)) > 0.05     # charges the dead
+    assert float(angle_defect(half, diagonal=False)) < 1e-24   # correctly zero
+    # but genuine overlap is still detected
+    bad = half.clone()
+    bad[:, 3] = 0.5 * Q[:, 0] + 0.5 * Q[:, 1]
+    assert float(angle_defect(bad, diagonal=False)) > 1e-3
+
+
+@pytest.mark.parametrize("diagonal", [True, False])
+def test_both_variants_have_correct_closed_form_gradients(diagonal):
+    torch.manual_seed(2)
+    V = torch.rand(18, 5, dtype=F64, requires_grad=True)
+    angle_defect(V, diagonal=diagonal).backward()
+    g = grad_angle_defect(V.detach(), diagonal=diagonal)
+    assert (V.grad - g).abs().max() < 1e-12
+    assert (g * V.detach()).sum(0).abs().max() < 1e-12     # tangential per column
