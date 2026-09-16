@@ -1,158 +1,160 @@
-# 🧠 NSA-Flow: Non-negative Stiefel Approximating Flow
+# NSA-Flow: Non-negative Stiefel-Approximating Flow
 
-**NSA-Flow** is a general-purpose optimization framework for interpretable representation learning.  
-It unifies sparse matrix factorization, orthogonalization, and manifold constraints into a single, differentiable algorithm that operates near the Stiefel manifold.
-
-![The NSA-flow framework](docs/nsaflow_info.png)
-
-Documentation of functions [here](https://htmlpreview.github.io/?https://raw.githubusercontent.com/stnava/nsa_flow/main/docs/nsa_flow.html)
-
-
-[Download the Project Slides](./docs/Tuning_Interpretability_with_Orthogonal_Flow.pdf)
-
-
----
-
-## ✨ Overview
-
-Interpretable representation learning remains a core challenge in high-dimensional domains such as neuroimaging, genomics, and text analysis.  
-**NSA-Flow** provides a smooth geometric mechanism for balancing **reconstruction fidelity** and **column-wise decorrelation**, producing sparse, stable, and interpretable representations.
-
-NSA-Flow enforces structured sparsity via a single tunable weight parameter, combining:
-- Continuous orthogonality control via manifold retraction (e.g., soft-polar, polar)
-- Non-negativity via proximal updates
-- Adaptive gradient scaling and learning-rate control
-
----
-
-## 🧩 Key Features
-
-- ⚙️ **Continuous flow near the Stiefel manifold**
-- 🧮 **Non-negative and orthogonal constraints**
-- 🧠 **Interpretable latent representations**
-- 🚀 **Compatible with PyTorch optimization routines**
-- 🧬 **Validated on neuroimaging and genomics datasets**
-
----
-
-## 📦 Installation
-
-Install from PyPI (once published):
-
-```bash
-pip install nsa_flow
-
-Or install the latest development version directly from GitHub:
-
-pip install git+https://github.com/stnava/nsa_flow.git
-
-```
-⸻
-
-🧰 Dependencies
-	•	Python ≥ 3.9
-	•	PyTorch ≥ 2.0
-	•	NumPy ≥ 1.23
-	•	Matplotlib (for optional visualization)
-
-⸻
-
-🚀 Quick Start
-
+A calibration-free relaxation between reconstruction and feature clustering.
 
 ```python
 import torch
-import nsa_flow
-torch.manual_seed(42)
-# Random initialization
-Y = torch.randn(120, 200)+1
-print("Initial orthogonality defect:", nsa_flow.invariant_orthogonality_defect(Y))
-# Run NSA-Flow optimization
-result = nsa_flow.nsa_flow_orth(
-    Y,
-    w=0.5,
-    retraction="soft_polar",
-    optimizer="asgd",
-    max_iter=5000,
-    record_every=1,
-    tol=1e-8,
-    initial_learning_rate=None,
-    lr_strategy='bayes',
-    warmup_iters=10,
-    verbose=False,
-)
-nsa_flow.plot_nsa_trace( result['traces'] )
-print("Final orthogonality defect:", nsa_flow.invariant_orthogonality_defect(result["Y"]))
+from nsa_flow import nsa_flow
+
+X0 = torch.rand(120, 8)          # a loading matrix to refine, e.g. |PCA loadings|
+r  = nsa_flow(X0, w=0.7)         # w is a genuine convex weight in [0, 1]
+
+print(r)
+# NSAResult(w=0.7, iters=61, energy=..., fidelity=..., defect=...,
+#           eff_rank=7.41, stop=grad_map, |Gmap|=4.2e-13)
+print(r.Y.shape)                 # (120, 8), non-negative, near-orthogonal columns
 ```
 
-⸻
+## What it computes
 
-📖 Documentation
-
-NSA-Flow exposes a small set of high-level functions:
-
-Function	Description
-
-- nsa_flow()	Main optimization loop balancing fidelity and orthogonality
-
-- nsa_flow_retract_auto()	Retraction operator enforcing manifold constraints
-
-- invariant_orthogonality_defect()	Computes orthogonality defect measure
-
-- defect_fast()	Fast approximate defect metric
-
-- nsa_flow_autograd()	Autograd-compatible variant for joint optimization
-
-- get_torch_optimizer()	Returns a configured PyTorch optimizer
-
-
-⸻
-
-🧪 Validation
-
-NSA-Flow has been validated in:
-
-	•	Golub leukemia gene expression dataset
-
-	•	Alzheimer’s Disease Neuroimaging Initiative (ADNI) dataset
-
-NSA-Flow constraints maintain or improve performance while simplifying latent representations and improving interpretability.
-
-There is also a layer that can be included (potentially) in deep learning tools.  See `tests/test_nsaf_layer.py`. 
-This has not been used tested.
-⸻
-
-🧑‍💻 Citation
-
-If you use NSA-Flow in research, please cite:
-
-Stnava et al. (2025). NSA-Flow: Non-negative Stiefel Approximating Flow for Interpretable Representation Learning.
-
-⸻
-
-⚖️ License
-
-MIT License © 2025 
-
-⸻
-
-📫 Contact
-
-For issues, feature requests, or contributions, open an issue on
-GitHub.
-
----
-
-
-
-## to publish a release
-
-before doing this - make sure you have a recent run of `pip-compile pyproject.toml`
+Minimise, over `Y >= 0`,
 
 ```
-rm -r -f build/ nsa_flow.egg-info/ dist/
-python -m  build .
-python -m pip install --upgrade twine
-python -m twine upload --repository nsa_flow dist/*
+E_w(Y) = (1 - w) * ||Y - X0||_F^2 / ||X0||_F^2   +   w * D(Y) / (1 - 1/k)
 ```
 
+where, with `G = Y'Y / tr(Y'Y)` the trace-normalised Gram matrix,
+
+```
+D(Y) = || G - I/k ||_F^2 = ||Y'Y||_F^2 / ||Y||_F^4 - 1/k
+```
+
+Both terms are dimensionless and `O(1)`, so **`w` needs no calibration**: no
+normalising constants estimated from the data, no warm-up phase, no dependence on
+`p`, `k` or the scale of `X0`. A reported `w` means the same thing on every
+problem.
+
+### Why this `D`
+
+`D` is the squared distance from the normalised Gram matrix to isotropy. It
+
+- vanishes **exactly** on `R_{>0} * St(p, k)` — orthogonal columns of *equal* norm;
+- equals `k * Var(eigenvalues of G)` = `1/EffectiveRank - 1/k`, so minimising it
+  drives the effective rank to `k`;
+- is invariant under `Y -> cY`, `Y -> UY` and `Y -> YV` for orthogonal `U, V` —
+  the same group that preserves the constraint being relaxed;
+- charges at least `1/r - 1/k` for rank `r < k`, so rank collapse is penalised;
+- is bounded: `0 <= D <= 1 - 1/k`;
+- satisfies `<grad D, Y> = 0`, so it **cannot change `||Y||`** — scale is pinned by
+  the fidelity term alone, and no renormalisation step is needed.
+
+It splits as
+
+```
+D  =  sum_{i != j} G_ij^2   +   sum_i (G_ii - 1/k)^2
+      \_______________/         \___________________/
+        decorrelation              norm balance
+```
+
+The first term alone is the "invariant orthogonality defect" used in v1 and
+elsewhere. Dropping the second is what made that functional blind to
+conditioning, basis-dependent, and minimised by rank-deficient matrices.
+
+### What `w` does
+
+`w = 0` returns `max(0, X0)`. As `w -> 1`, `D -> 0`, and since `Y >= 0` with
+`Y'Y` diagonal forces **pairwise disjoint column supports**, the limit is a hard
+clustering of the `p` features into `k` groups — the feasible set of orthogonal
+NMF, equivalent to k-means. In between, the overlap is bounded:
+
+```
+max_{i != j} <y_i, y_j>  <=  sqrt(D) * ||Y||_F^2
+```
+
+so "approximately disjoint factors" is a claim with a number attached.
+
+## Solver
+
+Spectral projected gradient: Barzilai–Borwein steps with Armijo backtracking on
+the projected step. Every accumulation point is a stationary point of the
+constrained problem, and `result.grad_map` is a computable stationarity
+certificate (`result.stop_reason` says why it stopped — never a silent claim of
+convergence).
+
+The inner loop forms one Gram product and two `[p,k] x [k,k]` products: `O(p k^2)`,
+with **no SVD, eigendecomposition or QR**. Typical convergence is 15–300
+deterministic iterations. Pass `compile=True` for a 3–4x speedup via
+`torch.compile` at moderate sizes.
+
+Empirically `E_w` has a unique optimum for `w < 1` — 24 random restarts agree to
+machine precision on every problem family tested — so there are no restarts,
+schedules or step-size heuristics to tune.
+
+## Torch layers
+
+Two routes, both sound:
+
+```python
+from nsa_flow import NSAFlowLinear, NSAFlowConv2d
+
+# (preferred) penalty: a standard layer plus a regulariser
+layer = NSAFlowLinear(256, 32)
+loss  = task_loss(layer(x), y) + 0.1 * layer.defect()
+
+# (parameterisation) effective weight is blended toward the projection
+layer = NSAFlowLinear(256, 32, w=0.5)   # w is the true blend fraction
+```
+
+`polar_factor` and `project_scaled_stiefel` carry an explicit
+Sylvester-equation derivative. Differentiating `torch.linalg.svd` divides by
+`sigma_i^2 - sigma_j^2` and returns NaN at repeated singular values — which is
+exactly what `nn.init.orthogonal_` produces. The polar factor is smooth wherever
+`Y` has full column rank; its derivative divides by `h_i + h_j > 0`.
+
+## API
+
+| Function | Purpose |
+|---|---|
+| `nsa_flow(target, w, ...)` | solve; returns `NSAResult` |
+| `stiefel_defect(Y)` | `D(Y)` |
+| `stiefel_defect_normalised(Y)` | `D(Y)/(1-1/k)`, in `[0,1]` |
+| `effective_rank(Y)` | `k/(kD+1)`, in `[1,k]` |
+| `energy` / `grad_energy` / `value_and_grad` | `E_w` and its gradient |
+| `project_nonneg` / `project_scaled_stiefel` / `polar_factor` | projections |
+| `NSAFlowLinear` / `NSAFlowConv2d` / `NSAFlowLayer` | torch layers |
+
+For `k > p`, orthonormal columns are impossible and `inf D = 1/p - 1/k > 0`;
+this is reported rather than hidden behind a silently row-orthonormal answer.
+
+## Install, test, reproduce
+
+```bash
+make install       # editable install with experiment + test extras
+make test          # 133 assertions
+make theory        # just the property battery (70 assertions)
+make experiments   # regenerate paper/results/ and paper/figs/
+make paper         # build paper/nsaflow.pdf
+```
+
+`tests/test_theory.py` states every proposition in the paper executably — the
+bounds, the zero set, the invariances, the spectral identity, the decomposition,
+the collapse floor, the gradient identities, the disjoint-support equivalence,
+the overlap bound, and term calibration for every option pair. If a claim in the
+paper is weakened, one of those fails.
+
+## Migrating from 1.x
+
+The 1.x API is gone; `nsa_flow(target, w=...)` replaces
+`nsa_flow_orth(Y0, X0=..., ...)` and the retraction, optimiser and
+learning-rate-strategy modules are removed. The appendix of the paper lists the
+substantive changes and why each was made; the 1.x code and tests are preserved
+under `attic/` for reference.
+
+## Citation
+
+```
+Avants, B. NSA-Flow: Non-negative Stiefel-Approximating Flow --- a
+calibration-free relaxation between reconstruction and feature clustering.
+```
+
+MIT licensed.
