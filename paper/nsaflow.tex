@@ -70,16 +70,29 @@ data-dependent calibration, and $\ip{\nabla D}{Y} = 0$ identically, so scale is
 pinned by the fidelity term alone.
 
 The resulting objective is minimised by spectral projected gradient. The inner
-loop is factorisation-free at $O(pk^2)$, converges in tens to a few hundred
-deterministic iterations, and---empirically, over random restarts on every
-problem family we tried---reaches a unique optimum for $w<1$, so there are no
-restarts, schedules or learning-rate heuristics to tune. On synthetic data with a
-planted non-negative basis, on Golub leukemia expression, and on ADNI regional
-brain volumes, $w$ traces an interpretable path from plain reconstruction to
-disjoint factors, and the quantitative bound
+loop is factorisation-free at $O(pk^2)$, and the solver is deterministic:
+empirically, random restarts reach the same optimum to machine precision for
+$w \le 0.9$ on every problem family we tried, so there are no restarts,
+schedules or learning-rate heuristics to tune. Conditioning degrades as
+$w\to1$---iteration counts grow from tens to thousands, and at $w=1$ the scale
+is genuinely unconstrained, which the method reports rather than conceals.
+
+NSA-Flow refines a supplied basis, and on synthetic data with a planted
+non-negative basis it improves every basis it is handed on every metric we
+measure --- PCA, NMF and sparse PCA loadings alike. It does not, however, make a
+poor basis competitive with a good one: PCA refined is still worse than sparse
+PCA refined. On Golub leukemia expression and ADNI regional
+brain volumes it does \emph{not} improve prediction---PCA is as good or better
+everywhere---but it converts dense, sign-indefinite, mutually overlapping
+components into non-negative components with nearly disjoint supports, reducing
+the mean number of components an active feature loads on from about four to below
+one half, and the quantitative bound
 $\max_{i\ne j}\ip{y_i}{y_j} \le \sqrt{D}\,\Fnorm{Y}^2$ makes ``approximately
-disjoint'' a statement with a number attached. All claims in the paper are
-asserted executably in the accompanying test suite.
+disjoint'' a statement with a number attached. We report the accuracy cost, and
+locate it: almost all of it is the price of the sign constraint rather than of
+the orthogonality relaxation. All claims in the paper are asserted executably in
+the accompanying test suite ($135$ assertions, $70$ of them
+properties of the energy).
 \end{abstract}
 
 \section{Introduction}
@@ -515,34 +528,60 @@ well-scaled trade-off.}
 \label{fig:calibration}
 \end{figure}
 
-\subsection{Recovery of a planted non-negative basis}
+\subsection{Refinement of a planted non-negative basis}
 
 We generate $X = ZV_{\text{true}}^\top + \sigma\varepsilon$ with
 $V_{\text{true}}$ a non-negative disjoint-support basis ($p=60$, $k=6$, $n=300$),
-so the ground truth lies in the $w\to1$ solution class, and measure recovery of
-$V_{\text{true}}$ from PCA loadings refined at each $w$. Baselines are PCA,
-sparse PCA and NMF. Figure~\ref{fig:recovery} and Table~\ref{tab:recovery} report
-mean matched $|\cos|$, support F1, and the mean number of extra components each
-active feature loads on.
+so the ground truth lies in the $w\to1$ solution class.
+
+The question to ask needs care. NSA-Flow is defined as refining a \emph{supplied}
+target $X_0$, so comparing ``PCA loadings refined by NSA'' against ``sparse PCA''
+compares the choice of input basis, not the operator; and on that comparison
+sparse PCA wins outright, reaching matched $|\cos| = 0.93$ against $0.69$ for
+PCA$+$NSA averaged over noise levels. The informative question is whether NSA
+improves \emph{whatever} basis it is handed. Table~\ref{tab:recovery} and
+Figure~\ref{fig:recovery} answer it: refinement improves all three bases on all
+three metrics, and the gain is largest where the base is worst.
+
+Two things follow. First, the operator does what the theory says it should ---
+driving $D$ down recovers disjoint structure, monotonically in $w$, from any
+starting basis. Second, refinement does not substitute for a good starting
+basis: PCA$+$NSA remains well below sparse PCA$+$NSA. Since the fidelity term
+anchors the solution near $X_0$ by construction, this is the expected behaviour
+rather than a surprise, and it is the clearest argument for the joint
+formulation over factors and loadings that we leave open.
 
 \input{results/e1_table.tex}
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\textwidth]{figs/recovery.pdf}
-\caption{Recovery of a planted non-negative basis as a function of $w$, at four
-noise levels, against PCA, sparse PCA and NMF (grey lines). (c) reports factor
-readability: zero means every feature loads on exactly one component.}
+\caption{Refinement of three base loading matrices as a function of $w$, averaged
+over four noise levels and ten replicates. Dotted lines are the unrefined bases.
+(c) reports factor readability: zero means every feature loads on exactly one
+component.}
 \label{fig:recovery}
 \end{figure}
 
 \subsection{The $w=1$ limit is a feature clustering}
 
 Assigning each feature to its dominant component turns a solution into a
-partition. Table~\ref{tab:clustering} reports the adjusted Rand index of that
-partition against the planted truth and against $k$-means run directly on the
-features, confirming Proposition~\ref{prop:disjoint} operationally: as $w\to1$
-NSA-Flow converges on a clustering, and it is close to the one $k$-means finds.
+partition, which makes Proposition~\ref{prop:disjoint} testable against
+$k$-means run directly on the features. Table~\ref{tab:clustering} reports
+adjusted Rand indices against the planted truth.
+
+The result is a useful qualification of the refinement story. $k$-means recovers
+the planted partition exactly, and so does sparse PCA; refinement leaves that
+intact and improves the NMF partition from $0.963$ to $0.981$. But it slightly
+\emph{degrades} the PCA partition, from $0.654$ to $0.627$. Driving $D$ to zero
+commits to \emph{some} partition, and from a basis that is already confused about
+which features group together, committing harder is not an improvement. The
+orthogonality term sharpens a partition; it does not discover one.
+
+This is the same lesson as \S\ref{sec:exp-tradeoff} seen from a different angle,
+and it bounds the claim properly: NSA-Flow is worth applying to a basis that is
+approximately right and insufficiently disjoint, which is the regime its fidelity
+term presupposes.
 
 \input{results/e3_table.tex}
 
@@ -560,14 +599,18 @@ grows superlinearly in $p$ --- $112$\,s per fit at $p=7129$ against $1.4$\,s at
 $p=2000$.
 
 The result, in Table~\ref{tab:golub} and Figure~\ref{fig:realdata}(a), is
-\emph{not} an improvement in classification. Plain PCA is the strongest
-predictor (AUC $\approx 0.99$, accuracy $\approx 0.94$); NSA-PCA gives up a
-small amount of both. What it buys is factor readability: the mean number of
+\emph{not} an improvement in classification. Plain PCA is the strongest predictor
+(AUC $0.986 \pm 0.021$, accuracy $0.935$); the best NSA-PCA setting reaches
+$0.961$ ($\Delta = -0.026$), and sparse PCA is statistically tied with PCA at
+$0.984$ ($\Delta = -0.002$). What it buys is factor readability: the mean number of
 extra components each active gene loads on falls from about $4$ (PCA: every gene
-loads on every component) to below $0.2$ at $w=0.99$, and loading sparsity rises
-from essentially zero to over $0.76$. Sparse PCA achieves part of the same
-readability gain, at intermediate sparsity and without non-negativity or a
-clustering interpretation.
+loads on every component) to $0.17$ at $w=0.99$, and loading sparsity rises
+from $0.003$ to $0.77$. The comparison with sparse PCA is the informative one:
+sparse PCA buys a halving of overlap ($3.99 \to 1.65$) essentially for free,
+whereas NSA-PCA goes an order of magnitude further ($\to 0.17$) and pays
+$2.6$ AUC points for it. If near-disjoint, non-negative factors are what is
+wanted, that is the price; if merely sparser factors suffice, sparse PCA is the
+better trade.
 
 We also ran the comparison without the gene filter, at the full $p=7129$
 (\texttt{results/e4\_golub\_unfiltered\_p7129.csv}). Every method scores lower
@@ -597,13 +640,16 @@ than wrong magnitudes. A both-hemisphere complete-case analysis ($n=782$, $51$
 regions) is reported alongside as a robustness check. Age and sex are regressed
 out inside each training fold.
 
-The pattern matches Golub. Across all three tasks PCA attains the highest AUC
-and NSA-PCA is a little below it, while support overlap falls from $4.0$ (every
-region on every component) to about $0.37$. The one place $w$ helps
-monotonically is the hardest task, CN vs MCI, where AUC rises with $w$ across
-the whole range --- consistent with the idea that decorrelated, localised
-components are less prone to overfitting a weak signal --- but even there it does
-not overtake PCA.
+The pattern matches Golub. PCA attains the highest AUC on all three tasks
+($0.859$, $0.683$, $0.715$); NSA-PCA trails by $0.046$, $0.014$ and $0.039$
+respectively at its best setting, while support overlap falls from $3.99$ ---
+every region loading on every component --- to $0.36$. Sparse PCA is again
+within noise of PCA ($\Delta \le 0.008$) at intermediate overlap $\approx 1.6$.
+
+The one task where $w$ helps monotonically is the hardest and most clinically
+relevant, CN vs MCI: AUC rises from $0.660$ at $w=0$ to $0.670$ at $w=0.75$,
+consistent with decorrelated, localised components being less prone to
+overfitting a weak signal. Even there it does not overtake PCA's $0.683$.
 
 \input{results/e5_table.tex}
 
@@ -635,14 +681,18 @@ Comparing PCA against $w=0$ therefore isolates the price of \emph{requiring
 non-negativity}, and comparing $w=0$ against larger $w$ isolates the effect of
 the orthogonality term proper.
 
-Read that way, essentially the whole accuracy gap is paid at $w=0$. On ADNI
-CN vs DEM, PCA reaches AUC $\approx 0.86$ and $w=0$ drops to $\approx 0.81$;
-raising $w$ from $0$ to $0.99$ then moves AUC by a fraction of that while
-reducing support overlap by an order of magnitude. On Golub the same holds, with
-AUC recovering slightly as $w$ grows before falling again at $w=0.99$. The cost
-of interpretability here is largely the cost of the sign constraint, not of the
-orthogonality relaxation --- which is the useful thing to know, because the sign
-constraint is what makes the factors additive and nameable in the first place.
+Read that way, most of the accuracy gap is paid at $w=0$. On ADNI CN vs DEM, PCA
+reaches $0.859$ and $w=0$ already drops to $0.813$ --- a loss of $0.046$ --- while
+raising $w$ from $0$ to $0.99$ costs a further $0.020$ and reduces support overlap
+from $3.99$ to $0.36$. On Golub, $w=0$ costs $0.030$ and increasing $w$ then
+\emph{recovers} accuracy slightly (to $\Delta=-0.026$ at $w=0.75$) before falling
+back. On ADNI CN vs MCI the orthogonality term is net positive, recovering
+$0.010$ of the $0.024$ lost to the sign constraint.
+
+So the sign constraint, not the orthogonality relaxation, is the expensive part
+--- which is the useful thing to know, because the sign constraint is what makes
+the factors additive and nameable in the first place, and it is not something
+this paper's formulation could trade away.
 
 We therefore make no claim that NSA-Flow improves prediction. On both datasets
 it does not. The claim is that it converts dense, sign-indefinite, mutually
@@ -667,8 +717,19 @@ way to trace the path for figures.
 \subsection{Cost and numerical robustness}
 
 Figure~\ref{fig:speed} and Table~\ref{tab:speed} report per-iteration cost and
-end-to-end time. Table~\ref{tab:svd} documents the SVD-gradient failure of
-\S\ref{sec:algorithm}. Table~\ref{tab:lr} records a separate lesson: in v1 the
+end-to-end time. Both implementations are scored with the \emph{same} yardstick,
+the normalised $D$ of \eqref{eq:D}, so the comparison does not turn on each
+method's own notion of defect.
+
+Two caveats make the comparison fair rather than flattering. First, v1 is given a
+hand-set step of $10^{-3}$: its shipped default (\texttt{lr\_strategy="bayes"})
+returns $\approx 95.9$ and diverges, so running it as configured would not
+produce a curve at all. Second, v1 is capped at $500$ iterations. Even so, v2
+converges $1.6$--$13\times$ faster in wall-clock terms and ends at a defect one
+to two orders of magnitude lower ($0.005$--$0.012$ against $0.29$--$0.46$ at
+$w=0.9$): at a step size small enough to be stable, v1 makes very little progress
+on orthogonality within its iteration budget. Table~\ref{tab:svd} documents the
+SVD-gradient failure of \S\ref{sec:algorithm}. Table~\ref{tab:lr} records a separate lesson: in v1 the
 learning-rate ``estimator'' built its candidate grid from a single
 hyperparameter and never from the data, so every strategy returned the same
 constant regardless of $p$, $k$, the gradient or the objective --- the shipped
@@ -737,7 +798,7 @@ that weight buys, and what it buys here is readability, at a price we can now
 state.
 
 \paragraph{Reproducibility.} Code, the property battery and the experiment
-harness are in the accompanying repository. \texttt{make test} runs $133$
+harness are in the accompanying repository. \texttt{make test} runs $135$
 assertions, $70$ of which state the propositions of \S\ref{sec:functional}
 executably; \texttt{make paper} regenerates every table and figure from scratch.
 
