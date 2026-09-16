@@ -26,14 +26,16 @@ TASKS = {"CN vs DEM": ("CN", "DEM"), "CN vs MCI": ("CN", "MCI"),
 class NSAData(BaseEstimator, TransformerMixin):
     """Data-anchored basis: min (1-w)||X - XVV'||^2/||X||^2 + w Dtilde(V), V >= 0."""
 
-    def __init__(self, n_components=5, w=0.5, max_iter=5000):
+    def __init__(self, n_components=5, w=0.5, max_iter=5000, init="relax"):
         self.n_components = n_components
         self.w = w
         self.max_iter = max_iter
+        self.init = init
 
     def fit(self, X, y=None):
         r = nsa_flow_data(torch.as_tensor(np.asarray(X), dtype=F64),
-                          k=self.n_components, w=self.w, max_iter=self.max_iter)
+                          k=self.n_components, w=self.w, max_iter=self.max_iter,
+                          init=self.init)
         self.components_ = r.Y.numpy()
         self.defect_ = r.defect
         self.fidelity_ = r.fidelity
@@ -57,8 +59,10 @@ def run(n_repeats=10, seed=0):
                   "SparsePCA", 4.0)]
         specs += [(f"anchored (w={w})", (lambda w=w: NSAPCA(K, w)), "anchored", w)
                   for w in WS]
-        specs += [(f"data (w={w})", (lambda w=w: NSAData(K, w)), "data", w)
-                  for w in WS]
+        specs += [(f"relax (w={w})", (lambda w=w: NSAData(K, w, init="relax")),
+                   "relax", w) for w in WS]
+        specs += [(f"absinit (w={w})", (lambda w=w: NSAData(K, w, init="abs")),
+                   "absinit", w) for w in WS]
         for name, ld, family, w in specs:
             s = cv_score(Xt, yt, ld, n_components=K, n_splits=5,
                          n_repeats=n_repeats, seed=seed, covariates=ct)

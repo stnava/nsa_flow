@@ -31,7 +31,8 @@ from .energy import stiefel_defect, stiefel_defect_normalised, effective_rank
 from .project import project_nonneg
 from .solve import NSAResult
 
-__all__ = ["reconstruction_fidelity", "grad_reconstruction_fidelity", "nsa_flow_data"]
+__all__ = ["reconstruction_fidelity", "grad_reconstruction_fidelity", "nsa_flow_data",
+           "relax_into_nonneg"]
 
 
 def _gram_terms(V, S):
@@ -58,7 +59,94 @@ def grad_reconstruction_fidelity(V, S, c):
     return (2.0 / c) * (-2.0 * SV + SV @ B + V @ A)
 
 
-def nsa_flow_data(X, k=None, w=0.5, *, init=None, max_iter=5000, tol=None,
+def _smooth_descent(V, obj, grad, max_iter, tol, sigma):
+    """BB + Armijo on an unconstrained smooth objective; returns the iterate."""
+    E = float(obj(V))
+    g = grad(V)
+    t = 1.0 / max(float(g.norm()), 1e-12)
+    V_prev = g_prev = None
+    for _ in range(max_iter):
+        if V_prev is not None:
+            s_ = V - V_prev
+            r_ = g - g_prev
+            sr = float((s_ * r_).sum())
+            t = float((s_ * s_).sum()) / sr if sr > 0 else 1e12
+            t = min(max(t, 1e-12), 1e12)
+        ok = False
+        for _ in range(60):
+            V_new = V - t * g
+            d2 = float((V_new - V).pow(2).sum())
+            if float(obj(V_new)) <= E - sigma * d2 / t:
+                ok = True
+                break
+            t *= 0.5
+        if not ok:
+            break
+        if (d2 ** 0.5) / t <= tol:
+            V = V_new
+            break
+        V_prev, g_prev = V, g
+        V = V_new
+        E = float(obj(V))
+        g = grad(V)
+    return V
+
+
+def relax_into_nonneg(S, c, k, w, mus=None, max_iter=600, tol=1e-10, sigma=1e-4,
+                      trS=None):
+    r"""Penalty homotopy: follow the solution path from signed PCA into ``V >= 0``.
+
+    Solves a sequence of *smooth unconstrained* problems
+
+        E_w(V) + mu ||min(0, V)||_F^2,      mu = 0, mu_1, mu_2, ... increasing,
+
+    warm-starting each from the last.  At ``mu = 0`` the ``w = 0`` minimiser is the
+    signed PCA basis -- the global optimum of an easy problem -- and increasing
+    ``mu`` deforms it continuously towards the feasible set.  The penalty is
+    ``C^1`` (its gradient ``2 mu min(0, V)`` is continuous), so every subproblem is
+    smooth and ordinary descent applies.
+
+    This exists because the alternative -- mapping a signed basis to a
+    non-negative one in one shot -- has no variational justification.  ``abs()``
+    is not even the projection (for an entry ``-3`` it moves distance 6 where the
+    projection moves 3) and it fabricates wrongly-signed mass; and no one-shot map
+    can work in principle, because a signed component encodes contrast that a
+    single non-negative component cannot represent.
+    """
+    from .energy import grad_stiefel_defect, stiefel_defect_normalised
+    p = S.shape[-1]
+    inv_k = 1.0 / (1.0 - 1.0 / k) if k > 1 else 0.0
+    if mus is None:
+        mus = [0.0] + [10.0 ** e for e in range(-3, 5)]
+
+    evals, evecs = torch.linalg.eigh(S)
+    V = evecs[:, -k:].flip(-1).clone()          # signed, NOT abs: the mu=0 optimum
+
+    def make(mu):
+        def obj(Vv):
+            e = (1.0 - w) * reconstruction_fidelity(Vv, S, c, trS)
+            if k > 1 and w != 0.0:
+                e = e + w * stiefel_defect_normalised(Vv)
+            if mu:
+                e = e + mu * Vv.clamp_max(0.0).pow(2).sum()
+            return e
+
+        def grad(Vv):
+            g = (1.0 - w) * grad_reconstruction_fidelity(Vv, S, c)
+            if k > 1 and w != 0.0:
+                g = g + (w * inv_k) * grad_stiefel_defect(Vv)
+            if mu:
+                g = g + 2.0 * mu * Vv.clamp_max(0.0)
+            return g
+        return obj, grad
+
+    for mu in mus:
+        obj, grad = make(mu)
+        V = _smooth_descent(V, obj, grad, max_iter, tol, sigma)
+    return V
+
+
+def nsa_flow_data(X, k=None, w=0.5, *, init="relax", max_iter=5000, tol=None,
                   sigma=1e-4, dtype=None, device=None, verbose=False,
                   keep_trace=False):
     """Fit a non-negative, near-orthonormal basis ``V`` reconstructing ``X``.
@@ -97,15 +185,27 @@ def nsa_flow_data(X, k=None, w=0.5, *, init=None, max_iter=5000, tol=None,
     if tol is None:
         tol = 1e-9 if Xt.dtype == torch.float64 else 1e-6
 
-    if init is not None:
+    if isinstance(init, str):
+        if k is None:
+            raise ValueError("give k when init is a strategy name")
+        evals, evecs = torch.linalg.eigh(S)
+        E = evecs[:, -k:].flip(-1)
+        if init == "relax":
+            # Follow the path from signed PCA into the feasible set.
+            V = relax_into_nonneg(S, c, k, float(w), trS=trS)
+        elif init == "clamp":
+            V = E.clamp_min(0.0).clone()        # the actual projection
+        elif init == "abs":
+            V = E.abs().clone()                 # kept only for the ablation
+        elif init == "random":
+            V = torch.rand(p, k, dtype=Xt.dtype, device=Xt.device)
+        else:
+            raise ValueError(f"unknown init strategy {init!r}")
+    elif init is None:
+        raise ValueError("give either k with an init strategy, or an explicit init")
+    else:
         V = torch.as_tensor(init).to(dtype=Xt.dtype, device=Xt.device).detach().clone()
         k = V.shape[-1]
-    else:
-        if k is None:
-            raise ValueError("give either k or init")
-        # |leading eigenvectors of X'X|, i.e. non-negative PCA loadings
-        evals, evecs = torch.linalg.eigh(S)
-        V = evecs[:, -k:].flip(-1).abs().clone()
     if V.shape != (p, k):
         raise ValueError(f"init shape {tuple(V.shape)} != [p, k] = {(p, k)}")
 
