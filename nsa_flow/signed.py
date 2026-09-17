@@ -45,41 +45,40 @@ against itself.  The off-diagonal angle term already pushes every pair of lobes
 apart, including each component's own pair, so this is a refinement rather than a
 necessity; ``lobe=1.0`` drives the overlap to exactly zero.
 
-BUG: THE DEFAULT init="relax" NEVER RUNS THE SOLVER AT w > 0.  Read this first.
-The relax branch builds its starting point as
+FIXED in 2.8.0: the solver used to exit after one iteration.  Recorded because
+every signed result produced before this release describes an unoptimised
+starting point, not a solution.
+
+The cause was an interaction, not a single mistake.  ``C(diagonal=False)`` is a
+function of column directions only and is therefore discontinuous at a zero
+column (see ``nsa_flow.angle``), which makes an all-zero lobe a spurious local
+minimum that no descent step can leave.  ``init="relax"`` used to build
 
     W = cat([V0.clamp_min(0), zeros_like(V0)])
 
-so ``V-`` is EXACTLY ZERO by construction rather than by optimisation.  An
-exactly-zero column has an identically-zero angle-defect gradient, so it is a
-degenerate fixed point that can never leave zero; with ``w > 0`` the first
-Armijo line search then fails and the function returns that initialisation
-unchanged.  Measured on ADNI cortical thickness (centred, ``k = 5``):
+putting ``V-`` exactly on that discontinuity.  Energy at the start was 0.1543
+and every projected step of any length evaluated to about 0.2182, so the Armijo
+line search correctly rejected all 60 halvings and the loop exited at iteration
+one.  It then reported ``grad_map=inf`` -- the loop's sentinel, assigned only
+after an accepted step -- with ``converged=True``.
 
-    w     init      iters   stop          grad_map   dead parts
-    0.00  relax       652   line_search   2.45e-09     0 of 10
-    0.10  relax         1   line_search   inf          5 of 10
-    0.25  relax         1   line_search   inf          5 of 10
-    0.50  relax         1   line_search   inf          5 of 10
-    0.25  split      1200   line_search   2.39e-09     0 of 10
-    0.50  split      1407   line_search   2.75e-09     0 of 10
+``init="relax"`` now seeds both lobes from the relaxed solution,
+``V- = (-V0).clamp_min(0)``.  On ADNI thickness (centred, ``k = 5``,
+``w = 0.5``) that converges in 446 iterations against 1407 for ``init="split"``,
+at a better certificate (1.11e-09 against 2.75e-09), better sparsity (0.433
+against 0.427) and better reconstruction (0.2920 against 0.2923).
 
-The reported ``grad_map`` of ``inf`` is the sentinel the loop initialises, not a
-measured value: it is only assigned after a step is accepted, so a first-iteration
-failure reports ``inf`` whatever the true stationarity was.
+``init="split"`` is NOT a safe alternative on non-negative uncentred data: it
+stalls at two iterations there, with reconstruction up to twelve times worse
+(ADNI raw, ``k = 2``, ``w = 0.9``: 0.1117 against 0.0095).  An earlier version
+of this docstring claimed the lobes "do not survive a nonzero w" and presented a
+sparsity-versus-contrast trade-off; both were artifacts of comparing a converged
+solve against a stalled one, and neither is true.
 
-Consequences, stated plainly because an earlier version of this docstring got
-them wrong.  The "lobes do not survive a nonzero w" behaviour described here
-before was this bug, not a property of the lifting, and the sparsity difference
-quoted against ``init="split"`` compared a converged split solution against a
-failed relax initialisation.  ``init="split"`` converges at ``w = 0.5`` with all
-``2k`` parts alive, so contrast capacity and a nonzero ``w`` are NOT in conflict.
-It also explains why the signed and data-anchored bases matched to four decimals:
-``relax_into_nonneg`` is what ``nsa_flow_data`` initialises from too, so
-``init="relax"`` returns approximately that same solution.
-
-Until the relax branch is fixed, use ``init="split"``.  Any result computed with
-the default at ``w > 0`` is a result about an unoptimised initialisation.
+A stall far from stationarity remains possible -- the geometry can genuinely
+trap the iterate on strongly positive data -- but it is no longer silent: the
+certificate is measured rather than sentinel, ``converged`` requires it to be
+finite, and a ``RuntimeWarning`` names the iteration count and ``|Gmap|``.
 
 Capacity.  At ``w = 0`` the lifting reproduces signed PCA's reconstruction to the
 digit (0.5723 against 0.572269 on ADNI volumes), settling the question the
@@ -155,7 +154,9 @@ Gradient.  With ``F(V)`` the reconstruction term, ``dF/dV+ = dF/dV`` and
 ``dF/dV- = -dF/dV`` by the chain rule, so the data term costs one extra sign flip
 and the defect term acts on ``W`` directly.
 """
+import math
 import time
+import warnings
 
 import torch
 
@@ -269,8 +270,16 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Coff", lobe=1.0,
             # The exact signed basis, losslessly: V+ = max(0,E), V- = max(0,-E).
             W = torch.cat([E.clamp_min(0.0), (-E).clamp_min(0.0)], dim=-1).clone()
         elif init == "relax":
+            # V- must NOT start at exactly zero.  C(diagonal=False) depends only
+            # on column directions, so it is discontinuous at a zero column and
+            # an all-zero lobe is a spurious local minimum the line search
+            # cannot leave.  Seeding both lobes from the relaxed solution costs
+            # nothing and converges in 446 iterations against 1407 for "split"
+            # on ADNI thickness (k=5, w=0.5), at a better grad_map, sparsity and
+            # reconstruction.  See the module docstring.
             V0 = relax_into_nonneg(S, c, k, float(w), trS=c)
-            W = torch.cat([V0.clamp_min(0.0), torch.zeros_like(V0)], dim=-1).clone()
+            W = torch.cat([V0.clamp_min(0.0), (-V0).clamp_min(0.0)],
+                          dim=-1).clone()
         else:
             raise ValueError(f"unknown init strategy {init!r}")
     else:
@@ -329,16 +338,33 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Coff", lobe=1.0,
             t = float((s_ * s_).sum()) / sr if sr > 0 else 1e12
             t = min(max(t, 1e-12), 1e12)
         accepted = False
+        t_first, dn2_first = t, None
         for _ in range(60):
             W_new = project_nonneg(W - t * g)
             d_ = W_new - W
             dn2 = float((d_ * d_).sum())
+            if dn2_first is None:
+                dn2_first = dn2
             if float(parts_energy(W_new)[0]) <= E - sigma * dn2 / t:
                 accepted = True
                 break
             t *= 0.5
         if not accepted:
             stop = "line_search"
+            # Report a measured certificate rather than the sentinel.  Without
+            # this a first-iteration failure returns grad_map=inf, which reads
+            # as a computed value and let a stalled solve claim convergence.
+            if not math.isfinite(gmap):
+                gmap = (dn2_first ** 0.5) / t_first
+            # A finite but large certificate is not stationarity.  The caller
+            # cannot be expected to inspect grad_map on every call, so say so.
+            if gmap > max(tol, 0.0) * 1e3:
+                warnings.warn(
+                    "nsa_flow_signed: line search stalled after "
+                    f"{it} iteration(s) with |Gmap|={gmap:.2e} against "
+                    f"tol={tol:.1e}; the returned point is not stationary. "
+                    "Inspect stop_reason and grad_map.",
+                    RuntimeWarning, stacklevel=3)
             break
         gmap = (dn2 ** 0.5) / t
         W_prev, g_prev = W, g
@@ -381,13 +407,22 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Coff", lobe=1.0,
                     break
                 t *= 0.5
             if not ok:
+                stop = "line_search"
+                if math.isfinite(gmap):
+                    gmap = (d2 ** 0.5) / t
                 break
             Wp, gp = W, g
             W = W_new
             E = float(parts_energy(W)[0])
             g = parts_grad(W)
-            if (d2 ** 0.5) / t <= tol:
+            gmap = (d2 ** 0.5) / t
+            if gmap <= tol:
+                stop = "grad_map"
                 break
+
+    if consolidate:
+        E, F, D = parts_energy(W)          # F and D were pre-consolidation
+        E = float(E)
 
     Vp, Vm = _split(W)
     V = Vp - Vm
@@ -395,7 +430,8 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Coff", lobe=1.0,
         Y=V, target=None, w=float(w), energy=E, fidelity=float(F),
         defect=float(D), raw_defect=float(stiefel_defect(W)),
         effective_rank=float(effective_rank(W)),
-        scale_ratio=float("nan"), iters=it, converged=stop != "max_iter",
+        scale_ratio=float("nan"), iters=it,
+        converged=stop != "max_iter" and math.isfinite(gmap),
         stop_reason=stop, grad_map=float(gmap), seconds=time.time() - t0,
         w_schedule=[float(w)], trace=trace, nonneg=True, align=False,
     )

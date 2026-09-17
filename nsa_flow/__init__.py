@@ -39,7 +39,7 @@ from .subspace import (SubspaceAnchor, negative_mass, subspace_fidelity,
                        grad_subspace_fidelity)
 from .layers import NSAFlowLinear, NSAFlowConv2d, NSAFlowLayer
 
-__version__ = "2.7.0"
+__version__ = "2.8.0"
 
 __all__ = [
     # energy

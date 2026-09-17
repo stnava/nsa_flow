@@ -28,6 +28,30 @@ precisely the v1 collapse failure described above.  Each floored column is charg
 1/k``, exactly ``0.2`` at ``k = 5``, against ``0`` for the pairwise sum.  That is what
 ``diagonal=True`` computes and it is the default for this reason.
 
+DISCONTINUOUS AT A ZERO COLUMN, and the optimiser has to respect that.  ``C``
+is a function of column DIRECTIONS only, so a column of norm ``1e-20``
+contributes the same O(1) cosines as one of norm 1.  There is no limit to
+recover: as ``|v_i| -> 0`` along a fixed direction the cosines stay O(1), while
+at exactly zero the floored norm makes them 0.  Measured, as one of four
+columns vanishes:
+
+    |v_3|      C (diagonal=False)
+    0                  0.0910
+    1e-12              0.2895        <- jumps here, at the eps floor
+    1e-06              0.2885
+    1e-01              0.2757
+
+Smoothing the norm does NOT fix this -- the discontinuity is in the direction
+limit, not the magnitude, so ``sqrt(|v|^2 + eps^2)`` moves the cliff without
+removing it.  The consequence is practical: an all-zero column is a spurious
+local minimum that a descent method cannot leave, because every step off zero
+is uphill.  ``diagonal=True`` charges a dead column ``1/(k(k-1))`` and so
+repels zero, but it does not make ``C`` continuous either.
+
+Initialisers must therefore not start a column at exactly zero.  This is why
+``nsa_flow_signed`` seeds BOTH lobes (see its module docstring); seeding ``V-``
+at zero made the solver exit after one iteration.
+
 Properties (all asserted in ``tests/test_angle.py``):
 
 * ``C = 0`` exactly when the columns are mutually orthogonal, at ANY norms.

@@ -24,6 +24,9 @@ which adds one ``k x k`` SVD per evaluation for the Procrustes rotation.
 import time
 import warnings
 
+import math
+import warnings
+
 import torch
 
 from .energy import (energy, stiefel_defect, stiefel_defect_normalised,
@@ -101,10 +104,13 @@ def _solve_fixed_w(Y, X0, w, denom, nonneg, max_iter, tol, sigma, verbose, trace
             t = min(max(t, _T_MIN), _T_MAX)
 
         accepted = False
+        t_first, dn2_first = t, None
         for _ in range(60):                         # Armijo backtracking
             Y_new = proj(Y - t * g)
             d_ = Y_new - Y
             dn2 = float((d_ * d_).sum())
+            if dn2_first is None:
+                dn2_first = dn2
             E_new = float(vg(Y_new, X0, w, denom, inv_k, eye_k, align)[0])
             if E_new <= E - sigma * dn2 / t:
                 accepted = True
@@ -112,8 +118,21 @@ def _solve_fixed_w(Y, X0, w, denom, nonneg, max_iter, tol, sigma, verbose, trace
             t *= 0.5
         if not accepted:
             # No feasible descent step exists to within working precision.  That
-            # is convergence, not failure; ``grad_map`` certifies how stationary.
+            # is convergence ONLY IF grad_map says so -- it is also what a
+            # stalled start looks like, so measure the certificate rather than
+            # leaving the sentinel, and warn when it is far from stationary.
             stop = "line_search"
+            if not math.isfinite(gmap):
+                gmap = (dn2_first ** 0.5) / t_first
+            # A finite but large certificate is not stationarity.  The caller
+            # cannot be expected to inspect grad_map on every call, so say so.
+            if gmap > max(tol, 0.0) * 1e3:
+                warnings.warn(
+                    "nsa_flow: line search stalled after "
+                    f"{it} iteration(s) with |Gmap|={gmap:.2e} against "
+                    f"tol={tol:.1e}; the returned point is not stationary. "
+                    "Inspect stop_reason and grad_map.",
+                    RuntimeWarning, stacklevel=3)
             break
 
         gmap = (dn2 ** 0.5) / t                     # ||Y+ - Y|| / t
@@ -337,7 +356,8 @@ def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
         scale_ratio=float(Y.norm() / X0.norm()), iters=total_iters, align=bool(align),
         fidelity_mode=fidelity, fidelity_requested=requested,
         target_negative_mass=neg_mass, clamp_distance=clamp_dist,
-        converged=stop != "max_iter", stop_reason=stop, grad_map=float(gmap),
+        converged=stop != "max_iter" and math.isfinite(gmap),
+        stop_reason=stop, grad_map=float(gmap),
         seconds=time.time() - t0,
         w_schedule=ws, trace=trace, nonneg=bool(nonneg),
     )

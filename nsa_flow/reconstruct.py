@@ -36,6 +36,8 @@ a global minimum, and the relaxation path matters (see ``relax_into_nonneg``).
 """
 import time
 
+import math
+import warnings
 import torch
 
 from .angle import angle_defect, grad_angle_defect
@@ -334,10 +336,13 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="relax", orth="C", max_iter=5000,
             t = float((s_ * s_).sum()) / sr if sr > 0 else 1e12
             t = min(max(t, 1e-12), 1e12)
         accepted = False
+        t_first, dn2_first = t, None
         for _ in range(60):
             V_new = project_nonneg(V - t * g)
             d_ = V_new - V
             dn2 = float((d_ * d_).sum())
+            if dn2_first is None:
+                dn2_first = dn2
             E_new = float(energy_of(V_new)[0])
             if E_new <= E - sigma * dn2 / t:
                 accepted = True
@@ -345,6 +350,17 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="relax", orth="C", max_iter=5000,
             t *= 0.5
         if not accepted:
             stop = "line_search"
+            if not math.isfinite(gmap):
+                gmap = (dn2_first ** 0.5) / t_first
+            # A finite but large certificate is not stationarity.  The caller
+            # cannot be expected to inspect grad_map on every call, so say so.
+            if gmap > max(tol, 0.0) * 1e3:
+                warnings.warn(
+                    "nsa_flow_data: line search stalled after "
+                    f"{it} iteration(s) with |Gmap|={gmap:.2e} against "
+                    f"tol={tol:.1e}; the returned point is not stationary. "
+                    "Inspect stop_reason and grad_map.",
+                    RuntimeWarning, stacklevel=3)
             break
         gmap = (dn2 ** 0.5) / t
         V_prev, g_prev = V, g
@@ -367,7 +383,8 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="relax", orth="C", max_iter=5000,
         angle_defect=float(angle_defect(V)), orth=orth,
         matrix_free=bool(matrix_free),
         effective_rank=float(effective_rank(V)),
-        scale_ratio=float("nan"), iters=it, converged=stop != "max_iter",
+        scale_ratio=float("nan"), iters=it,
+        converged=stop != "max_iter" and math.isfinite(gmap),
         stop_reason=stop, grad_map=float(gmap), seconds=time.time() - t0,
         w_schedule=[float(w)], trace=trace, nonneg=True, align=False,
     )

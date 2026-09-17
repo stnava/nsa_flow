@@ -4,6 +4,8 @@ The practical requirement is that BOTH lobes be sparse, so most of these assert
 per-part structure rather than aggregate sparsity: the aggregate zero-fraction
 is satisfied by one empty lobe beside one dense one.
 """
+import math
+
 import numpy as np
 import pytest
 import torch
@@ -142,7 +144,8 @@ def test_lobe_penalty_drives_the_two_lobes_apart(data):
 def test_every_orth_variant_runs_and_respects_the_constraint(data, orth):
     r = nsa_flow_signed(data, k=4, w=0.5, init="split", orth=orth)
     assert (r["parts"] >= 0).all() and torch.isfinite(r.Y).all()
-    assert r.stop_reason in ("grad_map", "line_search", "max_iter")
+    # NOT a whitelist of every possible value: that admitted a stalled solve.
+    assert math.isfinite(r.grad_map), f"{orth}: grad_map={r.grad_map}"
 
 
 def test_off_diagonal_default_does_not_charge_an_empty_lobe(data):
@@ -168,3 +171,70 @@ def test_bad_orth_and_bad_input_raise(data):
 def test_reports_honest_convergence(data):
     r = nsa_flow_signed(data, k=4, w=0.5, init="split", max_iter=3)
     assert r.stop_reason == "max_iter" and r.converged is False
+
+
+# --------------------------------------------------- the optimiser itself
+# These four mirror guards that already existed for nsa_flow
+# (tests/test_solver.py:22-27, :245-256) and nsa_flow_data (:298-306) but were
+# never written for the signed path.  Their absence let a solve that exited
+# after ONE iteration -- returning its own initialisation with
+# grad_map=inf and converged=True -- pass the whole suite.
+
+
+@pytest.fixture(scope="module")
+def nonneg_data():
+    """Uncentred, strictly positive input.
+
+    The module fixture is centred, which is exactly why the stall went unseen:
+    on centred data init="split" looks healthy.  Both initialisers stall on
+    non-negative uncentred input, so the guards below must run on it too.
+    """
+    rng = np.random.default_rng(1)
+    X = 2.0 + rng.random((200, 40)) + 0.3 * rng.standard_normal((200, 40))
+    return torch.as_tensor(np.clip(X, 0.05, None), dtype=F64)
+
+
+@pytest.mark.parametrize("w", [0.25, 0.5, 0.75, 0.9])
+@pytest.mark.parametrize("fixture", ["data", "nonneg_data"])
+def test_default_settings_actually_run_the_solver(request, fixture, w):
+    """At DEFAULT init, every w must take real steps and certify stationarity."""
+    X = request.getfixturevalue(fixture)
+    r = nsa_flow_signed(X, k=4, w=w)
+    assert r.iters > 1, f"{fixture} w={w}: exited after {r.iters} iteration(s)"
+    assert math.isfinite(r.grad_map), f"{fixture} w={w}: grad_map={r.grad_map}"
+    assert r.stop_reason in ("grad_map", "line_search", "max_iter")
+
+
+@pytest.mark.parametrize("fixture", ["data", "nonneg_data"])
+def test_energy_decreases_from_the_initialisation(request, fixture):
+    """The direct check that the solver did something, via the trace."""
+    X = request.getfixturevalue(fixture)
+    r = nsa_flow_signed(X, k=4, w=0.5, keep_trace=True)
+    e = [row["energy"] for row in r.trace]
+    assert len(e) > 1, f"{fixture}: only {len(e)} traced iteration(s)"
+    assert e[-1] < e[0], f"{fixture}: energy {e[0]:.6e} -> {e[-1]:.6e}"
+
+
+def test_a_stalled_solve_is_never_silent(nonneg_data):
+    """Either stationary, or it warns.  Never grad_map=inf with converged=True."""
+    import warnings as _w
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        r = nsa_flow_signed(nonneg_data, k=4, w=0.25, max_iter=2000)
+    assert math.isfinite(r.grad_map)
+    if r.stop_reason == "line_search" and r.grad_map > 1e-6:
+        assert any(issubclass(c.category, RuntimeWarning) for c in caught), (
+            f"stalled at |Gmap|={r.grad_map:.2e} without warning")
+
+
+def test_consolidate_reports_its_own_solve_not_the_previous_one(data):
+    """fidelity/defect must describe the returned Y, not the pre-polish point."""
+    k = 4
+    r = nsa_flow_signed(data, k=k, w=0.5, consolidate=True)
+    S = data.T @ data
+    c = S.diagonal().sum()
+    fresh_f = float(reconstruction_fidelity(r.Y, S, c, c))
+    fresh_d = float(angle_defect(r["parts"], diagonal=False))
+    assert abs(r.fidelity - fresh_f) < 1e-9, (r.fidelity, fresh_f)
+    assert abs(r.defect - fresh_d) < 1e-9, (r.defect, fresh_d)
+    assert math.isfinite(r.grad_map)
