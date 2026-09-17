@@ -291,8 +291,6 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="relax", orth="C", max_iter=5000,
             V = relax_into_nonneg(ops, c, k, float(w), trS=trS)
         elif init == "clamp":
             V = E.clamp_min(0.0).clone()        # the actual projection
-        elif init == "abs":
-            V = E.abs().clone()                 # kept only for the ablation
         elif init == "random":
             V = torch.rand(p, k, dtype=Xt.dtype, device=Xt.device)
         else:

@@ -125,7 +125,7 @@ def uniqueness(n_restarts=24):
         for seed in range(4):
             X, V, _ = planted_partition(p=60, k=6, noise=0.4, seed=seed)
             from sklearn.decomposition import PCA
-            L0 = np.abs(PCA(n_components=6, random_state=0).fit(X).components_.T)
+            L0 = PCA(n_components=6, random_state=0).fit(X).components_.T
             T = torch.as_tensor(L0, dtype=F64)
             es = []
             for s in range(n_restarts):

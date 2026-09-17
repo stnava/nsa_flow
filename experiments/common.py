@@ -43,7 +43,12 @@ class NSAPCA(BaseEstimator, TransformerMixin):
                   random_state=0).fit(X)
         # PCA loadings are sign-ambiguous; NSA seeks a non-negative basis, so the
         # magnitude of the loading is the meaningful quantity.
-        L = np.abs(pca.components_.T)
+        # Signed loadings are passed through as-is: nsa_flow's
+        # fidelity="auto" selects the sign-blind subspace fidelity for a
+        # signed target.  Rectifying with abs() here was a bug -- it costs
+        # 3.40x reconstruction against the true projection (see the
+        # abs-trap table) because it invents a target the basis must match.
+        L = pca.components_.T
         res = nsa_flow(torch.as_tensor(L, dtype=F64), w=self.w,
                        max_iter=self.max_iter, tol=self.tol, align=self.align)
         self.components_ = res.Y.numpy()

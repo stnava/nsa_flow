@@ -56,7 +56,7 @@ class Variant(BaseEstimator, TransformerMixin):
     def __init__(self, n_components=5, w=0.9, mode="full"):
         self.n_components = n_components; self.w = w; self.mode = mode
     def fit(self, X, y=None):
-        L = np.abs(PCA(self.n_components, svd_solver="randomized",
+        L = (PCA(self.n_components, svd_solver="randomized",
                        random_state=0).fit(X).components_.T)
         Y = solve(torch.as_tensor(L, dtype=F64), self.w, self.mode)
         self.components_ = Y.numpy(); return self

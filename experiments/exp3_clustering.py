@@ -54,7 +54,7 @@ def run():
                              ari_kmeans=1.0))
 
             for base, mk in BASES.items():
-                L0 = np.abs(mk(k).fit(Xs).components_)
+                L0 = mk(k).fit(Xs).components_
                 rows.append(dict(method=f"{base} (unrefined)", base=base, w=-1.0,
                                  seed=seed, noise=noise,
                                  ari_truth=adjusted_rand_score(truth, _assign(L0)),

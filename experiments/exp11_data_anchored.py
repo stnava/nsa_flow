@@ -61,8 +61,11 @@ def run(n_repeats=10, seed=0):
                   for w in WS]
         specs += [(f"relax (w={w})", (lambda w=w: NSAData(K, w, init="relax")),
                    "relax", w) for w in WS]
-        specs += [(f"absinit (w={w})", (lambda w=w: NSAData(K, w, init="abs")),
-                   "absinit", w) for w in WS]
+        # The abs() init is gone from the library: rectifying a signed matrix
+        # invents a target rather than approximating one.  "clamp" is the
+        # honest counterpart -- it is the true projection onto the feasible set.
+        specs += [(f"clampinit (w={w})", (lambda w=w: NSAData(K, w, init="clamp")),
+                   "clampinit", w) for w in WS]
         for name, ld, family, w in specs:
             s = cv_score(Xt, yt, ld, n_components=K, n_splits=5,
                          n_repeats=n_repeats, seed=seed, covariates=ct)

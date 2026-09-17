@@ -46,7 +46,7 @@ def run():
             X, V, _ = planted_partition(p=60, k=k, n=300, noise=noise, seed=seed)
             Xs = (X - X.mean(0)) / (X.std(0) + 1e-12)
             for base_name, mk in BASES.items():
-                L0 = np.abs(mk(k).fit(Xs).components_)
+                L0 = mk(k).fit(Xs).components_
                 rows.append(dict(base=base_name, w=-1.0, refined=False,
                                  noise=noise, seed=seed, **_metrics(L0, V)))
                 T = torch.as_tensor(L0, dtype=F64)

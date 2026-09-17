@@ -13,7 +13,7 @@ class V1PCA(BaseEstimator, TransformerMixin):
     def __init__(self, n_components=5, w=0.5, orth_type="scale_invariant"):
         self.n_components = n_components; self.w = w; self.orth_type = orth_type
     def fit(self, X, y=None):
-        L = np.abs(PCA(n_components=self.n_components, svd_solver="randomized",
+        L = (PCA(n_components=self.n_components, svd_solver="randomized",
                        random_state=0).fit(X).components_.T)
         Y = nsa_flow_orth(torch.as_tensor(L, dtype=torch.float64), w=self.w,
                           orth_type=self.orth_type, max_iter=500, verbose=False)
