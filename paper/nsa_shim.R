@@ -43,18 +43,38 @@ nsa_shim_ignored <- function() .nsa_ignored
 ## v2: minimise (1-w)||Y - X0||_F^2/||X0||_F^2 + w Dtilde(Y) over Y >= 0
 nsa_flow_autograd <- function(Y0, X0 = NULL, w = 0.5, max_iter = 1000,
                               tol = 1e-8, verbose = FALSE, apply_nonneg = TRUE,
-                              seed = 42, ...) {
+                              seed = 42, plot = TRUE, ...) {
   dots <- list(...)
   if (length(dots)) .note_ignored(names(dots))
   target <- if (is.null(X0)) Y0 else X0
   r <- .nsa$nsa_flow(.as_mat(target), w = w, init = .as_mat(Y0),
                      nonneg = isTRUE(apply_nonneg),
                      max_iter = as.integer(max_iter), tol = tol,
-                     verbose = isTRUE(verbose))
+                     verbose = isTRUE(verbose), keep_trace = isTRUE(plot))
+  ## A real trace plot.  Returning NULL here would be worse than it looks:
+  ## `NULL + labs(...)` evaluates to NULL without error, and assigning NULL to a
+  ## list element removes it, so a caller building a list of plots ends up with
+  ## an empty list and the figure silently disappears.
+  gg <- NULL
+  if (isTRUE(plot) && !is.null(r$trace) && length(r$trace) > 0) {
+    tr <- do.call(rbind, lapply(r$trace, function(z) data.frame(
+      iter = as.numeric(z$iter), fidelity = as.numeric(z$fidelity),
+      defect = as.numeric(z$defect))))
+    long <- rbind(
+      data.frame(iter = tr$iter, value = tr$fidelity, term = "fidelity"),
+      data.frame(iter = tr$iter, value = pmax(tr$defect, 1e-16),
+                 term = "orthogonality defect"))
+    gg <- ggplot2::ggplot(long, ggplot2::aes(iter, value, colour = term)) +
+      ggplot2::geom_line(linewidth = 0.7) +
+      ggplot2::scale_y_log10() +
+      ggplot2::labs(x = "iteration", y = NULL, colour = NULL) +
+      ggplot2::theme_minimal(base_size = 9) +
+      ggplot2::theme(legend.position = "bottom")
+  }
   list(Y = py_to_r(r$Y$numpy()), energy = r$energy, fidelity = r$fidelity,
        defect = r$defect, iters = r$iters, converged = r$converged,
        stop_reason = r$stop_reason, grad_map = r$grad_map,
-       effective_rank = r$effective_rank, plot = NULL)
+       effective_rank = r$effective_rank, trace = r$trace, plot = gg)
 }
 
 ## --- one-shot retraction ---------------------------------------------------

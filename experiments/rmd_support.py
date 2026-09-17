@@ -4,8 +4,10 @@ Each returns a tidy ``DataFrame`` so the document is narrative plus tables and
 plots, with the computation here where it can be tested and reused.  Sizes are
 chosen so the whole document knits in a few minutes.
 """
+import os
 import time
 import warnings
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -258,3 +260,250 @@ def adni_spectrum(k=8):
     ev = PCA(k, random_state=0).fit(Xa).explained_variance_
     return pd.DataFrame(dict(component=np.arange(1, k + 1), eigenvalue=ev,
                              gap_ratio=np.r_[ev[:-1] / ev[1:], np.nan]))
+
+
+# ------------------------------------------------- 8. fidelity-mode comparison
+def adni_fidelity_modes(n_repeats=3, k=5, ws=(0.25, 0.5, 0.9)):
+    r"""The three ways to ask for a non-negative basis near PCA's, on ADNI.
+
+    ``anchor``    -- entrywise \|Y - X0\|^2, X0 the signed PCA loadings.  The
+                     negative entries are unreachable, so this degenerates
+                     toward max(0, X0); reported for comparison.
+    ``subspace``  -- sign-blind \|(I-P)Y\|^2/\|Y\|^2, anchoring to range(X0).
+                     Refinement, done without an unreachable target.
+    ``data``      -- \|X - XVV'\|^2, no target matrix at all.
+    """
+    from sklearn.base import BaseEstimator, TransformerMixin
+    from sklearn.decomposition import PCA
+    from .common import PCALoadings, SparsePCALoadings, cv_score
+    from .data import load_adni
+    from nsa_flow import nsa_flow, nsa_flow_data
+
+    class Refine(BaseEstimator, TransformerMixin):
+        """Refine the (signed) PCA loadings under a chosen fidelity."""
+
+        def __init__(self, n_components=5, w=0.5, fidelity="subspace"):
+            self.n_components, self.w, self.fidelity = n_components, w, fidelity
+
+        def fit(self, X, y=None):
+            L = PCA(self.n_components, svd_solver="randomized",
+                    random_state=0).fit(np.asarray(X)).components_.T
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                r = nsa_flow(torch.as_tensor(L, dtype=F64), w=self.w,
+                             fidelity=self.fidelity, max_iter=4000)
+            self.components_ = r.Y.numpy()
+            self.mode_ = r["fidelity_mode"]
+            self.clamp_distance_ = r["clamp_distance"]
+            return self
+
+        def transform(self, X):
+            return np.asarray(X) @ self.components_
+
+    class Data(BaseEstimator, TransformerMixin):
+        def __init__(self, n_components=5, w=0.5):
+            self.n_components, self.w = n_components, w
+
+        def fit(self, X, y=None):
+            self.components_ = nsa_flow_data(
+                torch.as_tensor(np.asarray(X), dtype=F64),
+                k=self.n_components, w=self.w).Y.numpy()
+            return self
+
+        def transform(self, X):
+            return np.asarray(X) @ self.components_
+
+    X, meta, _ = load_adni("right")
+    cov = np.column_stack([meta.AGE.to_numpy(float),
+                           (meta.SEX.astype(str) == "M").to_numpy(float)])
+    tasks = {"CN vs DEM": ("CN", "DEM"), "CN vs MCI": ("CN", "MCI"),
+             "MCI vs DEM": ("MCI", "DEM")}
+    specs = [("PCA", lambda: PCALoadings(k), "PCA", np.nan),
+             ("SparsePCA (a=4)", lambda: SparsePCALoadings(k, alpha=4.0),
+              "SparsePCA", np.nan)]
+    for w in ws:
+        specs.append((f"anchor (w={w})", (lambda w=w: Refine(k, w, "anchor")),
+                      "anchor", w))
+        specs.append((f"subspace (w={w})", (lambda w=w: Refine(k, w, "subspace")),
+                      "subspace", w))
+        specs.append((f"data (w={w})", (lambda w=w: Data(k, w)), "data", w))
+    rows = []
+    for task, (a, b) in tasks.items():
+        m = meta.DX.isin([a, b]).to_numpy()
+        Xt, yt, ct = X[m], (meta.DX[m] == b).to_numpy(int), cov[m]
+        for name, loader, family, w in specs:
+            s = cv_score(Xt, yt, loader, n_components=k, n_splits=5,
+                         n_repeats=n_repeats, seed=0, covariates=ct)
+            s.update(method=name, family=family, w=w, task=task)
+            rows.append(s)
+            print(f"{task:11s} {name:18s} auc={s['auc']:.4f} "
+                  f"overlap={s['overlap']:.2f} sparsity={s['sparsity']:.3f}",
+                  flush=True)
+    return pd.DataFrame(rows)[["task", "method", "family", "w", "auc", "auc_sd",
+                               "overlap", "sparsity", "defect"]]
+
+
+# ----------------------------------------------- 9. ADNI cortical thickness
+THK = Path(os.path.expanduser(
+    "~/Library/Mobile Documents/com~apple~CloudDocs/code/multidisorder/data/"
+    "ppmiadni_filtered.csv"))
+
+COG_VARS = ["CDRSB", "ADAS13", "ADASQ4", "MMSE", "FAQ", "mPACCdigit",
+            "EcogPtTotal", "EcogSPTotal", "LDELTOTAL"]
+COG_COVARS = ["AGE", "PTGENDER", "PTEDUCAT", "APOE4"]
+
+
+def load_adni_thickness(path=None):
+    """Baseline ADNI cortical thickness (bilateral averages) plus covariates."""
+    p = Path(os.path.expanduser(path)) if path else THK
+    if not p.exists():
+        raise FileNotFoundError(f"ADNI thickness table not found: {p}")
+    df = pd.read_csv(p, low_memory=False)
+    df = df[(df.studyName == "ADNI") & (df.yearsbl == 0)]
+    regions = [c for c in df.columns
+               if "T1Hier_thk_" in c and "LRAVG" in c
+               and not any(x in c for x in ("Asym", "reference", "adjusted"))]
+    X = df[regions].apply(pd.to_numeric, errors="coerce")
+    ok = X.notna().all(axis=1)
+    X, df = X[ok], df[ok]
+    X = X.loc[:, X.std() > 0]
+    return X.to_numpy(float), df.reset_index(drop=True), list(X.columns)
+
+
+def _basis(Xc, k, w, mode):
+    """One of the three ways to obtain a non-negative basis."""
+    from sklearn.decomposition import PCA
+    from nsa_flow import nsa_flow, nsa_flow_data
+    T = torch.as_tensor(np.ascontiguousarray(Xc), dtype=F64)
+    if mode == "pca":
+        L = PCA(k, random_state=0).fit(Xc).components_.T
+        return L / np.linalg.norm(L, axis=0, keepdims=True)
+    if mode == "data":
+        return nsa_flow_data(T, k=k, w=w).Y.numpy()
+    L = PCA(k, random_state=0).fit(Xc).components_.T
+    L = L / np.linalg.norm(L, axis=0, keepdims=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return nsa_flow(torch.as_tensor(L, dtype=F64), w=w, fidelity=mode,
+                        max_iter=4000).Y.numpy()
+
+
+def _nested_F(y, Z0, Z1):
+    """p-value of the nested F-test comparing design Z0 against Z1 (Z1 adds columns)."""
+    from scipy.stats import f as fdist
+    def rss(Z):
+        beta, *_ = np.linalg.lstsq(Z, y, rcond=None)
+        return float(((y - Z @ beta) ** 2).sum())
+    r0, r1 = rss(Z0), rss(Z1)
+    q = Z1.shape[1] - Z0.shape[1]
+    dfe = len(y) - Z1.shape[1]
+    if dfe <= 0 or r1 <= 0:
+        return np.nan
+    F = ((r0 - r1) / q) / (r1 / dfe)
+    return float(fdist.sf(F, q, dfe))
+
+
+def cognitive_insample(k=5, ws=(0.25, 0.5, 0.75, 0.9),
+                       modes=("anchor", "subspace", "data")):
+    """The paper's original design: in-sample nested F-test, reported as log p.
+
+    Answers "do these network scores add explanatory power beyond the
+    covariates, and does NSA add more than PCA".  It is NOT held-out prediction;
+    ``cognitive_cv`` is.
+    """
+    X, df, _ = load_adni_thickness()
+    Xc = X - X.mean(0)
+    cogs = [c for c in COG_VARS if c in df.columns]
+    C = _covar_design(df)
+    rows = []
+    for mode in modes:
+        for w in ws:
+            V = _basis(Xc, k, w, mode)
+            if np.any(V.var(0) == 0):
+                continue
+            S_nsa, S_pca = X @ V, X @ _basis(Xc, k, w, "pca")
+            for cog in cogs:
+                y = pd.to_numeric(df[cog], errors="coerce").to_numpy(float)
+                m = np.isfinite(y) & np.isfinite(C).all(1)
+                for nm, S in (("nsa", S_nsa), ("pca", S_pca)):
+                    mm = m & np.isfinite(S).all(1)
+                    p = _nested_F(y[mm], C[mm], np.column_stack([C[mm], S[mm]]))
+                    rows.append(dict(mode=mode, w=w, cog=cog, method=nm,
+                                     log_p=np.log(max(p, 1e-300))))
+    return pd.DataFrame(rows)
+
+
+def _covar_design(df):
+    age = pd.to_numeric(df.AGE, errors="coerce").to_numpy(float)
+    sex = (df.PTGENDER.astype(str).str.upper().str.startswith("M")).to_numpy(float)
+    edu = pd.to_numeric(df.PTEDUCAT, errors="coerce").to_numpy(float)
+    apo = pd.to_numeric(df.APOE4, errors="coerce").to_numpy(float)
+    return np.column_stack([np.ones(len(df)), age, sex, edu, apo])
+
+
+def cognitive_cv(k=5, ws=(0.5, 0.9), modes=("anchor", "subspace", "data"),
+                 n_splits=5, n_repeats=4, seed=0, model="linear"):
+    r"""Held-out prediction of cognitive scores --- what the section title claims.
+
+    Everything is fitted inside the training fold: the centring, the basis
+    (PCA and NSA alike), and the regression.  We report out-of-sample
+    \(\Delta R^2\), the gain from adding the network scores to the covariate
+    model, so the comparison is against a real baseline rather than against
+    nothing.  ``model="rf"`` uses a random forest, matching the machinery of the
+    diagnosis analysis.
+    """
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.linear_model import LinearRegression
+    from sklearn.model_selection import RepeatedKFold
+
+    X, df, _ = load_adni_thickness()
+    cogs = [c for c in COG_VARS if c in df.columns]
+    C = _covar_design(df)
+    cv = RepeatedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=seed)
+
+    def fit_pred(Ztr, ytr, Zte):
+        if model == "rf":
+            m = RandomForestRegressor(n_estimators=200, random_state=0, n_jobs=-1)
+        else:
+            m = LinearRegression()
+        return m.fit(Ztr, ytr).predict(Zte)
+
+    rows = []
+    for cog in cogs:
+        y = pd.to_numeric(df[cog], errors="coerce").to_numpy(float)
+        keep = np.isfinite(y) & np.isfinite(C).all(1)
+        Xk, Ck, yk = X[keep], C[keep], y[keep]
+        for mode in modes:
+            for w in ws:
+                r2_base, r2_pca, r2_nsa = [], [], []
+                for tr, te in cv.split(Xk):
+                    mu = Xk[tr].mean(0)
+                    Xtr, Xte = Xk[tr] - mu, Xk[te] - mu
+                    try:
+                        Vn = _basis(Xtr, k, w, mode)
+                        Vp = _basis(Xtr, k, w, "pca")
+                    except Exception:
+                        continue
+                    sst = float(((yk[te] - yk[tr].mean()) ** 2).sum())
+                    if sst <= 0:
+                        continue
+                    def r2(Ztr, Zte):
+                        pr = fit_pred(Ztr, yk[tr], Zte)
+                        return 1.0 - float(((yk[te] - pr) ** 2).sum()) / sst
+                    r2_base.append(r2(Ck[tr], Ck[te]))
+                    r2_pca.append(r2(np.column_stack([Ck[tr], Xtr @ Vp]),
+                                     np.column_stack([Ck[te], Xte @ Vp])))
+                    r2_nsa.append(r2(np.column_stack([Ck[tr], Xtr @ Vn]),
+                                     np.column_stack([Ck[te], Xte @ Vn])))
+                if not r2_base:
+                    continue
+                rows.append(dict(
+                    cog=cog, mode=mode, w=w, model=model, n=int(keep.sum()),
+                    r2_covariates=np.mean(r2_base),
+                    r2_pca=np.mean(r2_pca), r2_nsa=np.mean(r2_nsa),
+                    dR2_pca=np.mean(r2_pca) - np.mean(r2_base),
+                    dR2_nsa=np.mean(r2_nsa) - np.mean(r2_base),
+                    nsa_minus_pca=np.mean(r2_nsa) - np.mean(r2_pca),
+                    sd_nsa_minus_pca=np.std(np.array(r2_nsa) - np.array(r2_pca)),
+                    n_folds=len(r2_base)))
+    return pd.DataFrame(rows)

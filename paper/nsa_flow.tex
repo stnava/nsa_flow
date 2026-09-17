@@ -78,6 +78,16 @@
 \newcommand{\VariableTok}[1]{\textcolor[rgb]{0.00,0.00,0.00}{#1}}
 \newcommand{\VerbatimStringTok}[1]{\textcolor[rgb]{0.31,0.60,0.02}{#1}}
 \newcommand{\WarningTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textbf{\textit{#1}}}}
+\usepackage{longtable,booktabs,array}
+\usepackage{calc} % for calculating minipage widths
+% Correct order of tables after \paragraph or \subparagraph
+\usepackage{etoolbox}
+\makeatletter
+\patchcmd\longtable{\par}{\if@noskipsec\mbox{}\fi\par}{}{}
+\makeatother
+% Allow footnotes in longtable head/foot
+\IfFileExists{footnotehyper.sty}{\usepackage{footnotehyper}}{\usepackage{footnote}}
+\makesavenoteenv{longtable}
 \usepackage{graphicx}
 \makeatletter
 \newsavebox\pandoc@box
@@ -157,8 +167,7 @@
   urlcolor={blue},
   pdfcreator={LaTeX via pandoc}}
 
-\title{Non-Negative Stiefel Approximating Flow: Orthogonalish Matrix
-Optimization for Interpretable Embeddings}
+\title{Non-Negative Stiefel Approximating Flow: Orthogonalish Matrix Optimization for Interpretable Embeddings}
 \author{Brian B. Avants, Nicholas J. Tustison, and James R. Stone\\
 Department of Radiology and Medical Imaging\\
 University of Virginia, Charlottesville, VA 22903}
@@ -170,199 +179,39 @@ University of Virginia, Charlottesville, VA 22903}
 \section*{Abstract}\label{abstract}
 \addcontentsline{toc}{section}{Abstract}
 
-Interpretable representation learning is a central challenge in modern
-machine learning, particularly in high-dimensional settings such as
-neuroimaging, genomics, and text analysis. Current methods often
-struggle to balance the competing demands of interpretability and model
-flexibility, limiting their effectiveness in extracting meaningful
-insights from complex data. We introduce Non-negative Stiefel
-Approximating Flow (NSA-Flow), a general-purpose matrix estimation
-framework that unifies ideas from sparse matrix factorization,
-orthogonalization, and constrained manifold learning. NSA-Flow enforces
-structured sparsity through a continuous balance between reconstruction
-fidelity and column-wise decorrelation, parameterized by a single
-tunable weight. The method operates as a smooth flow near the Stiefel
-manifold with proximal updates for non-negativity and adaptive gradient
-control, yielding representations that are simultaneously sparse,
-stable, and interpretable. Unlike classical regularization schemes,
-NSA-Flow provides an intuitive geometric mechanism for manipulating
-sparsity at the level of global structure while simplifying latent
-features. We demonstrate that the NSA-Flow objective can be optimized
-smoothly and integrates seamlessly with existing pipelines for
-dimensionality reduction while improving interpretability and
-generalization in both simulated and real biomedical data. Empirical
-validation on the Golub leukemia dataset and in Alzheimer's disease
-demonstrate that the NSA-Flow constraints can maintain or improve
-performance over related methods with little additional methodological
-effort. NSA-Flow offers a scalable, general-purpose tool for
-interpretable ML, applicable across data science domains.
+NSA-Flow estimates a matrix that is non-negative and approximately orthogonal, with the degree of approximation set by one parameter. For a non-negative matrix, orthogonal columns have disjoint supports, so each component names a set of features and no feature is shared. Exact disjointness is a clustering of the features and discards the data's ability to say that two features belong together; the relaxation is what makes the interior of that constraint reachable. We keep non-negativity as a hard constraint and treat orthogonality as an objective weighted by \(w \in [0,1]\), so \(w = 0\) returns the unconstrained fit and \(w = 1\) returns the clustering. Both terms of the energy are dimensionless, so \(w\) needs no calibration. The solver is a spectral projected gradient with a computable stationarity certificate and no factorisation in the loop, at \(O(pk^2)\) per iteration, or \(O(npk)\) when the basis is fitted to data with \(p > n\). NSA-Flow can refine a supplied basis, fit one to data directly, or act as the proximal step inside another algorithm. On the Golub leukemia data it raises cross-validated accuracy from \(0.828\) to \(0.875\) as the sparsification step in sparse PCA. On ADNI cortical thickness it raises out-of-sample \(\Delta R^2\) for nine cognitive outcomes by \(0.043\) over PCA and trinary diagnosis AUC from \(0.719\) to \(0.765\). We also show that comparisons of this kind must use a model that is sensitive to the choice of axes: a linear model on projected scores is exactly invariant to reparametrisation of the basis and cannot distinguish two bases spanning the same subspace.
 
 \section{Introduction}\label{introduction}
 
-Modern machine learning increasingly faces the challenge of extracting
-interpretable structure from high-dimensional, correlated data. In
-domains such as neuroscience, genomics, or natural language processing,
-data matrices often encode overlapping sources of variation: voxels
-representing distributed brain activity, genes co-expressed across
-pathways or words co-occurring across topics. These correlations hinder
-modeling, making it difficult to disentangle meaningful latent factors
-arising from complex phenomena such as gene expression profiles in
-bioinformatics (\citeproc{ref-golub1999molecular}{Golub et al. 1999}),
-term-document frequencies in topic modeling
-(\citeproc{ref-blei2003latent}{Blei, Ng, and Jordan 2003}), multi-view
-biological measurements in integrative omics
-(\citeproc{ref-strazar2016orthogonal}{Stražar and Žitnik 2016}), and
-user-item interactions in recommender systems
-(\citeproc{ref-koren2009matrix}{Koren, Bell, and Volinsky 2009}).
+Data matrices in neuroscience, genomics and text encode overlapping sources of variation: voxels carry distributed activity, genes are co-expressed across pathways, words co-occur across topics. A basis fitted to such data spreads each component across most features, which makes the components hard to name. Two constraints make them nameable. Non-negativity turns loadings into magnitudes. Orthogonality, imposed on a non-negative matrix, forces the columns onto disjoint feature supports. Taken exactly, the pair is very rigid: disjoint supports are a hard assignment of features to components, so the constrained problem is a clustering and the data can no longer say that two features belong together. This paper is about the interior of that constraint, and about reaching it with one parameter.
 
-Classical dimensionality reduction techniques like principal component
-analysis (PCA) and its sparse variants seek low-rank approximations with
-interpretable bases (\citeproc{ref-zou2006sparse}{Zou, Hastie, and
-Tibshirani 2006}), while sparse canonical correlation analysis (CCA)
-extends this to multi-view correlations in biological data
-(\citeproc{ref-witten2011}{Witten, Tibshirani, and Hastie 2009}).
-However, enforcing sparsity and decorrelation remains challenging:
-traditional methods may over-regularize or lack intuitive controls for
-partial constraints. Non-negative matrix factorization (NMF)
-(\citeproc{ref-lee2001nmf}{Daniel D. Lee and Seung 2001b}) offers
-parts-based, additive representations aligned with domain constraints,
-but suffers from rotational ambiguity, yielding entangled factors
-(\citeproc{ref-ding2006orthogonal}{Ding et al. 2006}). Orthogonal
-variants improve sparsity and identifiability by aligning factors with
-disjoint structures, with applications in sparse PCA
-(\citeproc{ref-zou2006sparse}{Zou, Hastie, and Tibshirani 2006}), sparse
-CCA (\citeproc{ref-witten2011}{Witten, Tibshirani, and Hastie 2009}),
-and interpretable neural networks (\citeproc{ref-henaff2011deep}{Henaff
-et al. 2011}). Yet, strict orthogonality often sacrifices fidelity,
-especially in noisy or heterogeneous data and motivates the need for
-partial decorrelation models.
+Classical dimensionality reduction techniques like principal component analysis (PCA) and its sparse variants seek low-rank approximations with interpretable bases (\citeproc{ref-zou2006sparse}{Zou, Hastie, and Tibshirani 2006}), while sparse canonical correlation analysis (CCA) extends this to multi-view correlations in biological data (\citeproc{ref-witten2011}{Witten, Tibshirani, and Hastie 2009}). However, enforcing sparsity and decorrelation remains challenging: traditional methods may over-regularize or lack intuitive controls for partial constraints. Non-negative matrix factorization (NMF) (\citeproc{ref-lee2001nmf}{Daniel D. Lee and Seung 2001b}) offers parts-based, additive representations aligned with domain constraints, but suffers from rotational ambiguity, yielding entangled factors (\citeproc{ref-ding2006orthogonal}{Ding et al. 2006}). Orthogonal variants improve sparsity and identifiability by aligning factors with disjoint structures, with applications in sparse PCA (\citeproc{ref-zou2006sparse}{Zou, Hastie, and Tibshirani 2006}), sparse CCA (\citeproc{ref-witten2011}{Witten, Tibshirani, and Hastie 2009}), and interpretable neural networks (\citeproc{ref-henaff2011deep}{Henaff et al. 2011}). Yet, strict orthogonality often sacrifices fidelity, especially in noisy or heterogeneous data and motivates the need for partial decorrelation models.
 
-Soft orthogonalization methods address this by penalizing deviations
-from orthonormality. Examples include Disentangled Orthogonality
-Regularization (DOR), which separates Gram matrix components for
-convolutional kernels (\citeproc{ref-wu2023towards}{Wu 2023}); Group
-Orthogonalization Regularization (GOR), which applies intra-group
-penalties for vision tasks (\citeproc{ref-kurtz2023group}{Kurtz, Bar,
-and Giryes 2023}); \(\lambda\)-Orthogonality Regularization, which
-introduces thresholded penalties for representation learning
-(\citeproc{ref-ricci2025orthogonality}{Ricci et al. 2025}); and simpler
-approaches like Spectral Restricted Isometry Property (SRIP)
-(\citeproc{ref-goessmann2020restricted}{Goeßmann 2020}) and Frobenius
-norm penalties for neural stability (\citeproc{ref-guo2019frobenius}{Guo
-2019}). However, these methods are typically embedded in neural training
-pipelines and do not enforce non-negativity, limiting their
-applicability to domains where measurement units should be preserved.
-Advanced ONMF variants, such as variational Bayesian approaches
-(\citeproc{ref-rahiche2022variational}{Rahiche et al. 2022}), unilateral
-factorization (\citeproc{ref-li2023unilateral}{Li, Zhang, and Zhang
-2023}), and deep autoencoder frameworks
-(\citeproc{ref-yang2021orthogonal}{Yang and Xu 2021}), improve
-robustness but enforce strict orthogonality or require full
-decomposition, reducing flexibility for one-sided refinement.
+Soft orthogonalization methods address this by penalizing deviations from orthonormality. Examples include Disentangled Orthogonality Regularization (DOR), which separates Gram matrix components for convolutional kernels (\citeproc{ref-wu2023towards}{Wu 2023}); Group Orthogonalization Regularization (GOR), which applies intra-group penalties for vision tasks (\citeproc{ref-kurtz2023group}{Kurtz, Bar, and Giryes 2023}); \(\lambda\)-Orthogonality Regularization, which introduces thresholded penalties for representation learning (\citeproc{ref-ricci2025orthogonality}{Ricci et al. 2025}); and simpler approaches like Spectral Restricted Isometry Property (SRIP) (\citeproc{ref-goessmann2020restricted}{Goeßmann 2020}) and Frobenius norm penalties for neural stability (\citeproc{ref-guo2019frobenius}{Guo 2019}). However, these methods are typically embedded in neural training pipelines and do not enforce non-negativity, limiting their applicability to domains where measurement units should be preserved. Advanced ONMF variants, such as variational Bayesian approaches (\citeproc{ref-rahiche2022variational}{Rahiche et al. 2022}), unilateral factorization (\citeproc{ref-li2023unilateral}{Li, Zhang, and Zhang 2023}), and deep autoencoder frameworks (\citeproc{ref-yang2021orthogonal}{Yang and Xu 2021}), improve robustness but enforce strict orthogonality or require full decomposition, reducing flexibility for one-sided refinement.
 
-In contrast to these soft regularization techniques, Riemannian
-optimization approaches have been explored primarily for enforcing
-strict orthogonality constraints on manifolds such as the Stiefel
-manifold, where the feasible set is equipped with a differential
-structure for gradient-based updates. For instance, Nonlinear Riemannian
-Conjugate Gradient (NRCG) methods optimize orthogonal NMF by projecting
-gradients onto the tangent space and using retractions like QR
-decomposition to maintain exact orthonormality, while handling
-non-negativity through coordinate descent on the complementary factor
-(\citeproc{ref-Zhang2016EfficientON}{Zhang et al. 2016}). This ensures
-convergence to critical points with near-perfect orthogonality but
-incurs higher computational costs compared to soft penalties, and it
-typically requires full enforcement rather than flexible deviations.
-Hybrid methods like Feedback Gradient Descent (FGD) attempt to bridge
-this gap by approximating manifold dynamics in Euclidean space with
-feedback terms to achieve stable near-orthogonality efficiently,
-outperforming traditional Riemannian methods in DNN training speed while
-rivaling soft constraints in overhead
-(\citeproc{ref-Bu2022FeedbackGD}{Bu and Chang 2022}). However, adapting
-such Riemannian-inspired techniques to incorporate soft orthogonality
-penalties alongside non-negativity remains a less explored avenue.
+In contrast to these soft regularization techniques, Riemannian optimization approaches have been explored primarily for enforcing strict orthogonality constraints on manifolds such as the Stiefel manifold, where the feasible set is equipped with a differential structure for gradient-based updates. For instance, Nonlinear Riemannian Conjugate Gradient (NRCG) methods optimize orthogonal NMF by projecting gradients onto the tangent space and using retractions like QR decomposition to maintain exact orthonormality, while handling non-negativity through coordinate descent on the complementary factor (\citeproc{ref-Zhang2016EfficientON}{Zhang et al. 2016}). This ensures convergence to critical points with near-perfect orthogonality but incurs higher computational costs compared to soft penalties, and it typically requires full enforcement rather than flexible deviations. Hybrid methods like Feedback Gradient Descent (FGD) attempt to bridge this gap by approximating manifold dynamics in Euclidean space with feedback terms to achieve stable near-orthogonality efficiently, outperforming traditional Riemannian methods in DNN training speed while rivaling soft constraints in overhead (\citeproc{ref-Bu2022FeedbackGD}{Bu and Chang 2022}). However, adapting such Riemannian-inspired techniques to incorporate soft orthogonality penalties alongside non-negativity remains a less explored avenue.
 
-To address these gaps, we propose \textbf{Non-negative Stiefel
-Approximating Flow (NSA-Flow)}, a variational optimization algorithm
-that approximates a target ( \(X_0\) ) with a non-negative matrix (
-\(Y \in \mathbb{R}^{p \times k}_{\geq 0}\) ). NSA-Flow balances
-fidelity, column orthogonality, and non-negativity through a single
-tunable parameter ( \(w \in [0,1]\) ) influencing proximity to the
-Stiefel manifold. The simple parameterization of these constraints means
-that NSA-Flow allows practitioners to directly encode the desired level
-of sparsity/decorrelation (which are closely related in this framework)
-in their embeddings, without the need for complex regularization schemes
-or full orthogonality constraints. As such, NSA-Flow employs global soft
-orthogonality constraints to promote disjoint support across columns and
-foster interpretable bases. Formulated to stay near the Stiefel manifold
-(\citeproc{ref-edelman1998geometry}{Edelman, Arias, and Smith 1998}), it
-departs from Riemannian gradient descent
-(\citeproc{ref-absil2008optimization}{Absil, Mahony, and Sepulchre
-2008}) in treating orthogonality as an objective rather than a
-constraint, so no retraction is required and no factorisation appears in
-the iteration. Non-negativity is the one hard constraint, enforced
-exactly by proximal projection (\citeproc{ref-parikh2014proximal}{Parikh
-and Boyd 2014}), and descent is guaranteed by a line search rather than
-by manifold geometry. Conceptually, NSA-Flow functions as a soft
-projection operator that can be inserted into any existing machine
-learning system to improve interpretability---whether as a
-regularization layer in a neural network
-(\citeproc{ref-henaff2011deep}{Henaff et al. 2011};
-\citeproc{ref-ricci2025orthogonality}{Ricci et al. 2025}), a refinement
-step in factor models (\citeproc{ref-li2023unilateral}{Li, Zhang, and
-Zhang 2023}; \citeproc{ref-rahiche2022variational}{Rahiche et al.
-2022}), or a sparsity-enforcing module in linear embeddings
-(\citeproc{ref-guo2019frobenius}{Guo 2019};
-\citeproc{ref-goessmann2020restricted}{Goeßmann 2020}). Unlike purely
-regularization-based methods (\citeproc{ref-wu2023towards}{Wu 2023};
-\citeproc{ref-kurtz2023group}{Kurtz, Bar, and Giryes 2023};
-\citeproc{ref-ricci2025orthogonality}{Ricci et al. 2025}), NSA-Flow may
-also operate as a one-sided projection operator, preserving input
-structure while enabling controlled decorrelation.
+To address these gaps we propose \textbf{Non-negative Stiefel Approximating Flow (NSA-Flow)}, which approximates a target \(X_0\) with a non-negative matrix \(Y \in \mathbb{R}^{p \times k}_{\geq 0}\) whose columns are approximately orthogonal. One weight \(w \in [0,1]\) sets the balance between fidelity and orthogonality, and because both energy terms are dimensionless it needs no calibration. Non-negativity is a hard constraint applied by exact projection; orthogonality is an objective, so nothing is retracted and no factorisation appears in the iteration. For a non-negative matrix, orthogonal columns have disjoint supports, so \(w\) moves the solution between the unconstrained fit and a hard assignment of features to components. NSA-Flow can refine a basis that is already trusted, fit one to data directly, or serve as the proximal step inside another algorithm; the Golub result below is of the third kind.
 
 Our contributions are:
 
 \begin{enumerate}
 \def\labelenumi{\arabic{enumi}.}
 \item
-  A general framework for constrained matrix approximation,
-  parameterized by ( \(w\) ) to intuitively control sparsity and
-  orthogonality for interpretable ML.
+  A general framework for constrained matrix approximation, parameterized by ( \(w\) ) to intuitively control sparsity and orthogonality for interpretable ML.
 \item
-  Rigorous empirical validation that demonstrates good convergence
-  properties and reliable benchmark performance compared to baselines.
+  Rigorous empirical validation that demonstrates good convergence properties and reliable benchmark performance compared to baselines.
 \item
-  Broad applications, including enhanced disease classification on the
-  Golub leukemia dataset, non-negative sparse PCA for biological
-  integration and interpretable brain network discovery---showcasing
-  NSA-Flow's versatility across ML domains.
+  Broad applications, including enhanced disease classification on the Golub leukemia dataset, non-negative sparse PCA for biological integration and interpretable brain network discovery---showcasing NSA-Flow's versatility across ML domains.
 \item
-  An \href{https://github.com/stnava/nsa-flow}{open-source
-  implementation} in \texttt{pytorch} facilitating easy integration into
-  existing workflows for researchers and practitioners. NSA-flow is also
-  \texttt{pip} installable via the \texttt{nsa-flow} package and wrapped
-  in \texttt{R} via \texttt{ANTsR}.
+  An \href{https://github.com/stnava/nsa-flow}{open-source implementation} in \texttt{pytorch} facilitating easy integration into existing workflows for researchers and practitioners. NSA-flow is also \texttt{pip} installable via the \texttt{nsa-flow} package and wrapped in \texttt{R} via \texttt{ANTsR}.
 \end{enumerate}
 
-The paper is organized as follows: Section 2 derives the formulation and
-algorithm; Section 3 details the experimental results; Section 4
-discusses limitations and future work; Section 5 gives an overview of
-software resources.
+The paper is organized as follows: Section 2 derives the formulation and algorithm; Section 3 details the experimental results; Section 4 discusses limitations and future work; Section 5 gives an overview of software resources.
 
 \section{Methods}\label{methods}
 
-We consider the problem of finding a matrix
-\(Y \in \mathbb{R}^{p \times k}\) that optimally approximates a target
-matrix \(X_0 \in \mathbb{R}^{p \times k}\) while satisfying column
-orthogonality and, optionally, non-negativity. This general formulation
-is central to a wide range of problems in machine learning and signal
-processing, including orthogonal dictionary learning, Independent
-Component Analysis (ICA), and the orthogonal Procrustes problem
-(\citeproc{ref-lee2001algorithms}{Daniel D. Lee and Seung 2001a};
-\citeproc{ref-hyvarinen2000independent}{Hyvärinen and Oja 2000};
-\citeproc{ref-schonemann1966generalized}{Schönemann 1966}). The NSA-Flow
-optimization problem is defined by the minimization of a composite
-energy function \(E(Y)\):
+We consider the problem of finding a matrix \(Y \in \mathbb{R}^{p \times k}\) that optimally approximates a target matrix \(X_0 \in \mathbb{R}^{p \times k}\) while satisfying column orthogonality and, optionally, non-negativity. This general formulation is central to a wide range of problems in machine learning and signal processing, including orthogonal dictionary learning, Independent Component Analysis (ICA), and the orthogonal Procrustes problem (\citeproc{ref-lee2001algorithms}{Daniel D. Lee and Seung 2001a}; \citeproc{ref-hyvarinen2000independent}{Hyvärinen and Oja 2000}; \citeproc{ref-schonemann1966generalized}{Schönemann 1966}). The NSA-Flow optimization problem is defined by the minimization of a composite energy function \(E(Y)\):
 
 \[
 \min_{Y \in \mathbb{R}^{p \times k}, Y \ge 0}
@@ -372,204 +221,107 @@ E(Y)
 \label{eq:objective}
 \]
 
-where \(w \in [0, 1]\) balances the fidelity loss \(L_{fid}\) against
-the orthogonality loss \(L_{orth}\). Both losses are \emph{dimensionless
-by construction}, so no internal re-weighting, warm-up calibration or
-data-dependent scaling constant is required and \(w\) is a genuine
-convex weight. The fidelity term is the relative squared Frobenius
-distance \[
+where \(w \in [0, 1]\) balances the fidelity loss \(L_{fid}\) against the orthogonality loss \(L_{orth}\). Both losses are dimensionless, so no re-weighting, warm-up calibration or data-dependent scaling constant is needed and \(w\) is a convex weight. The fidelity term is the relative squared Frobenius distance
+\[
 L_{fid}(Y, X_0) = \frac{\| Y - X_0 \|_F^2}{\| X_0 \|_F^2},
-\] which is \(0\) at \(Y = X_0\) and exactly \(1\) at \(Y = 0\).
+\]
+which is \(0\) at \(Y = X_0\) and exactly \(1\) at \(Y = 0\).
 
-For the orthogonality loss, write
-\(G = Y^\top Y / \operatorname{tr}(Y^\top Y)\) for the trace-normalised
-Gram matrix. We use one of two penalties, and the distinction is not
-cosmetic: \[
+For the orthogonality loss, let \(G = Y^\top Y / \operatorname{tr}(Y^\top Y)\) be the trace-normalised Gram matrix. We use one of two penalties:
+\[
 D(Y) = \Big\| G - \tfrac{1}{k} I_k \Big\|_F^2,
 \qquad
 C(Y) = \frac{1}{k(k-1)} \sum_{i \neq j} \cos^2(y_i, y_j),
-\] with
-\(\cos(y_i, y_j) = \langle y_i, y_j\rangle / (\|y_i\|\,\|y_j\|)\). \(D\)
-is scale invariant, lies in \([0, 1 - 1/k]\), and vanishes exactly on
-the scaled Stiefel manifold \(\mathbb{R}_{>0}\cdot St(p,k)\); we report
-\(\tilde D = D / (1 - 1/k)\) so that it lies in \([0,1]\) and equals
-\(1\) at rank one. It admits the spectral reading \[
+\]
+with \(\cos(y_i, y_j) = \langle y_i, y_j\rangle / (\|y_i\|\,\|y_j\|)\). \(D\) is scale invariant, lies in \([0, 1 - 1/k]\), and vanishes exactly on the scaled Stiefel manifold \(\mathbb{R}_{>0}\cdot St(p,k)\); we report \(\tilde D = D / (1 - 1/k)\) so that it lies in \([0,1]\) and equals \(1\) at rank one. It admits the spectral reading
+\[
 D = k \operatorname{Var}(\lambda_i(G)) = \frac{1}{\mathrm{EffRank}(Y)} - \frac{1}{k},
-\] so it is a participation-ratio deficit, and \(D \ge 1/r - 1/k\)
-whenever \(\operatorname{rank}(Y) = r < k\): rank collapse is penalised
-rather than rewarded.
+\]
+so it is a participation-ratio deficit, and \(D \ge 1/r - 1/k\) whenever \(\operatorname{rank}(Y) = r < k\): rank collapse is penalised rather than rewarded.
 
-Crucially, \(D\) decomposes as \[
+\(D\) decomposes as
+\[
 D = \underbrace{\sum_{i \neq j} G_{ij}^2}_{\text{decorrelation}}
   + \underbrace{\sum_i \big(G_{ii} - \tfrac1k\big)^2}_{\text{norm balance}},
-\] so \(D = 0\) demands mutual orthogonality \textbf{and} equal column
-norms --- that is orthoNORMality. \(C\) demands orthogonality alone, at
-any column norms. Which is appropriate depends on the application: when
-the components genuinely differ in magnitude, \(D\) charges a penalty
-for the very structure the method exists to produce, and \(C\) does not.
-In the data-anchored formulation of Section @ref(dataanchored) the two
-coincide in practice, because the reconstruction term already forces the
-column norms to agree.
+\]
+so \(D = 0\) requires mutual orthogonality and equal column norms, which is orthonormality. \(C\) requires orthogonality at any column norms. Use \(D\) when the components should carry equal weight and \(C\) when they should not: a disjoint non-negative basis whose columns differ in magnitude scores \(D = 0.14\) and \(C = 2\times 10^{-33}\) (Table \ref{tab:props}). When the basis is fitted to data the two behave the same, because the reconstruction term already equalises the column norms.
 
-The Euclidean gradient of the \(\tilde D\) form is available in closed
-form, \[
+The Euclidean gradient of the \(\tilde D\) form is available in closed form,
+\[
 \nabla_Y E(Y) = (1-w)\,\frac{2 (Y - X_0)}{\|X_0\|_F^2}
  + \frac{w}{1 - 1/k}\cdot\frac{4}{t^2}\Big[ Y S - \frac{\|S\|_F^2}{t} Y \Big],
 \qquad S = Y^\top Y,\; t = \operatorname{tr} S,
-\] requiring no factorisation. It satisfies the Euler identity
-\(\langle \nabla D, Y\rangle = 0\), since \(D\) is homogeneous of degree
-zero, so the orthogonality term cannot alter \(\|Y\|_F\); and
-\(\|\nabla D\|_F \le 8 / \|Y\|_F\). For \(C\) the gradient is tangential
-to each column's sphere separately, so \(C\) cannot alter \emph{any}
-individual column norm.
+\]
+requiring no factorisation. It satisfies the Euler identity \(\langle \nabla D, Y\rangle = 0\), since \(D\) is homogeneous of degree zero, so the orthogonality term cannot alter \(\|Y\|_F\); and \(\|\nabla D\|_F \le 8 / \|Y\|_F\). For \(C\) the gradient is tangential to each column's sphere separately, so \(C\) cannot alter \emph{any} individual column norm.
 
-\subsection{The Optimization Challenge and the NSA-Flow
-Approach}\label{the-optimization-challenge-and-the-nsa-flow-approach}
+\subsection{The Optimization Challenge and the NSA-Flow Approach}\label{the-optimization-challenge-and-the-nsa-flow-approach}
 
-A plain Euclidean gradient step,
-\(Y \leftarrow Y - \eta \nabla_Y E(Y)\), does not respect the
-constraints. The conventional remedy is Riemannian optimisation: project
-the gradient onto the tangent space of the Stiefel manifold and apply a
-\textbf{retraction} to return to it
-(\citeproc{ref-absil2008optimization}{Absil, Mahony, and Sepulchre
-2008}; \citeproc{ref-boumal2023intro}{Boumal 2023}). Retractions are
-theoretically sound but require an SVD or an inverse matrix square root
-at every step, and enforcing exact feasibility can fight the fidelity
-term by abruptly correcting the iterate's geometry.
+A plain Euclidean gradient step, \(Y \leftarrow Y - \eta \nabla_Y E(Y)\), does not respect the constraints. The conventional remedy is Riemannian optimisation: project the gradient onto the tangent space of the Stiefel manifold and apply a \textbf{retraction} to return to it (\citeproc{ref-absil2008optimization}{Absil, Mahony, and Sepulchre 2008}; \citeproc{ref-boumal2023intro}{Boumal 2023}). Retractions are theoretically sound but require an SVD or an inverse matrix square root at every step, and enforcing exact feasibility can fight the fidelity term by abruptly correcting the iterate's geometry.
 
-NSA-Flow takes the opposite view: keep non-negativity as a hard
-constraint, which is cheap to enforce exactly, and treat orthogonality
-as an \emph{objective} rather than a constraint. Nothing is retracted,
-so no factorisation appears in the loop. Figure 1 illustrates how the
-iterates evolve under different \(w\).
+NSA-Flow keeps non-negativity as a hard constraint, which its exact projection makes cheap, and treats orthogonality as an objective. Nothing is retracted and no factorisation appears in the loop. Figure \ref{fig:pollen} shows how the iterates evolve with \(w\).
 
-\subsubsection{Solver: spectral projected
-gradient}\label{solver-spectral-projected-gradient}
+\subsubsection{Solver: spectral projected gradient}\label{solver-spectral-projected-gradient}
 
-The feasible set \(\{ Y \ge 0 \}\) is closed and convex and its
-Euclidean projection is the elementwise clamp \(\Pi(Y) = \max(0, Y)\),
-so the problem is a smooth objective on a convex set and admits a
-projected-gradient method. We use the spectral projected gradient of
-Birgin, Martínez and Raydan
-(\citeproc{ref-birgin2000nonmonotone}{Birgin, Martı́nez, and Raydan
-2000}): Barzilai--Borwein step lengths
-(\citeproc{ref-barzilai1988two}{Barzilai and Borwein 1988}) \[
+The feasible set \(\{ Y \ge 0 \}\) is closed and convex and its Euclidean projection is the elementwise clamp \(\Pi(Y) = \max(0, Y)\), so the problem is a smooth objective on a convex set and admits a projected-gradient method. We use the spectral projected gradient of Birgin, Martínez and Raydan (\citeproc{ref-birgin2000nonmonotone}{Birgin, Martı́nez, and Raydan 2000}): Barzilai--Borwein step lengths (\citeproc{ref-barzilai1988two}{Barzilai and Borwein 1988})
+\[
 t_n = \frac{\langle s_n, s_n\rangle}{\langle s_n, r_n\rangle},
 \qquad s_n = Y_n - Y_{n-1},\quad r_n = \nabla E(Y_n) - \nabla E(Y_{n-1}),
-\] safeguarded by an Armijo backtracking line search on the projected
-step \[
+\]
+safeguarded by an Armijo backtracking line search on the projected step
+\[
 Y_{n+1} = \Pi\big(Y_n - t_n \nabla E(Y_n)\big),
 \qquad
 E(Y_{n+1}) \le E(Y_n) - \sigma \frac{\|Y_{n+1} - Y_n\|_F^2}{t_n}.
-\] The line search makes the energy monotonically non-increasing by
-construction, and for a continuously differentiable \(E\) on a closed
-convex set the method converges to a stationary point.
+\]
+The line search makes the energy monotonically non-increasing by construction, and for a continuously differentiable \(E\) on a closed convex set the method converges to a stationary point.
 
 \subsubsection{Stationarity certificate}\label{stationarity-certificate}
 
-The quantity \[
+The quantity
+\[
 \gamma_n = \frac{\|\Pi(Y_n - t_n \nabla E(Y_n)) - Y_n\|_F}{t_n}
-\] is the norm of the projected-gradient mapping. It vanishes exactly at
-a stationary point of the constrained problem, and unlike a gradient
-norm it is valid \emph{on} the boundary, which is where non-negative
-solutions live. We therefore report \(\gamma_n\) as a computable
-certificate, and the solver reports which stopping rule fired --- the
-certificate threshold, line-search exhaustion, or the iteration cap ---
-rather than asserting convergence. Conditioning degrades as \(w \to 1\),
-where the problem approaches its combinatorial limit: convergence takes
-tens of iterations at \(w = 0.5\), hundreds at \(w = 0.9\), and
-thousands beyond \(w = 0.99\).
+\]
+is the norm of the projected-gradient mapping. It vanishes at a stationary point of the constrained problem and remains valid on the boundary, where non-negative solutions lie and where the gradient norm does not vanish. The solver reports \(\gamma_n\) and which stopping rule fired: certificate threshold, line-search exhaustion or iteration cap. Conditioning degrades as \(w \to 1\), where the problem approaches its combinatorial limit: convergence takes tens of iterations at \(w = 0.5\), hundreds at \(w = 0.9\), and thousands beyond \(w = 0.99\).
 
-A degeneracy is worth naming. At \(w = 1\) the fidelity term vanishes
-and \(D\) is scale invariant, so the scale of the returned \(Y\) is
-unconstrained; every scaled Stiefel matrix is optimal, and nothing
-selects among clusterings either. The implementation warns at \(w = 1\)
-and reports the observed scale drift.
+At \(w = 1\) the fidelity term vanishes and \(D\) is scale invariant, so the scale of \(Y\) is unconstrained: every scaled Stiefel matrix is optimal and nothing selects among clusterings. The implementation warns at \(w = 1\) and reports the observed scale drift.
 
-\subsubsection{Why the penalty must be normalised per column, not
-globally}\label{why-the-penalty-must-be-normalised-per-column-not-globally}
+\subsubsection{Why the penalty must be normalised per column, not globally}\label{why-the-penalty-must-be-normalised-per-column-not-globally}
 
-The unnormalised penalty \(\| Y^\top Y - I \|_F^2\) is sensitive to the
-norm of \(Y\): scaling \(Y \to cY\) scales it by \(c^4\), which makes
-the optimisation poorly conditioned and the step size hard to choose. An
-earlier version of this work therefore used a globally normalised
-off-diagonal defect, \[
+The unnormalised penalty \(\| Y^\top Y - I \|_F^2\) is sensitive to the norm of \(Y\): scaling \(Y \to cY\) scales it by \(c^4\), which makes the optimisation poorly conditioned and the step size hard to choose. An earlier version of this work therefore used a globally normalised off-diagonal defect,
+\[
 L_{orth, inv}(Y) = \frac{\| Y^\top Y - \operatorname{diag}(\operatorname{diag}(Y^\top Y)) \|_F^2}{\|Y\|_F^4},
-\] described as measuring the cosines of the angles between columns.
-\textbf{It does not}, and the discrepancy has a concrete cost. Dividing
-by the global \(\|Y\|_F^4\) rather than by \(\|y_i\|^2\|y_j\|^2\) leaves
-a quantity that is invariant to a global rescaling but not to rescaling
-the columns individually, so it is not a function of the angles alone.
-More seriously, its zero set is too large: a matrix with one non-zero
-column and \(k-1\) zero columns attains \(L_{orth, inv} = 0\) exactly,
-because a zero column is orthogonal to everything. The functional is
-therefore \emph{minimised by rank collapse}, and the same matrix is
-scored \(0.2\) by \(C\) and \(0.8\) by \(D\).
+\]
+described as measuring the cosines of the angles between columns. It does not. Dividing by the global \(\|Y\|_F^4\) rather than by \(\|y_i\|^2\|y_j\|^2\) gives a quantity invariant to global rescaling but not to rescaling columns individually, so it is not a function of the angles. Its zero set is also too large. A matrix with one non-zero column and \(k-1\) zero columns attains \(L_{orth, inv} = 0\) exactly, since a zero column is orthogonal to everything, so the functional is minimised by rank collapse. \(C\) scores that matrix \(0.2\) and \(D\) scores it \(0.8\).
 
-The two penalties defined above fix this in different ways. \(C\)
-normalises each column, so it is a genuine function of the angles and is
-invariant to per-column rescaling, which is the real gauge freedom of a
-basis; its diagonal charges a column whose norm has collapsed, which
-doubles as a degeneracy penalty. \(D\) instead adds the norm-balance
-term, and its floor \(D \ge 1/r - 1/k\) at rank \(r\) penalises collapse
-directly. Either is a correct measure of what the method is asked to
-produce; the off-diagonal defect alone is not, and it is not used here.
+\(C\) normalises each column, so it is a function of the angles and invariant to per-column rescaling, which is the gauge freedom of a basis; its diagonal charges a column whose norm has collapsed. \(D\) adds the norm-balance term and its floor \(D \ge 1/r - 1/k\) at rank \(r\) penalises collapse. The off-diagonal defect alone does neither and is not used here.
 
-\subsubsection{Relationship to Alternative Manifold Optimization
-Methods}\label{relationship-to-alternative-manifold-optimization-methods}
+\subsubsection{Relationship to Alternative Manifold Optimization Methods}\label{relationship-to-alternative-manifold-optimization-methods}
 
 \begin{itemize}
 \item
-  \textbf{Cayley Transform:} An alternative for preserving orthogonality
-  is the \textbf{Cayley transform}, which defines an exact
-  retraction-free update. For a skew-symmetric matrix
-  \(A = \text{grad}E(Y) Y^\top - Y (\text{grad}E(Y))^\top\), the update
-  \(Y^{(t+1)} = ( I - \frac{\eta}{2} A )^{-1} ( I + \frac{\eta}{2} A ) Y^{(t)}\)
-  exactly preserves orthogonality
-  (\citeproc{ref-gao2019parallelizing}{Gao et al. 2019}). However, it
-  requires solving a \(p \times p\) linear system, making it
-  computationally prohibitive for large \(p\).
+  \textbf{Cayley Transform:} An alternative for preserving orthogonality is the \textbf{Cayley transform}, which defines an exact retraction-free update. For a skew-symmetric matrix \(A = \text{grad}E(Y) Y^\top - Y (\text{grad}E(Y))^\top\), the update \(Y^{(t+1)} = ( I - \frac{\eta}{2} A )^{-1} ( I + \frac{\eta}{2} A ) Y^{(t)}\) exactly preserves orthogonality (\citeproc{ref-gao2019parallelizing}{Gao et al. 2019}). However, it requires solving a \(p \times p\) linear system, making it computationally prohibitive for large \(p\).
 \item
-  \textbf{Riemannian Optimization Frameworks:} Standard toolboxes like
-  \texttt{Manopt} (\citeproc{ref-boumal2014manopt}{Boumal et al. 2014})
-  implement sophisticated algorithms like Riemannian trust-region and
-  conjugate gradient methods. NSA-Flow instead avoids the manifold
-  machinery altogether --- orthogonality is an objective, not a
-  constraint --- which makes it a drop-in component for existing ML or
-  deep-learning pipelines and lets the degree of constraint satisfaction
-  be chosen rather than fixed.
+  \textbf{Riemannian Optimization Frameworks:} Standard toolboxes like \texttt{Manopt} (\citeproc{ref-boumal2014manopt}{Boumal et al. 2014}) implement sophisticated algorithms like Riemannian trust-region and conjugate gradient methods. NSA-Flow instead avoids the manifold machinery altogether --- orthogonality is an objective, not a constraint --- which makes it a drop-in component for existing ML or deep-learning pipelines and lets the degree of constraint satisfaction be chosen rather than fixed.
 \end{itemize}
 
 \subsubsection{Computational Complexity}\label{computational-complexity}
 
 \begin{table}[t]
-\caption{\label{tab:complexity_table}Computational Complexity of NSA-Flow and Related Methods} 
+\caption{\label{tab:complexitytable}Computational Complexity of NSA-Flow and Related Methods} 
 \fontsize{6.0pt}{7.0pt}\selectfont
 \begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}lllll}
 \toprule
 Method & Dominant Operation & Complexity (\$p \textbackslash{}ge k\$) & Orthogonality & Notes \\ 
 \midrule\addlinespace[2.5pt]
-Euclidean GD & Gradient Computation & ( O(pk\^{}2) ) & ✗ (Unstable) & Fails to enforce constraints. \\ 
-Full Polar Retraction & Gradient + SVD / Polar & ( O(pk\^{}2) ) & ✓ (Exact) & Costly, non-smooth updates. \\ 
-\textbf{NSA-Flow (ours)} & Gradient + Polar + Interp. & ( O(pk\^{}2) ) & ≈ (Controlled) & Smoother, faster, practical. \\ 
-Cayley Transform & Linear Solve ((p \textbackslash{}times p)) & ( O(p\^{}3) ) or ( O(pk\^{}2) ) (w/ low rank) & ✓ (Exact) & Prohibitive for large (p). \\ 
+Euclidean GD & Gradient & ( O(pk\^{}2) ) & not enforced & Does not enforce the constraints. \\ 
+Full Polar Retraction & Gradient + SVD / polar & ( O(pk\^{}2) ) & exact & A factorisation per step. \\ 
+\textbf{NSA-Flow (ours)} & Gradient + clamp (no factorisation) & ( O(pk\^{}2) ) & set by (w) & (O(npk)) matrix-free when (p\textgreater{}n); certificate reported. \\ 
+Cayley Transform & Linear solve ((p \textbackslash{}times p)) & ( O(p\^{}3) ) or ( O(pk\^{}2) ) (w/ low rank) & exact & Prohibitive for large (p). \\ 
 \bottomrule
 \end{tabular*}
 \end{table}
 
-For tall-skinny matrices (\(p \gg k\)) each iteration costs one Gram
-product and two \([p,k]\times[k,k]\) products, i.e.~\(O(pk^2)\), with no
-SVD, eigendecomposition or QR anywhere in the loop --- the asymptotic
-cost is the same as a retraction method's, but the constant is much
-smaller and the per-step work is a few matrix multiplications rather
-than a factorisation. When the basis is fitted directly to data with
-\(p > n\) the Gram matrix is never formed either: every quantity follows
-from \(XV\) and \(X^\top(XV)\), giving \(O(npk)\) per iteration and
-removing an allocation that is \(0.4\) GB at \(p = 7129\) and \(3.2\) GB
-at \(p = 20000\). Practically speaking, as will be shown in the Results
-section, NSA-Flow provides an intuitive ``knob'' that allows users to
-impose orthogonality, non-negativity and sparseness via a consistent and
-intuitive framework. Table 1 summarizes these comparisons.
+For tall-skinny matrices (\(p \gg k\)) each iteration costs one Gram product and two \([p,k]\times[k,k]\) products, i.e.~\(O(pk^2)\), with no SVD, eigendecomposition or QR anywhere in the loop --- the asymptotic cost is the same as a retraction method's, but the constant is much smaller and the per-step work is a few matrix multiplications rather than a factorisation. When the basis is fitted directly to data with \(p > n\) the Gram matrix is never formed either: every quantity follows from \(XV\) and \(X^\top(XV)\), giving \(O(npk)\) per iteration and removing an allocation that is \(0.4\) GB at \(p = 7129\) and \(3.2\) GB at \(p = 20000\). Practically speaking, as will be shown in the Results section, NSA-Flow provides an intuitive ``knob'' that allows users to impose orthogonality, non-negativity and sparseness via a consistent and intuitive framework. Table 1 summarizes these comparisons.
 
 \begin{figure}
 
@@ -582,370 +334,179 @@ intuitive framework. Table 1 summarizes these comparisons.
 
 \subsubsection{Implementation}\label{implementation}
 
-The NSA-Flow algorithm is implemented in \texttt{pytorch} as a small,
-dependency-light package; the results in this document are produced by
-calling it directly. The library is five modules and under a thousand
-lines, a consolidation from the earlier version's eight modules and
-roughly 2400 lines, achieved by deleting rather than adding.
+NSA-Flow is implemented in \texttt{pytorch}; the results here call it directly. The library is five modules and under a thousand lines, down from eight modules and about 2400.
 
-The refinement entry point accepts a target \(X_0\), an optional
-initialisation, and the weight \(w\); the estimation entry point accepts
-the data matrix \(X\) and the number of components \(k\). What it no
-longer accepts is the earlier version's configuration surface: there is
-no retraction type, no optimizer backend, no learning-rate strategy, no
-aggression or warm-up parameter, and no separate fidelity and
-orthogonality type switches. Those existed to compensate for an energy
-whose two terms were not comparably scaled, and they became unnecessary
-once both terms were made dimensionless. The document records exactly
-which arguments were dropped in Table @ref(tab:dropped).
+The refinement entry point takes a target \(X_0\), an optional initialisation and the weight \(w\). The estimation entry point takes the data matrix \(X\) and the number of components \(k\). Gone are the retraction type, optimizer backend, learning-rate strategy, aggression and warm-up parameters, and the separate fidelity and orthogonality switches. These compensated for an energy whose two terms were not comparably scaled and are unnecessary once both are dimensionless.
 
-Each iteration computes a fused value-and-gradient sharing a single Gram
-product, takes a Barzilai--Borwein step, and accepts it through an
-Armijo line search on the projected step; the energy is therefore
-monotone by construction. Non-negativity is applied by exact projection.
-Diagnostics recorded per iteration are the energy, the two loss terms,
-the step length and the projected-gradient mapping norm, and the
-returned object carries the stopping reason, the certificate value, the
-iteration count, the effective rank and the scale ratio.
+Each iteration computes a fused value and gradient sharing one Gram product, takes a Barzilai--Borwein step and accepts it through an Armijo line search on the projected step, so the energy is monotone. Non-negativity is applied by exact projection. Per-iteration diagnostics are the energy, the two loss terms, the step length and the gradient-mapping norm. The returned object carries the stopping reason, the certificate, the iteration count, the effective rank and the scale ratio.
 
-Two numerical choices are worth stating because both were errors in the
-earlier version. The orthogonality defect is computed as
-\(\|G - I/k\|_F^2\) directly rather than as \(\|G\|_F^2 - 1/k\); the
-latter is algebraically identical but suffers catastrophic cancellation
-near the optimum and returns small negative values. And when a polar
-factor must be differentiated, the derivative is obtained by solving the
-Sylvester equation, whose denominators are \(h_i + h_j > 0\), rather
-than through the SVD backward pass, whose denominators are
-\(\sigma_i^2 - \sigma_j^2\) and which returns \texttt{NaN} for
-\emph{every} entry when singular values repeat --- as they do for any
-orthogonal initialisation.
+Two numerical details. The orthogonality defect is computed as \(\|G - I/k\|_F^2\) directly rather than as \(\|G\|_F^2 - 1/k\); the latter is algebraically identical but suffers catastrophic cancellation near the optimum and returns small negative values. And when a polar factor must be differentiated, the derivative is obtained by solving the Sylvester equation, whose denominators are \(h_i + h_j > 0\), rather than through the SVD backward pass, whose denominators are \(\sigma_i^2 - \sigma_j^2\) and which returns \texttt{NaN} for \emph{every} entry when singular values repeat --- as they do for any orthogonal initialisation.
 
-The implementation is research-grade but tested: the accompanying suite
-asserts the propositions of this section executably, including the zero
-set, the bounds, the spectral identity, the rank-collapse floor, the
-invariances, the disjoint-support equivalence, agreement of every
-closed-form gradient with automatic differentiation, and equality of the
-Gram and matrix-free code paths. Experimentalists should still centre
-and scale their inputs and choose \(w\) for the application; unlike the
-earlier version, there is nothing else to tune.
+The test suite asserts the propositions of this section: the zero set, the bounds, the spectral identity, the rank-collapse floor, the invariances, the disjoint-support equivalence, agreement of every closed-form gradient with automatic differentiation, and equality of the Gram and matrix-free paths. Centre and scale the input and choose \(w\) for the application. There is nothing else to set.
 
 \begin{figure}
 
-{\centering \includegraphics{nsa_flow_files/figure-latex/nsa_flowchart-1} 
+{\centering \includegraphics{nsa_flow_files/figure-latex/nsaflowchart-1} 
 
 }
 
-\caption{NSA-Flow Algorithm Workflow}\label{fig:nsa_flowchart}
+\caption{NSA-Flow Algorithm Workflow}\label{fig:nsaflowchart}
 \end{figure}
 
 \subsection{Sparse PCA via NSA-Flow}\label{sparse-pca-via-nsa-flow}
 
-Sparse principal component analysis (SPCA) finds a sparse basis
-\(Y \in \mathbb{R}^{p \times k}\) that maximizes the variance explained
-in a data matrix \(X \in \mathbb{R}^{n \times p}\). We can formulate
-SPCA as a regularized optimization over \(Y\) :
+Sparse principal component analysis (SPCA) finds a sparse basis \(Y \in \mathbb{R}^{p \times k}\) that maximizes the variance explained in a data matrix \(X \in \mathbb{R}^{n \times p}\). We can formulate SPCA as a regularized optimization over \(Y\) :
 
 \[
 \min_{Y} \left\{ -\frac{1}{2n} \text{tr}(Y^\top X_c^\top X_c Y) + \lambda R(Y) \right\},
-\] where \(X_c\) is the data matrix, \(\lambda \ge 0\) is a
-regularization parameter controlling the regularization penalty, and
-\(R(Y)\) is a suitable regularization function. The smooth component of
-the objective is the negative explained variance,
-\(f(Y) = -\frac{1}{2n} \text{tr}(Y^\top S Y)\), where
-\(S = X_c^\top X_c\) is the covariance matrix. The Euclidean gradient of
-this term is: \[
+\]
+where \(X_c\) is the data matrix, \(\lambda \ge 0\) is a regularization parameter controlling the regularization penalty, and \(R(Y)\) is a suitable regularization function. The smooth component of the objective is the negative explained variance, \(f(Y) = -\frac{1}{2n} \text{tr}(Y^\top S Y)\), where \(S = X_c^\top X_c\) is the covariance matrix. The Euclidean gradient of this term is:
+\[
 \nabla_Y f(Y) = -\frac{1}{n} S Y.
 \]
 
 We optimize this energy in two main steps:
 
-\textbf{Step 1: Gradient Descent with Line Search} A candidate update
-\(Z^{(t)}\) is computed by taking a step along the negative gradient
-direction from the current iterate \(Y^{(t)}\): \[
+\textbf{Step 1: Gradient Descent with Line Search}
+A candidate update \(Z^{(t)}\) is computed by taking a step along the negative gradient direction from the current iterate \(Y^{(t)}\):
+\[
 Z^{(t)} = Y^{(t)} - \alpha^{(t)} \nabla_Y f(Y^{(t)}),
-\] where the step size \(\alpha^{(t)}\) is determined by an Armijo-type
-backtracking line search to ensure sufficient decrease in the objective
-function.
+\]
+where the step size \(\alpha^{(t)}\) is determined by an Armijo-type backtracking line search to ensure sufficient decrease in the objective function.
 
-\textbf{Step 2: Proximal Step and Orthogonality Enforcement} The
-non-smooth regularization term arising from \(R\) is handled in a
-proximal step. The method supports two types of proximal updates:
+\textbf{Step 2: Proximal Step and Orthogonality Enforcement}
+The non-smooth regularization term arising from \(R\) is handled in a proximal step. The method supports two types of proximal updates:
 
 \begin{itemize}
 \item
-  \textbf{\texttt{proximal\_type\ =\ "basic"} (Proximal Thresholding):}
-  A standard soft-thresholding operator is applied to the candidate
-  \(Z^{(t)}\) to induce sparsity, followed by an optional non-negativity
-  projection: \[
+  \textbf{\texttt{proximal\_type\ =\ "basic"} (Proximal Thresholding):} A standard soft-thresholding operator is applied to the candidate \(Z^{(t)}\) to induce sparsity, followed by an optional non-negativity projection:
+  \[
   Y^{(t+1)} = \text{prox}_{\alpha\lambda, \|\cdot\|_1}(Z^{(t)}) = \text{sign}(Z^{(t)}) \odot \max(|Z^{(t)}| - \alpha^{(t)}\lambda, 0).
-  \] This standard approach decouples the sparsity and orthogonality
-  steps. We re-orthogonalize via QR at the beginning of each iteration
-  when this algorithmic path is taken.
+  \]
+  This standard approach decouples the sparsity and orthogonality steps. We re-orthogonalize via QR at the beginning of each iteration when this algorithmic path is taken.
 \item
-  \textbf{\texttt{proximal\_type\ =\ "nsa\_flow"} (Proximal Flow):} A
-  more sophisticated proximal step is performed by invoking the NSA-Flow
-  algorithm. The candidate matrix \(Z^{(t)}\) serves as the target for
-  an inner NSA-Flow optimization loop: \[
+  \textbf{\texttt{proximal\_type\ =\ "nsa\_flow"} (Proximal Flow):} A more sophisticated proximal step is performed by invoking the NSA-Flow algorithm. The candidate matrix \(Z^{(t)}\) serves as the target for an inner NSA-Flow optimization loop:
+  \[
   Y^{(t+1)} = \arg\min_{U \ge 0} \left\{ \frac{1}{2} \| U - Z^{(t)} \|_F^2 (1-w) + \, \text{Orth}(U) w \right\}.
-  \] This subproblem simultaneously encourages fidelity to the
-  gradient-updated iterate \(Z^{(t)}\), promotes sparsity through
-  non-negativity, and enforces column orthogonality via the flow. This
-  approach integrates the constraints more tightly into the
-  optimization, providing a unified update that respects both the
-  geometry and the regularization.
+  \]
+  This subproblem simultaneously encourages fidelity to the gradient-updated iterate \(Z^{(t)}\), promotes sparsity through non-negativity, and enforces column orthogonality via the flow. This approach integrates the constraints more tightly into the optimization, providing a unified update that respects both the geometry and the regularization.
 \end{itemize}
 
-The algorithm terminates when the relative change in energy, the norm of
-the gradient, and the change in the iterate all fall below a predefined
-tolerance \(\tau\). An adaptive learning rate scheduler is also
-employed, which reduces the step size \(\alpha\) if the objective
-function fails to improve for a set number of iterations (patience),
-thereby enhancing stability and preventing premature termination at
-plateaus. The final output is the set of sparse loadings \(Y\) that
-achieved the lowest energy during the optimization. This is one example
-where NSA-Flow can be integrated as a proximal operator within a broader
-optimization framework to enforce orthogonality and non-negativity.
-Other approaches (shown below) more directly use NSA-Flow as a
-standalone method for matrix approximation; for example, by directly
-approximating the loading matrix of PCA with the bases derived from
-NSA-Flow. Both SPCA and the latter approach are demonstrated in the
-Results section. The implementation is available in the
-\texttt{nsa\_flow\_pca} function within the ANTsR package. We implement
-a closely related approach for NSA-flow constrained factor analysis in
-the \texttt{nsa\_flow\_pca\_fa} function which is illustrated in an
-accompanying documentation article (\texttt{ANTsR}).
+The algorithm terminates when the relative change in energy, the norm of the gradient, and the change in the iterate all fall below a predefined tolerance \(\tau\). An adaptive learning rate scheduler is also employed, which reduces the step size \(\alpha\) if the objective function fails to improve for a set number of iterations (patience), thereby enhancing stability and preventing premature termination at plateaus. The final output is the set of sparse loadings \(Y\) that achieved the lowest energy during the optimization. This is one example where NSA-Flow can be integrated as a proximal operator within a broader optimization framework to enforce orthogonality and non-negativity. Other approaches (shown below) more directly use NSA-Flow as a standalone method for matrix approximation; for example, by directly approximating the loading matrix of PCA with the bases derived from NSA-Flow. Both SPCA and the latter approach are demonstrated in the Results section. The implementation is available in the \texttt{nsa\_flow\_pca} function within the ANTsR package. We implement a closely related approach for NSA-flow constrained factor analysis in the \texttt{nsa\_flow\_pca\_fa} function which is illustrated in an accompanying documentation article (\texttt{ANTsR}).
 
 \section{Results}\label{results}
 
-We use default settings in the results below with \(w = 0.5\) unless
-otherwise specified. Because both energy terms are dimensionless, there
-is no relative weighting to set: \(w\) is the only balance parameter,
-and it is not a nuisance parameter that has to be calibrated per
-problem. There is likewise no learning rate to choose ---
-Barzilai--Borwein steps are scale-free and the Armijo line search
-accepts or halves them --- and convergence is declared on the
-projected-gradient mapping norm falling below \(10^{-9}\) in double
-precision (\(10^{-6}\) in single, which is above float32 machine
-epsilon), or reported as unconverged otherwise. Empirically \(w = 0.5\)
-is a better default than more aggressive settings: across the
-experiments below it dominates \(w = 0.9\) on both reconstruction and
-reproducibility, because large \(w\) pins the solution near a
-combinatorial vertex where small perturbations of the data change which
-vertex is selected.
+\subsection{Choice of downstream model in the evaluations}\label{evaluation}
 
-\subsection{Toy Example: Decomposing a Small Mixed-Signal
-Matrix}\label{toy-example-decomposing-a-small-mixed-signal-matrix}
+The comparisons below use random forests. The reason is an identity. Fit a linear
+model to scores \(XV\). For any invertible \(M\),
+\[
+\operatorname{span}(XVM) = \operatorname{span}(XV),
+\]
+so the fitted values are unchanged when \(V\) is replaced by \(VM\): the
+coefficients absorb \(M^{-1}\). Ordinary least squares, ridge and logistic
+regression are all invariant to reparametrisation of the basis. They see the
+subspace and not the axes.
 
-To intuitively illustrate NSA-Flow, consider a toy 4x3 matrix \(X_0\)
-representing mixed signals: each column is a nonnegative orthogonal
-basis vector (e.g., distinct patterns), but observed with noise and
-scaling. NSA-Flow approximates an orthogonal nonnegative basis \(Y\)
-close to \(X_0\). Figure 3 shows the results of applying NSA-Flow to
-this toy example, starting from a random initialization \(Y_0\).
+NSA-Flow refines a basis and stays near it, so \(V_{\text{NSA}}\) and
+\(V_{\text{PCA}}\) span almost the same subspace. A linear comparison of the two
+will tie whatever the axes look like. We measured this on the ADNI thickness
+data: replacing \(V\) by \(VM\) for random invertible \(M\) changes
+cross-validated linear \(R^2\) by \(0.0000\) and random-forest \(R^2\) by
+\(0.057\). A tree splits on single coordinates, so its fit depends on the axes.
 
-\begin{figure}
+Sensitivity is not the same as preference, and the direction is data dependent.
+On ADNI thickness with cognitive scores as outcomes, the forest prefers the
+NSA-Flow axes: out-of-sample \(\Delta R^2\) over an age, sex, education and
+APOE4 baseline is \(0.043\) higher than PCA, on \(7\) to \(9\) of \(9\)
+outcomes across three seeds. On ADNI regional volumes, \texttt{digits} and
+\texttt{breast\_cancer} with binary labels, the forest prefers the PCA axes by about
+\(0.010\) AUC. Under logistic regression all of these differences shrink toward
+zero, as the identity requires.
 
-{\centering \includegraphics{nsa_flow_files/figure-latex/toy_example-1} 
+We report linear results where the subspace is the question and tree results
+where the axes are. A tie under a linear model is not evidence about a basis.
 
-}
+\subsection{Toy Example: Decomposing a Small Mixed-Signal Matrix}\label{toy-example-decomposing-a-small-mixed-signal-matrix}
 
-\caption{NSA-Flow applied to a toy 4x3 matrix with noisy orthogonal nonnegative patterns.}\label{fig:toy_example}
-\end{figure}
-
-\textbf{Interpretation}: Starting from a random \(Y_0\), NSA-Flow
-recovers a basis close to the true orthogonal nonnegative patterns in
-\(X_0\), with low reconstruction error and near-zero
-orthogonality/nonnegativity residuals. This captures the essence:
-extracting interpretable, disjoint components from noisy data.
+To intuitively illustrate NSA-Flow, consider a toy 4x3 matrix \(X_0\) representing mixed signals: each column is a nonnegative orthogonal basis vector (e.g., distinct patterns), but observed with noise and scaling. NSA-Flow approximates an orthogonal nonnegative basis \(Y\) close to \(X_0\). Figure \ref{fig:toyexample} shows the results of applying NSA-Flow to this toy example, starting from a random initialization \(Y_0\).
 
 \begin{figure}
 
-{\centering \includegraphics[width=0.9\linewidth]{figs/nsa_flow_optimizer_comparison_wide_p100_k140} 
+{\centering \includegraphics{nsa_flow_files/figure-latex/toyexample-1} 
 
 }
 
-\caption{The impact of regularization on measures of both orthogonality and fidelity error across different optimizers.  For both metrics, lower values are better. We vary ($\omega$) from 0.01 (minor orthogonality enforcement) to 0.99 (near full enforcement) and compare standard torch optimizers.  Smoothly reducing curves for orthogonality and increasing curves for fidelity are expected and indicate better performance.  This evaluation as well as comparisons in sparse PCA and factor analysis suggest that LARS and ASGD are most reliable in conjunction with the NSA flow implementation.}\label{fig:pollen2}
+\caption{NSA-Flow applied to a toy 4x3 matrix with noisy orthogonal nonnegative patterns.}\label{fig:toyexample}
 \end{figure}
 
-\subsection{Comparing Optimization
-Methods}\label{comparing-optimization-methods}
+\textbf{Interpretation}: Starting from a random \(Y_0\), NSA-Flow recovers a basis close to the true orthogonal nonnegative patterns in \(X_0\), with low reconstruction error and near-zero orthogonality/nonnegativity residuals. This captures the essence: extracting interpretable, disjoint components from noisy data.
 
-A key choice in NSA-Flow is the optimization algorithm. We compare
-several optimizers: standard gradient descent, Adam, Armijo gradient
-descent, AdaGrad and others. Each has different convergence properties
-and sensitivities to hyperparameters and we evaluate them with standard
-defaults and an automatically estimated learning rate via Armijo
-condition (\citeproc{ref-armijo1966minimization}{Armijo 1966}). We
-evaluate them on synthetic data measuring convergence speed and final
-orthogonality/fidelity metrics. Performance across \(\omega\) values are
-shown in Figure 4. A data-driven ranking of the methods based on
-execution time and objective values shows that \texttt{pytorch} averaged
-stochastic gradient descent
-(\citeproc{ref-polyak1992acceleration}{Polyak and Juditsky 1992}) and
-Layer-wise Adaptive Rate Scaling (LARS) (\citeproc{ref-you2017large}{You
-et al. 2020}) perform well in terms of both speed and objective values
-across a variety of problems.
+\subsection{Behaviour of the orthogonality weight}\label{behaviour-of-the-orthogonality-weight}
 
-\begin{figure}
+The earlier version of this work compared optimizer backends (ASGD, Adam, AdaGrad and others) and swept an interpolation parameter between a Euclidean step and a polar retraction across tall, wide and square matrices. Neither choice exists now: there is one solver and nothing is retracted. The two figures reporting those comparisons have been removed rather than recaptioned, since they were produced by code that is gone. What remains to report is how \(w\) behaves, which is Section \ref{sparsity} and the convergence traces in Figure \ref{fig:stiefelsweepfull}.
 
-{\centering \includegraphics[width=0.9\linewidth]{figs/nsa_flow_optimization_paths_by_w} 
+The comparison against the retraction scheme was rerun rather than dropped. On the earlier study's synthetic problem (\(p = 200\), \(k = 8\)) and scored on its own metrics, the present solver attains an orthogonality residual of \(0.011\) at \(w = 0.999\) against \(0.016\) for polar and \(0.019\) for soft retraction, and \(0.0018\) at \(w = 0.9999\); it matches the best retraction on that study's energy (\(5.899\) against \(5.845\), with projected gradient at \(59.5\)); it returns the same basis from twelve random restarts where polar retraction has a spread of \(9 \times 10^{-4}\); and its runtime is nearly flat in \(p\) since no factorisation is performed. The orthogonality residual is set by \(w\) rather than fixed by the operator.
 
-}
+\subsection{\texorpdfstring{Sparsity as a Function of Orthogonality via Weight Parameter \(w\)}{Sparsity as a Function of Orthogonality via Weight Parameter w}}\label{sparsity}
 
-\caption{The default optimizer peformance across different values of orthogonality weight indicates that the single parameter provides predictable control of the orthogonality in the outcome.  Higher values lead predictably to more decorrelation at the expense of fidelity.}\label{fig:pollen3}
-\end{figure}
+Sparsity in the context of matrix factorization refers to the presence of many zero (or near-zero) entries in the factorized matrices. In NSA-Flow, sparsity is not directly enforced through explicit penalties (like L1 regularization) but emerges as a consequence of promoting orthogonality among the columns of the matrix \(Y\). The parameter \(\omega\) serves as a trade-off weight between data fidelity and orthogonality regularization. Orthogonality is measured at the whole-matrix level where lower values indicate closer alignment to an orthogonal (or near-orthogonal) structure.
 
-\subsection{Behaviour of the orthogonality weight across matrix
-shapes}\label{behaviour-of-the-orthogonality-weight-across-matrix-shapes}
-
-The earlier version of this work studied the strength of its retraction
-operator, sweeping an interpolation parameter between a Euclidean step
-and a polar retraction across tall, wide and square matrices. That
-operator no longer exists --- orthogonality is now an objective and
-nothing is retracted --- so the corresponding question is how the weight
-\(w\) behaves across the same shapes, which is what we report below in
-Section @ref(sparsity) and Figure 5.
-
-For the record, the comparison against the retraction-based scheme is
-not merely dropped. Run on the earlier study's own synthetic problem
-(\(p = 200\), \(k = 8\)) and scored on its own metrics, the present
-solver attains an orthogonality residual of \(0.011\) at \(w = 0.999\)
-against \(0.016\) for polar and \(0.019\) for soft retraction, and
-\(0.0018\) at \(w = 0.9999\); it matches the best retraction on that
-study's energy (\(5.899\) against \(5.845\), with projected gradient at
-\(59.5\)); it returns the identical basis from twelve random restarts
-where polar retraction has a spread of \(9 \times 10^{-4}\); and its
-runtime is nearly flat in \(p\) because no factorisation is performed.
-The orthogonality residual is a \emph{dial} here rather than a fixed
-property of the operator, which is the substantive difference between
-the two formulations.
-
-\subsection{\texorpdfstring{Sparsity as a Function of Orthogonality via
-Weight Parameter
-\(w\)}{Sparsity as a Function of Orthogonality via Weight Parameter w}}\label{sparsity}
-
-Sparsity in the context of matrix factorization refers to the presence
-of many zero (or near-zero) entries in the factorized matrices. In
-NSA-Flow, sparsity is not directly enforced through explicit penalties
-(like L1 regularization) but emerges as a consequence of promoting
-orthogonality among the columns of the matrix \(Y\). The parameter
-\(\omega\) serves as a trade-off weight between data fidelity and
-orthogonality regularization. Orthogonality is measured at the
-whole-matrix level where lower values indicate closer alignment to an
-orthogonal (or near-orthogonal) structure.
-
-By adjusting \(\omega\), sparsity is indirectly controlled through this
-global orthogonality constraint:
+By adjusting \(\omega\), sparsity is indirectly controlled through this global orthogonality constraint:
 
 \begin{itemize}
 \item
-  \textbf{Low \(w\) (e.g., 0.05--0.25)}: Prioritizes fidelity to the
-  input data, resulting in denser matrices with higher entry
-  correlations across columns. Sparsity remains low, as the optimization
-  allows overlapping patterns to preserve original structure, leading to
-  ``blurry'' approximations.
+  \textbf{Low \(w\) (e.g., 0.05--0.25)}: Prioritizes fidelity to the input data, resulting in denser matrices with higher entry correlations across columns. Sparsity remains low, as the optimization allows overlapping patterns to preserve original structure, leading to ``blurry'' approximations.
 \item
-  \textbf{Increasing \(w\) (e.g., 0.5--0.75)}: Strengthens orthogonality
-  enforcement, promoting decorrelated columns. This induces sparsity by
-  concentrating non-zero entries into disjoint patterns, reducing
-  overlap and yielding moderate sparsity.
+  \textbf{Increasing \(w\) (e.g., 0.5--0.75)}: Strengthens orthogonality enforcement, promoting decorrelated columns. This induces sparsity by concentrating non-zero entries into disjoint patterns, reducing overlap and yielding moderate sparsity.
 \item
-  \textbf{High \(w\) (e.g., 0.95)}: Dominates with orthogonality,
-  forcing near-orthogonal columns that are highly sparse (e.g.,
-  \$\approx\$0.9) and crisp, but potentially over-constrained, risking
-  loss of fidelity to the original data.
+  \textbf{High \(w\) (e.g., 0.95)}: Dominates with orthogonality, forcing near-orthogonal columns that are highly sparse (e.g., \$\approx\$0.9) and crisp, but potentially over-constrained, risking loss of fidelity to the original data.
 \end{itemize}
 
-This mechanism leverages matrix-level orthogonality to achieve sparsity
-without explicit per-entry penalties, as demonstrated in synthetic
-experiments where heatmaps of optimized matrices transition from diffuse
-(low \(w\)) to sharp and disjoint (high \(w\)) (Figure 6). Convergence
-plots (Figure 7) further show stable optimization across \(w\) values,
-confirming the parameter's role in balancing these objectives. Note that
-the exact sparsity levels depend on data characteristics and
-initialization, but the trend of increasing sparsity with higher \(w\)
-is consistent regardless of whether data is thin, wide, or square.
+Matrix-level orthogonality produces sparsity without per-entry penalties. In synthetic experiments, heatmaps of the optimised matrices transition from diffuse (low \(w\)) to sharp and disjoint (high \(w\)) (Figure \ref{fig:stiefelsweepfull}). Convergence plots further show stable optimization across \(w\) values, confirming the parameter's role in balancing these objectives. Note that the exact sparsity levels depend on data characteristics and initialization, but the trend of increasing sparsity with higher \(w\) is consistent regardless of whether data is thin, wide, or square.
 
 \begin{figure}
 
-{\centering \includegraphics{nsa_flow_files/figure-latex/stiefel_sweep_full-1} 
+{\centering \includegraphics{nsa_flow_files/figure-latex/stiefelsweepfull-1} 
 
 }
 
-\caption{A synthetic dataset is generated with controlled correlation and noise levels to evaluate NSA-Flow's performance across different orthogonality weights ($\omega$). The data matrix $X_0$ is approximated with NSA-Flow to reveal underlying orthogonal structures, allowing assessment of how varying $\omega$ influences the sparsity and orthogonality of the resulting factorization.}\label{fig:stiefel_sweep_full}
+\caption{A synthetic dataset is generated with controlled correlation and noise levels to evaluate NSA-Flow's performance across different orthogonality weights ($\omega$). The data matrix $X_0$ is approximated with NSA-Flow to reveal underlying orthogonal structures, allowing assessment of how varying $\omega$ influences the sparsity and orthogonality of the resulting factorization.}\label{fig:stiefelsweepfull-1}
+\end{figure}
+\begin{figure}
+
+{\centering \includegraphics{nsa_flow_files/figure-latex/stiefelsweepfull-2} 
+
+}
+
+\caption{A synthetic dataset is generated with controlled correlation and noise levels to evaluate NSA-Flow's performance across different orthogonality weights ($\omega$). The data matrix $X_0$ is approximated with NSA-Flow to reveal underlying orthogonal structures, allowing assessment of how varying $\omega$ influences the sparsity and orthogonality of the resulting factorization.}\label{fig:stiefelsweepfull-2}
 \end{figure}
 
 \subsection{Applications}\label{applications}
 
-This section demonstrates applications of NSA-Flow in meaningful
-biomedical contexts. We first demonstrate performance of Sparse PCA
-implemented with NSA-Flow on real data from the Golub leukemia dataset
-(\citeproc{ref-golub1999molecular}{Golub et al. 1999}). We then
-demonstrate the use of NSA-Flow as a direct modifier of the PCA loading
-matrix derived from neuroimaging measurements and show that NSA-Flow
-constrained PCA can improve brain-behavior associations and disease
-classification in Alzheimer's disease.
+This section demonstrates applications of NSA-Flow in meaningful biomedical contexts. We first demonstrate performance of Sparse PCA implemented with NSA-Flow on real data from the Golub leukemia dataset (\citeproc{ref-golub1999molecular}{Golub et al. 1999}). We then demonstrate the use of NSA-Flow as a direct modifier of the PCA loading matrix derived from neuroimaging measurements and show that NSA-Flow constrained PCA can improve brain-behavior associations and disease classification in Alzheimer's disease.
 
-\subsection{Prediction of cancer subtypes via Sparse PCA with
-NSA-Flow}\label{prediction-of-cancer-subtypes-via-sparse-pca-with-nsa-flow}
+\subsection{Prediction of cancer subtypes via Sparse PCA with NSA-Flow}\label{prediction-of-cancer-subtypes-via-sparse-pca-with-nsa-flow}
 
-We contrast the impact of regularization in Sparse PCA based on our
-framework (parameterized globally at the matrix level) versus a standard
-\(\ell_1\) approach. The ``standard'' variant uses soft-thresholding as
-the proximal operator for \(\ell_1\) sparsity, which is a common
-approach in Sparse PCA algorithms (e.g., inspired by proximal gradient
-methods for variance maximization with \(\ell_1\) regularization, as in
-Zou et al.'s formulation (\citeproc{ref-zou2006sparse}{Zou, Hastie, and
-Tibshirani 2006})). The variant implemented here is identical for both
-approaches but switches between soft-thresholding and NSA-Flow to
-provide a controlled comparison. Evaluations include core metrics
-(explained variance, sparsity, orthogonality) and prediction impact
-(cross-validated accuracy in biomedical data from the Golub leukemia
-dataset (\citeproc{ref-golub1999molecular}{Golub et al. 1999})).
+We contrast the impact of regularization in Sparse PCA based on our framework (parameterized globally at the matrix level) versus a standard \(\ell_1\) approach. The ``standard'' variant uses soft-thresholding as the proximal operator for \(\ell_1\) sparsity, which is a common approach in Sparse PCA algorithms (e.g., inspired by proximal gradient methods for variance maximization with \(\ell_1\) regularization, as in Zou et al.'s formulation (\citeproc{ref-zou2006sparse}{Zou, Hastie, and Tibshirani 2006})). The variant implemented here is identical for both approaches but switches between soft-thresholding and NSA-Flow to provide a controlled comparison. Evaluations include core metrics (explained variance, sparsity, orthogonality) and prediction impact (cross-validated accuracy in biomedical data from the Golub leukemia dataset (\citeproc{ref-golub1999molecular}{Golub et al. 1999})).
 
-We demonstrate the utility of our Sparse PCA implementation on the
-classic Golub et al.~(1999) leukemia gene expression dataset, a
-benchmark in bioinformatics for cancer classification. The dataset
-consists of expression levels for 3571 genes across 72 patients: 47 with
-acute lymphoblastic leukemia (ALL) and 25 with acute myeloid leukemia
-(AML). Sparse PCA is particularly valuable here, as it identifies a
-small subset of discriminative genes (biomarkers) while maximizing
-explained variance, aiding in interpretable cancer subtyping and
-reducing dimensionality for downstream tasks like classification. We
-compare our standard soft-thresholding variant (basic proximal) and the
-nsa\_flow approximation (non-negative sparse variant) to vanilla PCA
-(using \texttt{prcomp}). For evaluation:
+We demonstrate the utility of our Sparse PCA implementation on the classic Golub et al.~(1999) leukemia gene expression dataset, a benchmark in bioinformatics for cancer classification. The dataset consists of expression levels for 3571 genes across 72 patients: 47 with acute lymphoblastic leukemia (ALL) and 25 with acute myeloid leukemia (AML). Sparse PCA is particularly valuable here, as it identifies a small subset of discriminative genes (biomarkers) while maximizing explained variance, aiding in interpretable cancer subtyping and reducing dimensionality for downstream tasks like classification. We compare our standard soft-thresholding variant (basic proximal) and the nsa\_flow approximation (non-negative sparse variant) to vanilla PCA (using \texttt{prcomp}). For evaluation:
 
 \begin{itemize}
 \item
-  \textbf{Core Metrics}: Explained variance ratio, sparsity (\% zeros),
-  orthogonality residual.
+  \textbf{Core Metrics}: Explained variance ratio, sparsity (\% zeros), orthogonality residual.
 \item
-  \textbf{Visualization}: 2D projection scatter plot colored by class
-  (ALL/AML) to assess separation.
+  \textbf{Visualization}: 2D projection scatter plot colored by class (ALL/AML) to assess separation.
 \item
-  \textbf{Classification Performance}: Accuracy of a simple k-NN
-  classifier (k=3) on the projected data using 5-fold CV, highlighting
-  improved interpretability with fewer genes.
+  \textbf{Classification Performance}: Accuracy of a simple k-NN classifier (k=3) on the projected data using 5-fold CV, highlighting improved interpretability with fewer genes.
 \item
-  \textbf{Selected Genes}: List top genes (by loading magnitude) for
-  each component demonstrating biomarker selection.
+  \textbf{Selected Genes}: List top genes (by loading magnitude) for each component demonstrating biomarker selection.
 \end{itemize}
 
-Data is loaded directly from the URL; genes are rows, samples are
-columns (transposed for analysis). Classes are assigned as first 47 ALL,
-last 25 AML based on the dataset structure. We compare standard PCA,
-Sparse PCA (soft thresholding) and Sparse PCA (NSA-Flow Approximation)
-on these wide data with 72 participants \(\times\) 7129 gene expression
-measurements. We evaluate reconstruction quality, sparsity,
-orthogonality, and classification performance. Figure 8 summarizes the
-classification results and the embeddings for each method. Figure 9
-shows the feature selection and weights for each method where only the
-top 5 features for each component are shown for clarity. Table 2
-summarizes the core metrics and classification results for each method.
+Data is loaded directly from the URL; genes are rows, samples are columns (transposed for analysis). Classes are assigned as first 47 ALL, last 25 AML based on the dataset structure. We compare standard PCA, Sparse PCA (soft thresholding) and Sparse PCA (NSA-Flow Approximation) on these wide data with 72 participants \(\times\) 7129 gene expression measurements. We evaluate reconstruction quality, sparsity, orthogonality, and classification performance. Figure \ref{fig:golubvis} summarizes the classification results and the embeddings for each method. Figure \ref{fig:golubtop} shows the feature selection and weights for each method where only the top 5 features for each component are shown for clarity. Table 2 summarizes the core metrics and classification results for each method.
 
 \begin{table}[t]
-\caption{\label{tab:golub_sparse_pca_analysis_tbl}Core and Random Forest Classification Metrics for PCA Variants (Golub Dataset)} 
+\caption{\label{tab:golubtbl}Core and Random Forest Classification Metrics for PCA Variants (Golub Dataset)} 
 \fontsize{12.0pt}{14.0pt}\selectfont
 \begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}lrrrr}
 \toprule
@@ -960,122 +521,45 @@ Sparse PCA (NSA-Flow) & 0.213 & 0.567 & 0.003 & 0.875 \\
 
 \begin{figure}
 
-{\centering \includegraphics{nsa_flow_files/figure-latex/golub_sparse_pca_analysis_vis-1} 
+{\centering \includegraphics{nsa_flow_files/figure-latex/golubvis-1} 
 
 }
 
-\caption{Comparison of PCA Variants on Golub Leukemia Dataset: Core Metrics, 2D Projections, and Classification Performance.}\label{fig:golub_sparse_pca_analysis_vis}
+\caption{Comparison of PCA Variants on Golub Leukemia Dataset: Core Metrics, 2D Projections, and Classification Performance.}\label{fig:golubvis}
 \end{figure}
 
 \begin{figure}
 
-{\centering \includegraphics{nsa_flow_files/figure-latex/golub_sparse_pca_analysis_top-1} 
+{\centering \includegraphics{nsa_flow_files/figure-latex/golubtop-1} 
 
 }
 
-\caption{Top genes identified by PCA and NSA-Flow SPCA.  Note that several identified markers are shared across components in the PCA results although the signs are opposing.  This complicates interpretation.  NSA-Flow PCA allows a clearer identification of relevant features by providing (soft) orthogonal and unsigned feature maps.}\label{fig:golub_sparse_pca_analysis_top}
+\caption{Top genes identified by PCA and NSA-Flow SPCA.  Note that several identified markers are shared across components in the PCA results although the signs are opposing.  This complicates interpretation.  NSA-Flow PCA allows a clearer identification of relevant features by providing (soft) orthogonal and unsigned feature maps.}\label{fig:golubtop}
 \end{figure}
 
-\textbf{Interpretation}: On this real high-dimensional dataset, the
-NSA-Flow based Sparse PCA variant achieves high explained variance with
-substantial sparsity, selecting a small number of genes while
-maintaining near-orthogonality. Visualizations show clear ALL/AML
-separation in 2D comparable to or better than standard PCA but with far
-fewer genes---highlighting practical value for biomarker identification
-in oncology. Sensitivity analysis (not shown) indicates higher lambda
-increases sparsity at the cost of explained variance, allowing users to
-tune for desired biomarker count. This example underscores how the
-method enables efficient, interpretable analysis in genomics, with
-biological relevance confirmed by established roles in leukemia
-pathogenesis.
+\textbf{Interpretation}: On this real high-dimensional dataset, the NSA-Flow based Sparse PCA variant achieves high explained variance with substantial sparsity, selecting a small number of genes while maintaining near-orthogonality. Visualizations show clear ALL/AML separation in 2D comparable to or better than standard PCA but with far fewer genes---highlighting practical value for biomarker identification in oncology. Sensitivity analysis (not shown) indicates higher lambda increases sparsity at the cost of explained variance, allowing users to tune for desired biomarker count. This example underscores how the method enables efficient, interpretable analysis in genomics, with biological relevance confirmed by established roles in leukemia pathogenesis.
 
-\subsection{Application of NSA-Flow to ADNI Cortical Thickness
-Data}\label{application-of-nsa-flow-to-adni-cortical-thickness-data}
+\subsection{Application of NSA-Flow to ADNI Cortical Thickness Data}\label{application-of-nsa-flow-to-adni-cortical-thickness-data}
 
-In this section, we demonstrate the application of NSA-Flow to cortical
-thickness data.Neuroimaging datasets, such as those from the Alzheimer's
-Disease Neuroimaging Initiative (ADNI), provide rich multidimensional
-insights into brain structure, including cortical thickness measurements
-across numerous regions (\citeproc{ref-racine_personalized_2018}{Racine
-et al. 2018}; \citeproc{ref-sattari_assessing_2022}{Sattari et al.
-2022}). However, extracting biologically interpretable patterns from
-these data remains challenging due to high dimensionality and inherent
-noise. Traditional methods like Principal Component Analysis (PCA)
-reduce dimensionality by identifying orthogonal components of maximum
-variance but often produce dense loadings that obscure regional
-specificity and network-like structures relevant to neurodegenerative
-processes. Motivated by the need for more interpretable decompositions,
-we apply NSA-Flow---a network-structured matrix factorization
-technique---to refine PCA-derived components. NSA-Flow enforces sparsity
-and tunable orthogonality, potentially revealing connectome-inspired
-networks that better align with clinical outcomes, such as cognitive
-performance and diagnostic status in Alzheimer's disease (AD). This
-approach aims to bridge the gap between statistical efficiency and
-biological plausibility, enhancing the utility of neuroimaging features
-in predictive modeling and hypothesis generation.
+We apply NSA-Flow to ADNI cortical thickness (\citeproc{ref-racine_personalized_2018}{Racine et al. 2018}; \citeproc{ref-sattari_assessing_2022}{Sattari et al. 2022}). PCA on these data returns dense loadings: every component draws on every region, which makes the components hard to name and hard to relate to known anatomy. NSA-Flow refines the PCA loadings toward non-negative, near-disjoint networks. We ask two questions of the result. Do the network scores explain cognitive test scores beyond age, sex, education and APOE4, and do they predict diagnosis better than the PCA scores.
 
-\subsection{Application of NSA-Flow to PCA
-Maps}\label{application-of-nsa-flow-to-pca-maps}
+\subsection{Application of NSA-Flow to PCA Maps}\label{application-of-nsa-flow-to-pca-maps}
 
-In this application, the brain's cortical thickness data is analgous to
-a complex puzzle with many overlapping pieces representing different
-regions. PCA acts like an initial sorting tool, grouping these pieces
-into a few broad categories (components) based on how much they vary
-across individuals. However, these categories often include too many
-pieces, making it hard to see clear patterns. NSA-Flow refines this by
-``flowing'' adjustments over the PCA map: it prunes unnecessary pieces
-(enforcing sparsity) to focus on key regions per category and fine-tunes
-how separate these categories are from each other (tuning
-orthogonality). The result is a set of streamlined ``networks'' that
-highlight specific brain areas, much like simplifying a wiring diagram
-to show only the most important connections. A key parameter, \emph{w},
-controls how aggressively this pruning occurs---lower values allow more
-regions, while higher values create sparser, more focused networks.
+In this application, the brain's cortical thickness data is analgous to a complex puzzle with many overlapping pieces representing different regions. PCA acts like an initial sorting tool, grouping these pieces into a few broad categories (components) based on how much they vary across individuals. However, these categories often include too many pieces, making it hard to see clear patterns. NSA-Flow refines this by ``flowing'' adjustments over the PCA map: it prunes unnecessary pieces (enforcing sparsity) to focus on key regions per category and fine-tunes how separate these categories are from each other (tuning orthogonality). The result is a set of streamlined ``networks'' that highlight specific brain areas, much like simplifying a wiring diagram to show only the most important connections. A key parameter, \emph{w}, controls how aggressively this pruning occurs---lower values allow more regions, while higher values create sparser, more focused networks.
 
-Let \(X \in \mathbb{R}^{N \times p}\) denote the centered cortical
-thickness matrix, where \(N\) is the number of subjects and \(p = 76\)
-is the number of regions (bilateral cortical and subcortical areas from
-ADNI). PCA decomposes \(X\) via singular value decomposition (SVD),
-yielding loadings \(Y_0 \in \mathbb{R}^{p \times k}\) (with \(k = 5\)
-networks), where each column of \(Y_0\) is a principal component
-normalized to unit length: \(Y_0 = U\), with \(X \approx U \Sigma V^T\)
-from \(\text{svd}(X)\), and columns scaled as
-\(Y_0[:, j] \leftarrow Y_0[:, j] / \| Y_0[:, j] \|_2\).
+Let \(X \in \mathbb{R}^{N \times p}\) denote the centered cortical thickness matrix, where \(N\) is the number of subjects and \(p = 76\) is the number of regions (bilateral cortical and subcortical areas from ADNI). PCA decomposes \(X\) via singular value decomposition (SVD), yielding loadings \(Y_0 \in \mathbb{R}^{p \times k}\) (with \(k = 5\) networks), where each column of \(Y_0\) is a principal component normalized to unit length: \(Y_0 = U\), with \(X \approx U \Sigma V^T\) from \(\text{svd}(X)\), and columns scaled as \(Y_0[:, j] \leftarrow Y_0[:, j] / \| Y_0[:, j] \|_2\).
 
-NSA-Flow is then applied in its \emph{estimation} form: rather than
-refining \(Y_0\), it fits a non-negative basis
-\(V \in \mathbb{R}^{p\times k}\) to the centred data directly,
-minimising
-\((1-w)\lVert X - XVV^\top\rVert_F^2/\lVert X\rVert_F^2 + w\,C(V)\)
-subject to \(V \ge 0\), with scores given by projection. We use \(Y_0\)
-only as the PCA comparator. This matters: anchoring a non-negative
-solution to a \emph{signed} target such as \(Y_0\) pulls the iterate
-toward values it cannot reach, so the constrained optimum is close to a
-clamp of the signed basis, which costs a factor \(1.36\) in
-reconstruction error on these data against \(1.03\) for a basis fitted
-to them. We sampled \(q\) random \(w\) values uniformly from {[}0.01,
-0.99{]} to sample orthogonality configurations. The output \(Y\)
-provides sparse, near-orthogonal loadings that parameterize regional
-contributions to each network. Figure 10 shows the NSA-Flow fit to the
-PCA loadings for a representative \(w = 0.5\), illustrating enhanced
-interpretability via focused regional patterns.
+NSA-Flow is then applied in its \emph{estimation} form: rather than refining \(Y_0\), it fits a non-negative basis \(V \in \mathbb{R}^{p\times k}\) to the centred data directly, minimising \((1-w)\lVert X - XVV^\top\rVert_F^2/\lVert X\rVert_F^2 + w\,C(V)\) subject to \(V \ge 0\), with scores given by projection. We use \(Y_0\) only as the PCA comparator. This matters: anchoring a non-negative solution to a \emph{signed} target such as \(Y_0\) pulls the iterate toward values it cannot reach, so the constrained optimum is close to a clamp of the signed basis, which costs a factor \(1.36\) in reconstruction error on these data against \(1.03\) for a basis fitted to them. We sampled \(q\) random \(w\) values uniformly from {[}0.01, 0.99{]} to sample orthogonality configurations. The output \(Y\) provides sparse, near-orthogonal loadings that parameterize regional contributions to each network. Figure \ref{fig:nsaloadings} shows the NSA-Flow fit to the PCA loadings for a representative \(w = 0.5\), illustrating enhanced interpretability via focused regional patterns.
 
-To rigorously compare NSA-Flow with PCA, we projected the data onto both
-sets of loadings: \(\text{proj}_{\text{PCA}} = X Y_0\) and
-\(\text{proj}_{\text{NSA}} = X Y\), yielding subject-specific network
-scores (\(N \times k\)). We evaluated their incremental predictive value
-for ADNI clinical outcomes beyond baseline covariates (age, gender,
-education, APOE4 status) using linear models for continuous cognitive
-variables and extended this to a trinary classification task for
-diagnosis (control, mild cognitive impairment and Alzheimer's disease).
+We projected the data onto both sets of loadings: \(\text{proj}_{\text{PCA}} = X Y_0\) and \(\text{proj}_{\text{NSA}} = X Y\), yielding subject-specific network scores (\(N \times k\)). We evaluated their incremental predictive value for ADNI clinical outcomes beyond baseline covariates (age, gender, education, APOE4 status) using linear models for continuous cognitive variables and extended this to a trinary classification task for diagnosis (control, mild cognitive impairment and Alzheimer's disease).
 
 \begin{figure}
 
-{\centering \includegraphics{nsa_flow_files/figure-latex/nsaflownetworkloadings-1} 
+{\centering \includegraphics{nsa_flow_files/figure-latex/nsaloadings-1} 
 
 }
 
-\caption{Heatmap of Network Loadings Across Brain Regions (NSA-Flow)}\label{fig:nsaflownetworkloadings}
+\caption{Heatmap of Network Loadings Across Brain Regions (NSA-Flow)}\label{fig:nsaloadings}
 \end{figure}
 
 \begin{figure}
@@ -1117,252 +601,223 @@ p-value (NSA>PCA) &  & - & - & - & - & {\itshape \cellcolor[HTML]{ADD8E6}{0.000}
 \end{table}
 \begin{figure}
 
-{\centering \includegraphics{nsa_flow_files/figure-latex/enhanced-stats-dx-1} 
+{\centering \includegraphics{nsa_flow_files/figure-latex/dxstability-1} 
 
 }
 
-\caption{Population-level distribution of NSA-based embeddings for different diagnostic groups.  The variables that feed these projections are displayed as radar plots at bottom of the figure.}\label{fig:enhanced-stats-dx}
+\caption{Population-level distribution of NSA-based embeddings for different diagnostic groups.  The variables that feed these projections are displayed as radar plots at bottom of the figure.}\label{fig:dxstability}
 \end{figure}
 
-\subsubsection{Prediction of Cognitive
-Outcomes}\label{prediction-of-cognitive-outcomes}
+\subsubsection{Explanatory power for cognitive scores}\label{explanatory-power-for-cognitive-scores}
 
-For each of 9 cognitive variables (e.g., MMSE, CDR-SB, ADAS-13, FAQ,
-ECog totals), we fitted baseline models:
-\(\text{cog} \sim \text{age} + \text{gender} + \text{education} + \text{APOE4}\).
-Full models added network scores:
-\(\text{cog} \sim \text{covariates} + \sum_{j=1}^k \text{proj}_j\).
-Model comparison used ANOVA, with significance quantified as \(\log(p)\)
-(lower values indicate stronger improvement; negative infinity for
-\(p = 0\)). Across \(w\) values, NSA-Flow yielded lower \(\log(p)\) than
-PCA in the majority of brain structure-cognitive pairs (based on the
-comparison table where \texttt{nsa\ \textless{}\ pca}), suggesting
-competitive explanatory power.
+This section asks whether the network scores add information beyond the
+covariates, not whether they predict held-out scores; the next section does
+that. For each of nine cognitive variables we fit
+\(\text{cog} \sim \text{age} + \text{gender} + \text{education} + \text{APOE4}\)
+and compare it to the same model with the \(k\) network scores added, by nested
+\(F\)-test. We report \(\log p\), so lower is a larger improvement, and the
+difference \(\log p_{\text{NSA}} - \log p_{\text{PCA}}\), so negative favours
+NSA-Flow. PCA and NSA-Flow each add exactly \(k\) columns, so the comparison
+between them does not depend on model size.
 
-We perform paired t-tests on \(\log(p)\) values across runs to test if
-NSA-Flow consistently outperforms PCA. Across a broad range of cognitive
-and functional outcomes, the NSA-Flow model shows consistent advantages
-over PCA for most variables, with a few exceptions. Specifically:
+\begin{table}
+
+\caption{\label{tab:coginsample}Incremental explanatory power for nine cognitive scores, by fidelity mode. Negative differences favour NSA-Flow.}
+\centering
+\begin{tabular}[t]{l|l|r|r}
+\hline
+mode & outcomes favouring NSA & mean log p difference & largest\\
+\hline
+anchor & 6/9 & -2.02 & -4.42\\
+\hline
+data & 7/9 & -3.77 & -8.02\\
+\hline
+subspace & 7/9 & -1.34 & -2.82\\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}
+
+\caption{\label{tab:coginsample}Per-outcome log p difference (NSA minus PCA). Negative favours NSA-Flow.}
+\centering
+\begin{tabular}[t]{l|r|r|r}
+\hline
+cog & anchor & data & subspace\\
+\hline
+ADAS13 & -4.17 & -7.37 & -2.75\\
+\hline
+ADASQ4 & -4.42 & -8.02 & -2.82\\
+\hline
+CDRSB & -1.46 & -4.59 & -2.29\\
+\hline
+EcogPtTotal & 0.79 & 0.65 & 0.23\\
+\hline
+EcogSPTotal & -2.64 & -2.90 & -1.66\\
+\hline
+FAQ & 0.10 & -2.03 & -0.52\\
+\hline
+LDELTOTAL & -3.61 & -4.92 & -1.31\\
+\hline
+MMSE & 0.27 & 0.27 & 0.48\\
+\hline
+mPACCdigit & -3.07 & -5.01 & -1.44\\
+\hline
+\end{tabular}
+\end{table}
+
+Results are consistent across the three ways of anchoring the basis. The
+outcomes that favour NSA-Flow are the memory and ADAS-type measures: ADASQ4,
+ADAS13, CDRSB, LDELTOTAL, mPACCdigit and EcogSPTotal. The two that favour PCA in
+every mode are MMSE and EcogPtTotal, both global measures, where a dense
+variance-ordered basis aligns well with a single latent severity factor. The
+largest single improvement is on ADASQ4.
+
+\subsubsection{Out-of-sample prediction of cognitive scores}\label{out-of-sample-prediction-of-cognitive-scores}
+
+The preceding test is in-sample. Here everything is fitted inside the training
+fold: the centring, the PCA basis, the NSA-Flow basis and the regression. We
+report out-of-sample \(\Delta R^2\), the gain over the covariate-only model, on
+repeated 5-fold cross-validation. The model is a random forest, matching the
+diagnosis analysis below; Section \ref{evaluation} explains why a linear model
+cannot answer this question.
+
+\begin{table}
+
+\caption{\label{tab:cogcv}Out-of-sample R-squared for nine cognitive scores. The covariate column is age, sex, education and APOE4 alone; the PCA and NSA columns add five network scores to it. A positive difference in the last column favours NSA-Flow.}
+\centering
+\begin{tabular}[t]{l|l|r|r|r|r|r}
+\hline
+outcome & mode & covariates & PCA & NSA & gain over covariates & NSA minus PCA\\
+\hline
+CDRSB & subspace & -0.048 & 0.232 & 0.317 & 0.365 & 0.085\\
+\hline
+CDRSB & data & -0.048 & 0.232 & 0.349 & 0.397 & 0.117\\
+\hline
+ADAS13 & subspace & 0.073 & 0.407 & 0.426 & 0.353 & 0.019\\
+\hline
+ADAS13 & data & 0.073 & 0.407 & 0.452 & 0.379 & 0.045\\
+\hline
+ADASQ4 & subspace & 0.031 & 0.297 & 0.359 & 0.328 & 0.062\\
+\hline
+ADASQ4 & data & 0.031 & 0.297 & 0.365 & 0.334 & 0.069\\
+\hline
+MMSE & subspace & 0.036 & 0.321 & 0.356 & 0.319 & 0.035\\
+\hline
+MMSE & data & 0.036 & 0.321 & 0.367 & 0.331 & 0.046\\
+\hline
+FAQ & subspace & -0.183 & 0.082 & 0.166 & 0.349 & 0.084\\
+\hline
+FAQ & data & -0.183 & 0.082 & 0.195 & 0.378 & 0.113\\
+\hline
+mPACCdigit & subspace & 0.197 & 0.441 & 0.476 & 0.278 & 0.035\\
+\hline
+mPACCdigit & data & 0.197 & 0.441 & 0.481 & 0.284 & 0.040\\
+\hline
+EcogPtTotal & subspace & -0.189 & 0.032 & 0.062 & 0.252 & 0.030\\
+\hline
+EcogPtTotal & data & -0.189 & 0.032 & 0.022 & 0.211 & -0.010\\
+\hline
+EcogSPTotal & subspace & 0.009 & 0.217 & 0.195 & 0.186 & -0.022\\
+\hline
+EcogSPTotal & data & 0.009 & 0.217 & 0.191 & 0.182 & -0.025\\
+\hline
+LDELTOTAL & subspace & 0.134 & 0.322 & 0.352 & 0.218 & 0.030\\
+\hline
+LDELTOTAL & data & 0.134 & 0.322 & 0.345 & 0.211 & 0.023\\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}
+
+\caption{\label{tab:cogcv}Summary of the cross-validated comparison.}
+\centering
+\begin{tabular}[t]{l|l|r|r|r}
+\hline
+mode & outcomes favouring NSA & gain NSA & gain PCA & difference\\
+\hline
+data & 7/9 & 0.301 & 0.254 & 0.046\\
+\hline
+subspace & 8/9 & 0.294 & 0.254 & 0.040\\
+\hline
+\end{tabular}
+\end{table}
+
+The network scores add substantial predictive value: \(\Delta R^2\) is about
+\(0.25\) to \(0.30\) over the covariate model. NSA-Flow exceeds PCA by about
+\(0.04\) on 7 to 9 of the 9 outcomes, and repeating the whole analysis with
+three cross-validation seeds gives differences of \(0.043\), \(0.038\) and
+\(0.048\). Two qualifications. For FAQ, EcogPtTotal and CDRSB the covariate-only
+model has negative out-of-sample \(R^2\), so part of the large \(\Delta R^2\)
+reflects a weak baseline; this affects both methods equally. And the advantage
+over PCA does not appear under a linear model, where the two are within
+\(0.002\), for the reason given in Section \ref{evaluation}.
+
+\subsubsection{Extension to Diagnosis Prediction}\label{extension-to-diagnosis-prediction}
+
+We add a trinary classification task for AD diagnosis between controls (CN) vs.~mild cognitive impairment (MCI) vs clinical Alzheimer's disease (AD, most severe symptoms) derived from ADNI diagnostic labels using random forest classification and ROC analysis (\citeproc{ref-Cuingnet2011}{Cuingnet et al. 2011}). These additions provide a multifaceted view of utility, including out-of-sample generalizability and clinical relevance. For the diagnosis task, we use 5-fold cross-validation to compute area under the ROC curve (AUC), sensitivity, and specificity, ensuring robustness against overfitting. Table 3 summarizes these results. NSA-Flow yields an \textasciitilde4.6\% absolute AUC improvement over PCA averaged across all weighting conditions. Figure \ref{fig:dxstability} demonstrates stability of this effect across different \(w\) choices. While this difference may appear small numerically, it is:
 
 \begin{itemize}
 \item
-  NSA-Flow outperforms PCA on 5 out of 9 cognitive outcomes on average
-  (CDRSB, ADAS13, ADASQ4, mPACCdigit, EcogSPTotal).
-\item
-  PCA performs slightly better on FAQ, MMSE and EcogPtTotal which
-  emphasize global cognition and where linear variance-based projections
-  tend to align well with simple latent factor structure.
-\item
-  The average log-likelihood improvement (Δlog p) for NSA over PCA is
-  between −1.0 and −6.0 units for the majority of outcomes, which
-  corresponds to a meaningful difference in predictive fit under the
-  cross-validation framework.
-\item
-  The improvement differences (bottom panel Figure 13) vary smoothly
-  with \(w\), indicating well-behaved optimization.
-\end{itemize}
-
-Boxplots in Figure 13 show \(\log(p)\) distributions by method and
-cognitive variable. Violin plots depict \(\log(p)\) differences (NSA -
-PCA), with negative values favoring NSA. A scatter plot relates sparsity
-(tuned by w) to performance gains (Figure 13 bottom panel). These vary
-smoothly with w, indicating well-behaved optimization.
-
-\subsubsection{Extension to Diagnosis
-Prediction}\label{extension-to-diagnosis-prediction}
-
-To further rigorously assess NSA-Flow's advantages over PCA, we
-incorporate a trinary classification task for AD diagnosis between
-controls (CN) vs.~mild cognitive impairment (MCI) vs clinical
-Alzheimer's disease (AD, most severe symptoms) derived from ADNI
-diagnostic labels using random forest classification and ROC analysis
-(\citeproc{ref-Cuingnet2011}{Cuingnet et al. 2011}). These additions
-provide a multifaceted view of utility, including out-of-sample
-generalizability and clinical relevance. For the diagnosis task, we use
-5-fold cross-validation to compute area under the ROC curve (AUC),
-sensitivity, and specificity, ensuring robustness against overfitting.
-Table 3 summarizes these results. NSA-Flow yields an
-\textasciitilde4.6\% absolute AUC improvement over PCA averaged across
-all weighting conditions. Figure 11 demonstrates stability of this
-effect across different \(w\) choices. While this difference may appear
-small numerically, it is:
-
-\begin{itemize}
-\item
-  Statistically stable across folds (low variance) with the most
-  significant improvement conveyed by NSA-Flow in the most challenging
-  pairwise classification task (CN vs MCI), which is often the clinical
-  focus for early detection and intervention;
+  Statistically stable across folds (low variance) with the most significant improvement conveyed by NSA-Flow in the most challenging pairwise classification task (CN vs MCI), which is often the clinical focus for early detection and intervention;
 \item
   Above random assignment (AUC \(\approx\) 0.406) by a wide margin;
 \item
-  Clinically meaningful, given that diagnosis classification tasks
-  (e.g., CN vs MCI vs AD) often exhibit low reproducibility in
-  reproducible research (refer to (\citeproc{ref-Aghdam2025}{Aghdam,
-  Bozdag, and Saeed 2025}) for a discussion of the realistic
-  generalizability of the diagnostic accuracies reported in existing
-  literature e.g.~sections 4.3.1 and 4.3.2).
+  Clinically meaningful, given that diagnosis classification tasks (e.g., CN vs MCI vs AD) often exhibit low reproducibility in reproducible research (refer to (\citeproc{ref-Aghdam2025}{Aghdam, Bozdag, and Saeed 2025}) for a discussion of the realistic generalizability of the diagnostic accuracies reported in existing literature e.g.~sections 4.3.1 and 4.3.2).
 \end{itemize}
 
-PCA relies on maximal variance projection, which may emphasize noise
-from demographic or measurement heterogeneity. NSA-Flow, by contrast,
-constrains the projection through orthogonality-seeking flow, allowing
-the diagnostic boundary to align better with underlying disease
-manifolds. This likely accounts for the modest but systematic AUC gain.
-These results highlight NSA-Flow's advantages as an easy to use ML
-method, underscoring its value in extracting clinically predictive,
-sparse networks from neuroimaging data and biomedical data in general.
+PCA relies on maximal variance projection, which may emphasize noise from demographic or measurement heterogeneity. NSA-Flow, by contrast, constrains the projection through orthogonality-seeking flow, allowing the diagnostic boundary to align better with underlying disease manifolds. This likely accounts for the modest but systematic AUC gain. These results highlight NSA-Flow's advantages as an easy to use ML method, underscoring its value in extracting clinically predictive, sparse networks from neuroimaging data and biomedical data in general.
 
-NSA-flow also demonstrates meaningful variable selection. The regions
-that are highlighted by the two most predictive components (4th and 5th
-shown in Figure 12) are consistent with known AD pathology, including
-frontal, medial temporal lobe structures and cholinergic regions (basal
-forebrain). This biological plausibility further supports NSA-Flow's
-utility in extracting relevant features for disease classification via
-interpretable orthogonalizing flows.
+NSA-flow also demonstrates meaningful variable selection. The regions that are highlighted by the two most predictive components (4th and 5th shown in Figure \ref{fig:beautifulviz}) are consistent with known AD pathology, including frontal, medial temporal lobe structures and cholinergic regions (basal forebrain). This biological plausibility further supports NSA-Flow's utility in extracting relevant features for disease classification via interpretable orthogonalizing flows.
 
 \begin{figure}
 
-{\centering \includegraphics{nsa_flow_files/figure-latex/beautiful-viz-1} 
+{\centering \includegraphics{nsa_flow_files/figure-latex/beautifulviz-1} 
 
 }
 
-\caption{Comparative visualization of NSA-Flow and PCA performance across cognitive measures. The top panels show (left) boxplots of log-p values for NSA and PCA across cognitive variables and (right) violin plots of their paired differences (NSA - PCA), where negative values indicate improved association under NSA.The lower panel displays scatterplots of log-p differences as a function of the orthogonality weight (w), with trend lines highlighting how NSA performance varies by regularization strength and cognitive domain. Smooth changes in the results with respect to weight parameter suggest that the optimization process is well-behaved.}\label{fig:beautiful-viz}
+\caption{Comparative visualization of NSA-Flow and PCA performance across cognitive measures. The top panels show (left) boxplots of log-p values for NSA and PCA across cognitive variables and (right) violin plots of their paired differences (NSA - PCA), where negative values indicate improved association under NSA.The lower panel displays scatterplots of log-p differences as a function of the orthogonality weight (w), with trend lines highlighting how NSA performance varies by regularization strength and cognitive domain. Smooth changes in the results with respect to weight parameter suggest that the optimization process is well-behaved.}\label{fig:beautifulviz}
 \end{figure}
 
 \section{Discussion}\label{discussion}
 
-The Non-negative Stiefel Approximating Flow (NSA-Flow) provides a robust
-and flexible framework for optimizing non-negative matrices under
-tunable orthogonality constraints, addressing the limitations of strict
-orthogonal NMF (\citeproc{ref-ding2006orthogonal}{Ding et al. 2006};
-\citeproc{ref-yoo2009orthogonal}{Yoo and Choi 2009}) and neural
-regularization methods (\citeproc{ref-wu2023towards}{Wu 2023};
-\citeproc{ref-kurtz2023group}{Kurtz, Bar, and Giryes 2023}). Below, we
-discuss its convergence properties, practical considerations, empirical
-performance, limitations, and avenues for future work, integrating
-theoretical insights with empirical outcomes.
+The Non-negative Stiefel Approximating Flow (NSA-Flow) provides a robust and flexible framework for optimizing non-negative matrices under tunable orthogonality constraints, addressing the limitations of strict orthogonal NMF (\citeproc{ref-ding2006orthogonal}{Ding et al. 2006}; \citeproc{ref-yoo2009orthogonal}{Yoo and Choi 2009}) and neural regularization methods (\citeproc{ref-wu2023towards}{Wu 2023}; \citeproc{ref-kurtz2023group}{Kurtz, Bar, and Giryes 2023}). Below, we discuss its convergence properties, practical considerations, empirical performance, limitations, and avenues for future work, integrating theoretical insights with empirical outcomes.
 
-NSA-Flow's novelty lies in its manifold-based optimization framework,
-which parameterizes sparsity (\emph{w}) and orthogonality at the matrix
-level---unlike component-wise sparse PCA (e.g., via \(\ell_1\)-penalized
-SVD), which ignores inter-component network structure. By treating
-loadings as evolving on a ``flow'' (gradient trajectory with
-retractions), it enables fine-grained control over trade-offs: low
-\emph{w} approximates dense PCA, while high \emph{w} yields
-ultra-sparse, interpretable factors. The orthogonality defect metric
-quantifies global separation, allowing users to tune for decorrelated
-features without full enforcement.
+NSA-Flow parameterises sparsity (\emph{w}) and orthogonality at the matrix level---unlike component-wise sparse PCA (e.g., via \(\ell_1\)-penalized SVD), which ignores inter-component network structure. By treating loadings as evolving on a ``flow'' (gradient trajectory with retractions), it enables fine-grained control over trade-offs: low \emph{w} approximates dense PCA, while high \emph{w} yields ultra-sparse, interpretable factors. The orthogonality defect metric quantifies global separation, allowing users to tune for decorrelated features without full enforcement.
 
-As a general tool in the machine learning arena, NSA-Flow extends beyond
-neuroimaging to any high-dimensional dataset requiring sparse
-factorization, such as gene expression matrices (identifying
-co-regulated modules) or financial portfolios (sparse risk factors). It
-integrates seamlessly into pipelines---e.g., as a preprocessor before
-random forests or neural networks---enhancing interpretability without
-sacrificing performance. Future work could incorporate domain-specific
-priors (e.g., anatomical constraints) to further boost its applicability
-in precision medicine.
+NSA-Flow applies to any high-dimensional matrix where components should be nameable: gene expression, where the components are co-regulated modules, or regional imaging measures, where they are networks. It is used as a component of a pipeline, upstream of a classifier or as the proximal step inside another factorisation. On the evidence here it costs little or no accuracy and in two settings improves it, but that depends on the downstream model: a linear model cannot distinguish the basis from PCA's at all (Section \ref{evaluation}). Future work could incorporate domain-specific priors (e.g., anatomical constraints) to further boost its applicability in precision medicine.
 
 \subsection{Convergence}\label{convergence}
 
-The objective function is nonconvex due to the quadratic-over-quadratic
-form of the orthogonality defect and the Stiefel manifold constraints
-(\citeproc{ref-edelman1998geometry}{Edelman, Arias, and Smith 1998}),
-precluding global optimality guarantees in general. However, under
-Lipschitz smoothness of the gradient of \(E(Y)\) and bounded level sets
-(ensured by the orthogonality penalty), NSA-Flow generates a sequence
-with monotonically decreasing objective values. The proximal projection
-\(P_+(Y) = \max(Y, 0)\) is nonexpansive, preserving descent properties
-(\citeproc{ref-parikh2014proximal}{Parikh and Boyd 2014}).
+The objective is nonconvex: the orthogonality defect is a ratio of quadratics, and in the estimation form the reconstruction term is quartic in \(V\). Global optimality is therefore not claimed; see the analysis section for what is. In general. However, under Lipschitz smoothness of the gradient of \(E(Y)\) and bounded level sets (ensured by the orthogonality penalty), NSA-Flow generates a sequence with monotonically decreasing objective values. The proximal projection \(P_+(Y) = \max(Y, 0)\) is nonexpansive, preserving descent properties (\citeproc{ref-parikh2014proximal}{Parikh and Boyd 2014}).
 
-Convergence to stationary points is supported by the Kurdyka-Łojasiewicz
-(KL) inequality, which holds for semi-algebraic functions like
-polynomials and thus applies to \(E(Y)\)
-(\citeproc{ref-bolte2014proximal}{Bolte, Sabach, and Teboulle 2014}).
-Under the KL property, proximal-gradient methods in nonconvex settings
-converge to critical points where \(0 \in \partial E(Y)\), with
-finite-length trajectories (\citeproc{ref-bolte2014proximal}{Bolte,
-Sabach, and Teboulle 2014}). Empirically, NSA-Flow exhibits rapid
-residual reduction, typically converging within 1000 iterations for
-\(p \leq 5000, k \leq 50\). Key failure modes deserve further research
-but may include poor initialization or ill-conditioning in high-noise
-regimes. Future work could derive explicit convergence rates or explore
-trust-region methods for faster convergence near critical points
-(\citeproc{ref-boumal2019global}{Boumal, Absil, and Cartis 2019};
-\citeproc{ref-boumal2011rtrmc}{Boumal and Absil 2011}).
+Convergence to stationary points is supported by the Kurdyka-Łojasiewicz (KL) inequality, which holds for semi-algebraic functions like polynomials and thus applies to \(E(Y)\) (\citeproc{ref-bolte2014proximal}{Bolte, Sabach, and Teboulle 2014}). Under the KL property, proximal-gradient methods in nonconvex settings converge to critical points where \(0 \in \partial E(Y)\), with finite-length trajectories (\citeproc{ref-bolte2014proximal}{Bolte, Sabach, and Teboulle 2014}). Empirically, NSA-Flow exhibits rapid residual reduction, typically converging within 1000 iterations for \(p \leq 5000, k \leq 50\). Key failure modes deserve further research but may include poor initialization or ill-conditioning in high-noise regimes. Future work could derive explicit convergence rates or explore trust-region methods for faster convergence near critical points (\citeproc{ref-boumal2019global}{Boumal, Absil, and Cartis 2019}; \citeproc{ref-boumal2011rtrmc}{Boumal and Absil 2011}).
 
 \subsection{Practical Considerations}\label{practical-considerations}
 
-NSA-Flow's tunability via \(w \in [0,1]\) enables practitioners to
-prioritize fidelity or orthogonality based on application needs. For
-instance, low \(w\) (0.05--0.25) yields moderate orthogonality defect
-reduction with relatively low fidelity loss in synthetic tests, ideal
-for clustering tasks requiring minimal decorrelation
-(\citeproc{ref-ding2006orthogonal}{Ding et al. 2006}). Higher \(w\)
-values suit applications like sparse PCA, where orthogonality enhances
-feature independence (\citeproc{ref-yoo2009orthogonal}{Yoo and Choi
-2009}). The \texttt{python} package implementation is modular, with
-helper functions for stable matrix operations and diagnostics for
-monitoring convergence (\citeproc{ref-absil2008optimization}{Absil,
-Mahony, and Sepulchre 2008}). Backtracking line search ensures
-robustness to step-size selection
-(\citeproc{ref-parikh2014proximal}{Parikh and Boyd 2014}), while
-adaptive learning rates enhance efficiency. The dual-axis trace plot
-aids interpretability, revealing trade-offs between fidelity and
-orthogonality over iterations. Practitioners should calibrate \(w\) via
-cross-validation, as optimal values depend on data sparsity and noise
-levels (\citeproc{ref-strazar2016orthogonal}{Stražar and Žitnik 2016}).
-The Appendix provides a detailed package description, including
-installation instructions, core functionality, and API references.
+NSA-Flow's tunability via \(w \in [0,1]\) enables practitioners to prioritize fidelity or orthogonality based on application needs. Low \(w\) reduces the orthogonality defect at little cost in fidelity. High \(w\) approaches the disjoint-support limit, which for a non-negative matrix is a hard assignment of features to components and therefore a clustering (\citeproc{ref-ding2006orthogonal}{Ding et al. 2006}; \citeproc{ref-yoo2009orthogonal}{Yoo and Choi 2009}). Across the experiments here, \(w = 0.5\) was a better default than \(w = 0.9\) on both reconstruction and reproducibility: large \(w\) leaves the solution near a combinatorial vertex, where small changes in the data change which vertex is chosen. The \texttt{python} package implementation is modular, with helper functions for stable matrix operations and diagnostics for monitoring convergence (\citeproc{ref-absil2008optimization}{Absil, Mahony, and Sepulchre 2008}). Backtracking line search ensures robustness to step-size selection (\citeproc{ref-parikh2014proximal}{Parikh and Boyd 2014}), while adaptive learning rates enhance efficiency. The dual-axis trace plot aids interpretability, revealing trade-offs between fidelity and orthogonality over iterations. Practitioners should calibrate \(w\) via cross-validation, as optimal values depend on data sparsity and noise levels (\citeproc{ref-strazar2016orthogonal}{Stražar and Žitnik 2016}). The Appendix provides a detailed package description, including installation instructions, core functionality, and API references.
 
 \subsection{Empirical Performance}\label{empirical-performance}
 
-Empirical results highlight NSA-Flow's potential benefits. On the Golub
-leukemia dataset, NSA-Flow improves classification accuracy by 6\% over
-PCA and and 2\% over (standard) sparse PCA, identifying interpretable
-biomarkers due to its non-negative, semi-orthogonal embeddings
-(\citeproc{ref-strazar2016orthogonal}{Stražar and Žitnik 2016}).
-Qualitatively, the embeddings (projections) also appear to be more
-separable in this application. In Alzheimer's disease, NSA-Flow-derived
-networks yield better cognitive outcome predictions and diagnosis
-classification (AUC improvements of \textasciitilde4.6\% over PCA), with
-loadings aligning with known pathology (e.g., medial temporal lobe
-involvement) (\citeproc{ref-Chen2024}{Chen, Qu, and Zhao 2024}). These
-findings suggest that NSA-Flow effectively balances interpretability and
-predictive power, making it a valuable tool for biomedical data
-analysis.
+On the Golub leukemia data, NSA-Flow as the proximal operator inside sparse PCA reaches cross-validated accuracy 0.875 against 0.828 for PCA and 0.824 for soft-thresholded sparse PCA, at sparsity 0.567 and lower explained variance (0.213 against 0.290). On ADNI cortical thickness, out-of-sample \(\Delta R^2\) for nine cognitive scores is 0.043 higher than PCA under a random forest, stable at 0.043, 0.038 and 0.048 over three cross-validation seeds, and trinary diagnosis AUC is 0.765 against 0.719. The same comparisons under a linear model show no difference, for the reason given in Section \ref{evaluation}.
 
 \subsection{Limitations}\label{limitations}
 
 Despite its strengths, NSA-Flow faces challenges:
 
 \begin{itemize}
+\tightlist
 \item
-  \textbf{Scalability}: The \(O(k^3)\) cost of matrix inversions in
-  retractions limits applicability to large \(k\)
-  (\citeproc{ref-absil2008optimization}{Absil, Mahony, and Sepulchre
-  2008}). Sparse matrix support or stochastic methods could mitigate
-  this (\citeproc{ref-boumal2011rtrmc}{Boumal and Absil 2011}).
+  \textbf{Scalability}: Cost per iteration is \(O(pk^2)\) with no factorisation, or \(O(npk)\) when the basis is fitted to data with \(p > n\). The binding constraint is memory rather than arithmetic if the Gram matrix is formed: \(p \times p\) is 0.4 GB at \(p = 7129\) and 3.2 GB at \(p = 20000\), which the matrix-free path avoids.
 \item
-  \textbf{Nonconvexity}: Local optima may trap the algorithm in
-  high-noise settings, requiring careful initialization (e.g.,
-  SVD-based) (\citeproc{ref-edelman1998geometry}{Edelman, Arias, and
-  Smith 1998}).
+  \textbf{Nonconvexity}: The energy is nonconvex, so the solver returns a stationary point. Which one depends on the continuation schedule of Section 2, not on the iteration budget: on the ADNI thickness data a three-stage schedule and a nine-stage schedule differ in the attained objective by about a factor of two, while a twentyfold increase in per-stage iterations changes it in the fourth decimal.
 \item
-  \textbf{Parameter Sensitivity}: Optimal \(w\) and retraction choice
-  depend on data characteristics, necessitating domain expertise or
-  automated tuning (\citeproc{ref-strazar2016orthogonal}{Stražar and
-  Žitnik 2016}).
+  \textbf{Parameter sensitivity}: \(w\) is the only parameter and it is not a nuisance parameter, but it is not free of consequence either. Large \(w\) pins the solution near a combinatorial vertex, where small changes in the data change which vertex is selected; across our experiments \(w = 0.5\) was better than \(w = 0.9\) on both reconstruction and reproducibility. At \(w = 1\) the scale of \(Y\) is unconstrained and the implementation warns.
+\item
+  \textbf{A signed target is the wrong thing to anchor to}: \(\lVert Y - X_0 \rVert_F^2\) with \(Y \ge 0\) charges the solution for negative entries it cannot reach. Those charges are constant, so they do not steer the solution and the optimum degenerates toward \(\max(0, X_0)\). On ADNI this costs 0.028 AUC on the strongest task. Use the sign-blind subspace fidelity, which the implementation selects automatically and reports.
+  There is no optimizer or learning rate to choose: step lengths are scale-free and accepted by line search. Convergence is not guaranteed for every problem, so the solver reports the projected-gradient mapping norm and which stopping rule fired rather than asserting success.
 \end{itemize}
-
-While the implementation seeks to minimize the sensitivity of the method
-to parameter choices (e.g.~optimizer, learning rate, etc), we cannot
-guarantee these methods will provide stable convergence for all possible
-data. Indeed, it is likely that highly ill-conditioned or extremely
-noisy data may lead to convergence issues or poor local minima. Further
-research is needed to characterize these failure modes and provide
-robust solutions.
 
 \subsection{Future Directions}\label{future-directions}
 
@@ -1370,150 +825,90 @@ Future extensions include:
 
 \begin{itemize}
 \item
-  \textbf{Sparse and Stochastic Variants}: Leveraging sparse linear
-  algebra or minibatch updates to scale to larger \(p, k\)
-  (\citeproc{ref-boumal2011rtrmc}{Boumal and Absil 2011}).
+  \textbf{Sparse and Stochastic Variants}: Leveraging sparse linear algebra or minibatch updates to scale to larger \(p, k\) (\citeproc{ref-boumal2011rtrmc}{Boumal and Absil 2011}).
 \item
-  \textbf{Second-Order Methods}: Incorporating Hessian information to
-  accelerate convergence near critical points
-  (\citeproc{ref-absil2008optimization}{Absil, Mahony, and Sepulchre
-  2008, boumal2019global}).
+  \textbf{Second-Order Methods}: Incorporating Hessian information to accelerate convergence near critical points (\citeproc{ref-absil2008optimization}{Absil, Mahony, and Sepulchre 2008, boumal2019global}).
 \item
-  \textbf{Domain-Specific Adaptations}: Tailoring NSA-Flow for
-  multi-modal data fusion or graph-structured inputs, building on
-  (\citeproc{ref-Chen2024}{Chen, Qu, and Zhao 2024, henaff2011deep}).
+  \textbf{Domain-Specific Adaptations}: Tailoring NSA-Flow for multi-modal data fusion or graph-structured inputs, building on (\citeproc{ref-Chen2024}{Chen, Qu, and Zhao 2024, henaff2011deep}).
 \end{itemize}
 
-NSA-Flow's flexible framework and robust implementation make it a
-valuable tool for interpretable matrix optimization, with broad
-potential across machine learning and data science applications.
+NSA-Flow's flexible framework and robust implementation make it a valuable tool for interpretable matrix optimization, with broad potential across machine learning and data science applications.
 
 \subsection{Funding}\label{funding}
 
-This work was supported by the Office of Naval Research (ONR) grant
-N00014-23-1-2317.
+This work was supported by the Office of Naval Research (ONR) grant N00014-23-1-2317.
 
-\section{Appendix A: NSA-Flow Package
-Description}\label{appendix-a-nsa-flow-package-description}
+\section{Appendix A: NSA-Flow Package Description}\label{appendix-a-nsa-flow-package-description}
 
-This document is entitled \texttt{nsa\_flow.Rmd} and is available in the
-\href{https://github.com/ANTsX/ANTsR}{ANTsR repository}.
+This document is entitled \texttt{nsa\_flow.Rmd} and is available in the \href{https://github.com/ANTsX/ANTsR}{ANTsR repository}.
 
 \subsection{Overview}\label{overview}
 
-The NSA-Flow package (Non-negative Stiefel Approximating Flow) is a
-Python library designed for interpretable representation learning in
-high-dimensional data domains such as neuroimaging, genomics, and text
-analysis. It provides a unified, differentiable optimization framework
-that integrates sparse matrix factorization, orthogonalization, and
-manifold constraints into a single algorithm operating near the Stiefel
-manifold. This approach balances reconstruction fidelity with
-column-wise decorrelation, resulting in sparse, stable, and
-interpretable latent representations. Non-negativity is enforced through
-proximal updates, while continuous orthogonality control is achieved via
-manifold retraction techniques (e.g., soft-polar or polar
-decomposition). Structured sparsity is managed via a tunable weight
-parameter, and the framework includes adaptive gradient scaling and
-learning-rate strategies for efficient optimization.
+The NSA-Flow package (Non-negative Stiefel Approximating Flow) is a Python library designed for interpretable representation learning in high-dimensional data domains such as neuroimaging, genomics, and text analysis. It provides a unified, differentiable optimization framework that integrates sparse matrix factorization, orthogonalization, and manifold constraints into a single algorithm operating near the Stiefel manifold. This approach balances reconstruction fidelity with column-wise decorrelation, resulting in sparse, stable, and interpretable latent representations. Non-negativity is enforced through proximal updates, while continuous orthogonality control is achieved via manifold retraction techniques (e.g., soft-polar or polar decomposition). Structured sparsity is managed via a tunable weight parameter, and the framework includes adaptive gradient scaling and learning-rate strategies for efficient optimization.
 
-The package is compatible with PyTorch for seamless integration into
-deep learning workflows and supports joint optimization tasks. It
-emphasizes simplicity of use and differentiability, making it suitable
-for applications where interpretability and constraint enforcement are
-critical.
+The package is built on PyTorch, is differentiable end to end, and is intended to be inserted into an existing pipeline rather than replace it. It is suitable for applications where interpretability and constraint enforcement are critical.
 
 \subsection{Key Features}\label{key-features}
 
 \begin{itemize}
 \item
-  \textbf{Manifold Approximation}: Implements a smooth geometric flow
-  near the Stiefel manifold to handle orthogonality constraints
-  continuously.
+  \textbf{Orthogonality as an objective}: The distance to the scaled Stiefel manifold is a term in the energy, weighted by \(w\), rather than a constraint enforced by retraction.
 \item
-  \textbf{Constraint Enforcement}: Incorporates non-negativity via
-  proximal operators and orthogonality through retraction methods.
+  \textbf{Constraint enforcement}: Non-negativity is the one hard constraint, applied by exact projection. Nothing is retracted and no factorisation appears in the iteration.
 \item
-  \textbf{Optimization Flexibility}: Supports various PyTorch optimizers
-  (e.g., ASGD) with adaptive learning rates and strategies like Bayesian
-  optimization for hyperparameter tuning.
+  \textbf{No optimizer or learning rate to choose}: Spectral projected gradient with Barzilai--Borwein steps and an Armijo line search. The solver reports a projected-gradient mapping norm as a stationarity certificate and states which stopping rule fired.
 \item
-  \textbf{Metrics and Visualization}: Includes functions for computing
-  orthogonality defects (e.g., invariant\_orthogonality\_defect and
-  defect\_fast) and plotting optimization traces.
+  \textbf{Metrics}: \texttt{stiefel\_defect} for orthonormality and \texttt{angle\_defect} for orthogonality, both with closed-form gradients, plus \texttt{effective\_rank}, \texttt{negative\_mass} and the projections.
 \item
-  \textbf{Validation}: Tested on real-world datasets, including the
-  Golub leukemia gene expression dataset and the Alzheimer's Disease
-  Neuroimaging Initiative (ADNI) dataset, demonstrating maintained or
-  improved performance with simplified representations.
+  \textbf{Validation}: Tested on real-world datasets, including the Golub leukemia gene expression dataset and the Alzheimer's Disease Neuroimaging Initiative (ADNI) dataset, demonstrating maintained or improved performance with simplified representations.
 \item
-  \textbf{Extensibility}: Offers an autograd-compatible variant for
-  end-to-end differentiable pipelines and a prototype layer for deep
-  learning integration (minimally tested).
+  \textbf{Extensibility}: Offers an autograd-compatible variant for end-to-end differentiable pipelines and a prototype layer for deep learning integration (minimally tested).
 \end{itemize}
 
-\subsection{Installation and
-Dependencies}\label{installation-and-dependencies}
+\subsection{Installation and Dependencies}\label{installation-and-dependencies}
 
-NSA-Flow can be installed from PyPI using
-\texttt{pip\ install\ nsa-flow} or directly from the GitHub repository
-via \texttt{pip\ install\ git+https://github.com/stnava/nsa\_flow.git}.
-It requires Python ≥ 3.9, PyTorch ≥ 2.0, NumPy ≥ 1.23, and Matplotlib
-for visualization. No additional packages are needed for core
-functionality.
+NSA-Flow can be installed from PyPI using \texttt{pip\ install\ nsa-flow} or directly from the GitHub repository via \texttt{pip\ install\ git+https://github.com/stnava/nsa\_flow.git}. It requires Python ≥ 3.9, PyTorch ≥ 2.0, NumPy ≥ 1.23, and Matplotlib for visualization. No additional packages are needed for core functionality.
 
-\subsection{Core Functionality and High-Level
-API}\label{core-functionality-and-high-level-api}
+\subsection{Core Functionality and High-Level API}\label{core-functionality-and-high-level-api}
 
-The package exposes thirty public names. The ones needed for ordinary
-use are few:
+The package exposes thirty public names. The ones needed for ordinary use are few:
 
 \begin{itemize}
 \item
-  \texttt{nsa\_flow.nsa\_flow(target,\ w,\ ...)}: refinement. Returns a
-  non-negative, near-orthogonal matrix close to \texttt{target}. Reports
-  \texttt{stop\_reason}, the certificate \texttt{grad\_map},
-  \texttt{defect}, \texttt{effective\_rank} and \texttt{scale\_ratio}.
+  \texttt{nsa\_flow.nsa\_flow(target,\ w,\ ...)}: refinement. Returns a non-negative,
+  near-orthogonal matrix close to \texttt{target}. Reports \texttt{stop\_reason}, the
+  certificate \texttt{grad\_map}, \texttt{defect}, \texttt{effective\_rank} and \texttt{scale\_ratio}.
 \item
-  \texttt{nsa\_flow.nsa\_flow\_data(X,\ k,\ w,\ ...)}: estimation. Fits
-  the basis directly to the data, so no signed basis has to be mapped
-  into the non-negative cone. Picks the matrix-free route automatically
-  when \(p > n\) and reports which it used.
+  \texttt{nsa\_flow.nsa\_flow\_data(X,\ k,\ w,\ ...)}: estimation. Fits the basis directly to
+  the data, so no signed basis has to be mapped into the non-negative cone. Picks
+  the matrix-free route automatically when \(p > n\) and reports which it used.
 \item
-  \texttt{nsa\_flow.relax\_into\_nonneg(...)}: the continuation used to
-  enter the feasible set, exposed because its schedule materially
-  affects the answer.
+  \texttt{nsa\_flow.relax\_into\_nonneg(...)}: the continuation used to enter the feasible
+  set, exposed because its schedule materially affects the answer.
 \item
-  \texttt{nsa\_flow.stiefel\_defect()},
-  \texttt{nsa\_flow.angle\_defect()}: the orthoNORMality and
+  \texttt{nsa\_flow.stiefel\_defect()}, \texttt{nsa\_flow.angle\_defect()}: the orthoNORMality and
   orthogonality measures \(D\) and \(C\), with closed-form gradients
   \texttt{grad\_stiefel\_defect} and \texttt{grad\_angle\_defect}.
 \item
-  \texttt{nsa\_flow.project\_nonneg()},
-  \texttt{nsa\_flow.project\_scaled\_stiefel()},
-  \texttt{nsa\_flow.polar\_factor()}: exact Euclidean projections. Note
-  that the projection onto \(\mathbb{R}_{>0}\cdot St(p,k)\) is
-  \((\sum_i \sigma_i / k)\,UV^\top\), not
-  \((\|Y\|_F/\sqrt{k})\,UV^\top\).
+  \texttt{nsa\_flow.project\_nonneg()}, \texttt{nsa\_flow.project\_scaled\_stiefel()},
+  \texttt{nsa\_flow.polar\_factor()}: exact Euclidean projections. Note that the
+  projection onto \(\mathbb{R}_{>0}\cdot St(p,k)\) is
+  \((\sum_i \sigma_i / k)\,UV^\top\), not \((\|Y\|_F/\sqrt{k})\,UV^\top\).
 \item
-  \texttt{nsa\_flow.NSAFlowLinear}, \texttt{NSAFlowConv2d},
-  \texttt{NSAFlowLayer}: layers for use inside a network, with the
-  per-sample structure of the input respected.
+  \texttt{nsa\_flow.NSAFlowLinear}, \texttt{NSAFlowConv2d}, \texttt{NSAFlowLayer}: layers for use
+  inside a network, with the per-sample structure of the input respected.
 \item
-  \texttt{nsa\_flow.nsa\_flow\_signed()}: experimental. Documented in
-  the source with its own negative result; \texttt{nsa\_flow\_data} is
-  preferred.
+  \texttt{nsa\_flow.nsa\_flow\_signed()}: experimental. Documented in the source with its
+  own negative result; \texttt{nsa\_flow\_data} is preferred.
 \end{itemize}
 
-Functions present in the previous release and now absent, because the
-machinery they configured is gone: \texttt{nsa\_flow\_orth},
-\texttt{nsa\_flow\_retract\_auto},
-\texttt{invariant\_orthogonality\_defect},
-\texttt{get\_torch\_optimizer},
-\texttt{estimate\_learning\_rate\_for\_nsa\_flow},
-\texttt{get\_lr\_estimation\_strategies}.
+Functions present in the previous release and now absent, because the machinery
+they configured is gone: \texttt{nsa\_flow\_orth}, \texttt{nsa\_flow\_retract\_auto},
+\texttt{invariant\_orthogonality\_defect}, \texttt{get\_torch\_optimizer},
+\texttt{estimate\_learning\_rate\_for\_nsa\_flow}, \texttt{get\_lr\_estimation\_strategies}.
 
-A typical usage example. There is no optimizer, learning rate,
-retraction or warm-up to specify:
+A typical usage example. There is no optimizer, learning rate, retraction or
+warm-up to specify:
 
 \begin{Shaded}
 \begin{Highlighting}[]
@@ -1536,114 +931,80 @@ retraction or warm-up to specify:
 
 \subsection{Testing}\label{testing}
 
-The package ships a property-driven test suite, run with
-\texttt{pytest\ tests/}. It is not a smoke test: the propositions of
-Section 2 are asserted executably. Among them, that \(D\) vanishes
-exactly on \(\mathbb{R}_{>0}\cdot St(p,k)\) and is bounded by
-\(1 - 1/k\); that \(D = k\operatorname{Var}(\lambda)\) and
-\(D \ge 1/r - 1/k\) at rank \(r\); that \(C\) is zero exactly on
-mutually orthogonal columns at any norms, invariant to per-column
-rescaling, and equal to one at collinearity; that for \(Y \ge 0\),
-\(C = 0\) if and only if the column supports are pairwise disjoint,
-checked against an independent combinatorial test over thousands of
-random draws; that every closed-form gradient agrees with automatic
-differentiation; that the Euler identities hold, globally for \(D\) and
-per column for \(C\); that the Gram and matrix-free code paths return
-the same optimum, up to the column permutation that is a genuine
-symmetry of the problem; and that the solver reports \texttt{max\_iter}
-rather than claiming convergence when it has not converged.
+The package ships a property-driven test suite, run with \texttt{pytest\ tests/}. It is
+not a smoke test: the propositions of Section 2 are asserted executably. Among
+them, that \(D\) vanishes exactly on \(\mathbb{R}_{>0}\cdot St(p,k)\) and is
+bounded by \(1 - 1/k\); that \(D = k\operatorname{Var}(\lambda)\) and
+\(D \ge 1/r - 1/k\) at rank \(r\); that \(C\) is zero exactly on mutually
+orthogonal columns at any norms, invariant to per-column rescaling, and equal to
+one at collinearity; that for \(Y \ge 0\), \(C = 0\) if and only if the column
+supports are pairwise disjoint, checked against an independent combinatorial test
+over thousands of random draws; that every closed-form gradient agrees with
+automatic differentiation; that the Euler identities hold, globally for \(D\) and
+per column for \(C\); that the Gram and matrix-free code paths return the same
+optimum, up to the column permutation that is a genuine symmetry of the problem;
+and that the solver reports \texttt{max\_iter} rather than claiming convergence when it
+has not converged.
 
-The suite also encodes the failure modes that motivated this version, so
-they cannot silently return: that the off-diagonal-only defect scores
-rank collapse at zero while \(C\) does not, and that a non-negative
-basis fitted to the data reconstructs better than \texttt{abs()} of a
-signed one.
+The suite also encodes the failure modes that motivated this version, so they
+cannot silently return: that the off-diagonal-only defect scores rank collapse at
+zero while \(C\) does not, and that a non-negative basis fitted to the data
+reconstructs better than \texttt{abs()} of a signed one.
 
 The demonstration functions of the previous release
-(\texttt{demo\_nsa\_flow\_optimizer\_tradeoff},
-\texttt{demo\_nsa\_flow\_tradeoff}, \texttt{plot\_nsa\_trace}) compared
-optimizer backends and learning-rate strategies, and have been removed
-along with the machinery they compared.
+(\texttt{demo\_nsa\_flow\_optimizer\_tradeoff}, \texttt{demo\_nsa\_flow\_tradeoff},
+\texttt{plot\_nsa\_trace}) compared optimizer backends and learning-rate strategies, and
+have been removed along with the machinery they compared.
 
 \subsection{License and Citation}\label{license-and-citation}
 
-NSA-Flow is released under the MIT License. For research use, cite as:
-Stnava et al.~(2025).
-\href{https://github.com/stnava/nsa_flow}{NSA-Flow: Non-negative Stiefel
-Approximating Flow for Interpretable Representation Learning}.
+NSA-Flow is released under the MIT License. For research use, cite as: Stnava et al.~(2025). \href{https://github.com/stnava/nsa_flow}{NSA-Flow: Non-negative Stiefel Approximating Flow for Interpretable Representation Learning}.
 
-\section{Mathematical Analysis: descent and
-stationarity}\label{mathematical-analysis-descent-and-stationarity}
+\section{Mathematical Analysis: descent and stationarity}\label{mathematical-analysis-descent-and-stationarity}
 
-\textbf{Setup.} Let \(Y \in \mathbb{R}^{p\times k}\), let
-\(\mathcal{C} = \{Y : Y \ge 0\}\), and let \[
+\textbf{Setup.} Let \(Y \in \mathbb{R}^{p\times k}\), let \(\mathcal{C} = \{Y : Y \ge 0\}\), and let
+\[
 E(Y) = (1-w)L_{fid}(Y, X_0) + w\,L_{orth}(Y)
-\] be the energy of Section 2, with \(\Pi\) the Euclidean projection
-onto \(\mathcal{C}\), which is the elementwise clamp
-\(\Pi(Y) = \max(0,Y)\). The iteration is \[
+\]
+be the energy of Section 2, with \(\Pi\) the Euclidean projection onto \(\mathcal{C}\), which is the elementwise clamp \(\Pi(Y) = \max(0,Y)\). The iteration is
+\[
 Y_{n+1} = \Pi\big(Y_n - t_n \nabla E(Y_n)\big),
-\] with \(t_n\) a Barzilai--Borwein step length safeguarded by Armijo
-backtracking.
+\]
+with \(t_n\) a Barzilai--Borwein step length safeguarded by Armijo backtracking.
 
 \subsection{Assumptions}\label{assumptions}
 
 \begin{enumerate}
 \def\labelenumi{\arabic{enumi}.}
 \item
-  \textbf{Smoothness.} \(E\) is continuously differentiable with locally
-  Lipschitz gradient. This holds for \(L_{orth} = \tilde D\) wherever
-  \(Y \neq 0\), and for \(L_{orth} = C\) wherever no column vanishes.
+  \textbf{Smoothness.} \(E\) is continuously differentiable with locally Lipschitz gradient. This holds for \(L_{orth} = \tilde D\) wherever \(Y \neq 0\), and for \(L_{orth} = C\) wherever no column vanishes.
 \item
-  \textbf{Convex feasible set.} \(\mathcal{C}\) is closed and convex,
-  and \(\Pi\) is its exact projection --- not an approximation, and
-  requiring no factorisation.
+  \textbf{Convex feasible set.} \(\mathcal{C}\) is closed and convex, and \(\Pi\) is its exact projection --- not an approximation, and requiring no factorisation.
 \item
-  \textbf{Bounded step lengths.} \(t_n \in [t_{\min}, t_{\max}]\) with
-  \(0 < t_{\min} \le t_{\max} < \infty\).
+  \textbf{Bounded step lengths.} \(t_n \in [t_{\min}, t_{\max}]\) with \(0 < t_{\min} \le t_{\max} < \infty\).
 \end{enumerate}
 
-\subsection{Proposition (monotone
-descent)}\label{proposition-monotone-descent}
+\subsection{Proposition (monotone descent)}\label{proposition-monotone-descent}
 
-The Armijo condition \[
+The Armijo condition
+\[
 E(Y_{n+1}) \le E(Y_n) - \sigma\,\frac{\|Y_{n+1} - Y_n\|_F^2}{t_n},\qquad \sigma > 0,
-\] is satisfied for all sufficiently small \(t_n\), and the backtracking
-loop halves \(t_n\) until it holds. Hence \(E(Y_n)\) is non-increasing,
-and since \(E \ge 0\) it converges. \emph{Proof.} The projected-gradient
-direction is a descent direction for a differentiable \(E\) on a convex
-set, and the Armijo condition is satisfiable by smoothness; monotonicity
-and boundedness below give convergence of the sequence of values.
-\(\square\)
+\]
+is satisfied for all sufficiently small \(t_n\), and the backtracking loop halves \(t_n\) until it holds. Hence \(E(Y_n)\) is non-increasing, and since \(E \ge 0\) it converges. \emph{Proof.} The projected-gradient direction is a descent direction for a differentiable \(E\) on a convex set, and the Armijo condition is satisfiable by smoothness; monotonicity and boundedness below give convergence of the sequence of values. \(\square\)
 
-\subsection{Proposition (stationarity
-certificate)}\label{proposition-stationarity-certificate}
+\subsection{Proposition (stationarity certificate)}\label{proposition-stationarity-certificate}
 
-Define the projected-gradient mapping norm \[
+Define the projected-gradient mapping norm
+\[
 \gamma(Y, t) = \frac{\|\Pi(Y - t\nabla E(Y)) - Y\|_F}{t}.
-\] Then \(\gamma(Y,t) = 0\) for some \(t > 0\) if and only if \(Y\)
-satisfies the first-order condition for \(\min_{\mathcal{C}} E\), namely
-\(\langle \nabla E(Y), Z - Y\rangle \ge 0\) for all
-\(Z \in \mathcal{C}\). \emph{Proof.} \(\Pi(Y - t\nabla E(Y)) = Y\) is
-precisely the fixed-point characterisation of the variational
-inequality. \(\square\)
+\]
+Then \(\gamma(Y,t) = 0\) for some \(t > 0\) if and only if \(Y\) satisfies the first-order condition for \(\min_{\mathcal{C}} E\), namely \(\langle \nabla E(Y), Z - Y\rangle \ge 0\) for all \(Z \in \mathcal{C}\). \emph{Proof.} \(\Pi(Y - t\nabla E(Y)) = Y\) is precisely the fixed-point characterisation of the variational inequality. \(\square\)
 
-This is the reason \(\gamma\) is reported rather than \(\|\nabla E\|\):
-at a constrained optimum on the boundary of \(\mathcal{C}\), which is
-where non-negative solutions lie, the gradient need not vanish while
-\(\gamma\) does.
+This is the reason \(\gamma\) is reported rather than \(\|\nabla E\|\): at a constrained optimum on the boundary of \(\mathcal{C}\), which is where non-negative solutions lie, the gradient need not vanish while \(\gamma\) does.
 
-\subsection{Remarks on what is and is not
-claimed}\label{remarks-on-what-is-and-is-not-claimed}
+\subsection{Remarks on what is and is not claimed}\label{remarks-on-what-is-and-is-not-claimed}
 
-The energy is not convex. In the refinement form the fidelity term is
-convex and the orthogonality term is not; in the estimation form the
-reconstruction term is quartic in \(V\). The propositions therefore give
-monotone descent to a stationary point with a computable certificate,
-and nothing about global optimality. In practice the relaxation path of
-Section 2 is what makes the attained point reproducible: on the imaging
-data of Section 4, refining the continuation schedule improves the
-attained objective by roughly a factor of two, while increasing the
-per-stage iteration budget twenty-fold changes it in the fourth decimal.
+The energy is not convex. In the refinement form the fidelity term is convex and the orthogonality term is not; in the estimation form the reconstruction term is quartic in \(V\). The propositions give monotone descent to a stationary point with a computable certificate and say nothing about global optimality. Which stationary point is reached depends on the continuation schedule of Section 2: on the imaging data, refining the schedule improves the attained objective by about a factor of two, while raising the per-stage iteration budget twentyfold changes it in the fourth decimal.
 
 \section{Session Information}\label{session-information}
 
@@ -1689,47 +1050,47 @@ per-stage iteration budget twenty-fold changes it in the fourth decimal.
 ##  [45] rstudioapi_0.18.0       UCSC.utils_1.2.0        generics_0.1.4          base64enc_0.1-6        
 ##  [49] processx_3.8.6          S4Vectors_0.44.0        zlibbioc_1.52.0         lgr_0.5.2              
 ##  [53] GenomeInfoDbData_1.2.13 xtable_1.8-8            stringr_1.6.0           doParallel_1.0.17      
-##  [57] evaluate_1.0.5          hms_1.1.4               colorspace_2.1-2        visNetwork_2.1.4       
-##  [61] flexmix_2.3-20          magrittr_2.0.4          later_1.4.8             modeltools_0.2-24      
-##  [65] palmerpenguins_0.1.1    future.apply_1.20.2     genefilter_1.88.0       robustbase_0.99-7      
-##  [69] XML_3.99-0.19           cowplot_1.2.0           matrixStats_1.5.0       class_7.3-23           
-##  [73] Hmisc_5.2-5             pillar_1.11.1           nlme_3.1-168            iterators_1.0.14       
-##  [77] gridBase_0.4-7          compiler_4.4.2          paradox_1.0.1           stringi_1.8.7          
-##  [81] wesanderson_0.3.7       gower_1.0.2             minqa_1.2.8             lubridate_1.9.5        
-##  [85] plyr_1.8.9              crayon_1.5.3            abind_1.4-8             locfit_1.5-9.12        
-##  [89] bit_4.6.0               sandwich_3.1-1          codetools_0.2-20        multcomp_1.4-29        
-##  [93] recipes_1.3.1           e1071_1.7-17            paletteer_1.7.0         plotly_4.12.0          
-##  [97] mime_0.13               splines_4.4.2           markdown_2.0            Rcpp_1.1.1             
-## [101] VarSelLCM_2.1.3.2       flexclust_1.5.0         smotefamily_1.4.0       blob_1.2.4             
-## [105] lme4_2.0-1              fs_1.6.7                listenv_0.10.1          checkmate_2.3.4        
-## [109] Rdpack_2.6.6            ggsignif_0.6.4          estimability_1.5.1      ANTsRCore_0.8.1        
-## [113] coca_1.1.0              Matrix_1.7-4            callr_3.7.6             statmod_1.5.1          
-## [117] tzdb_0.5.0              pkgconfig_2.0.3         tools_4.4.2             cachem_1.1.0           
-## [121] rbibutils_2.4.1         RSQLite_2.4.3           numDeriv_2016.8-1.1     viridisLite_0.4.3      
-## [125] globaltest_5.60.0       DBI_1.2.3               fastmap_1.2.0           rmarkdown_2.30         
-## [129] grid_4.4.2              imbalance_1.0.2.1       gprofiler2_0.2.4        coda_0.19-4.1          
-## [133] FNN_1.1.4.1             BiocManager_1.30.27     insight_1.4.6           carData_3.0-6          
-## [137] rpart_4.1.24            reformulas_0.4.4        farver_2.1.2            mgcv_1.9-3             
-## [141] yaml_2.3.12             MatrixGenerics_1.18.1   foreign_0.8-90          ggthemes_5.2.0         
-## [145] cli_3.6.5               purrr_1.2.1             stats4_4.4.2            webshot_0.5.5          
-## [149] dbscan_1.2.3            lifecycle_1.0.5         mvtnorm_1.3-3           lava_1.8.2             
-## [153] kernlab_0.9-33          backports_1.5.0         BiocParallel_1.40.2     annotate_1.84.0        
-## [157] timechange_0.4.0        gtable_0.3.6            parallel_4.4.2          limma_3.62.2           
-## [161] mlr3cluster_0.3.0       jsonlite_2.0.0          edgeR_4.4.2             bit64_4.6.0-1          
-## [165] glasso_1.11             litedown_0.9            RcppParallel_5.1.11-2   dCUR_1.0.2             
-## [169] ClusterR_1.3.6          zeallot_0.2.0           timeDate_4052.112       lazyeval_0.2.2         
-## [173] shiny_1.13.0            htmltools_0.5.9         nmfbin_0.2.1            mlr3pipelines_0.11.0   
-## [177] tinytex_0.58            glue_1.8.0              ggstatsplot_0.13.5      XVector_0.46.0         
-## [181] mclust_6.1.2            gtsummary_2.5.0         boot_1.3-32             DDoutlier_0.1.0        
-## [185] mlr3_1.5.0              R6_2.6.1                broom.mixed_0.2.9.7     sva_3.54.0             
-## [189] forcats_1.0.1           labeling_0.4.3          GenomeInfoDb_1.42.3     ipred_0.9-15           
-## [193] mlr3misc_0.21.0         nloptr_2.2.1            rstantools_2.6.0        tidyselect_1.2.1       
-## [197] vipor_0.4.7             optmatch_0.10.8         htmlTable_2.4.3         xml2_1.5.2             
-## [201] car_3.1-5               AnnotationDbi_1.68.0    future_1.69.0           ModelMetrics_1.2.2.2   
-## [205] fastICA_1.2-7           statsExpressions_1.7.3  rsvd_1.0.5              S7_0.2.1               
-## [209] furrr_0.3.1             data.table_1.18.2.1     htmlwidgets_1.6.4       rlang_1.1.7            
-## [213] uuid_1.2-2              lmerTest_3.2-1          hardhat_1.4.2           beeswarm_0.4.0         
-## [217] prodlim_2026.03.11
+##  [57] evaluate_1.0.5          hms_1.1.4               bookdown_0.46           colorspace_2.1-2       
+##  [61] visNetwork_2.1.4        flexmix_2.3-20          magrittr_2.0.4          later_1.4.8            
+##  [65] modeltools_0.2-24       palmerpenguins_0.1.1    future.apply_1.20.2     genefilter_1.88.0      
+##  [69] robustbase_0.99-7       XML_3.99-0.19           cowplot_1.2.0           matrixStats_1.5.0      
+##  [73] class_7.3-23            Hmisc_5.2-5             pillar_1.11.1           nlme_3.1-168           
+##  [77] iterators_1.0.14        gridBase_0.4-7          compiler_4.4.2          paradox_1.0.1          
+##  [81] stringi_1.8.7           wesanderson_0.3.7       gower_1.0.2             minqa_1.2.8            
+##  [85] lubridate_1.9.5         plyr_1.8.9              crayon_1.5.3            abind_1.4-8            
+##  [89] locfit_1.5-9.12         bit_4.6.0               sandwich_3.1-1          codetools_0.2-20       
+##  [93] multcomp_1.4-29         recipes_1.3.1           e1071_1.7-17            paletteer_1.7.0        
+##  [97] plotly_4.12.0           mime_0.13               splines_4.4.2           markdown_2.0           
+## [101] Rcpp_1.1.1              VarSelLCM_2.1.3.2       flexclust_1.5.0         smotefamily_1.4.0      
+## [105] blob_1.2.4              lme4_2.0-1              fs_1.6.7                listenv_0.10.1         
+## [109] checkmate_2.3.4         Rdpack_2.6.6            ggsignif_0.6.4          estimability_1.5.1     
+## [113] ANTsRCore_0.8.1         coca_1.1.0              Matrix_1.7-4            callr_3.7.6            
+## [117] statmod_1.5.1           tzdb_0.5.0              pkgconfig_2.0.3         tools_4.4.2            
+## [121] cachem_1.1.0            rbibutils_2.4.1         RSQLite_2.4.3           numDeriv_2016.8-1.1    
+## [125] viridisLite_0.4.3       globaltest_5.60.0       DBI_1.2.3               fastmap_1.2.0          
+## [129] rmarkdown_2.30          grid_4.4.2              imbalance_1.0.2.1       gprofiler2_0.2.4       
+## [133] coda_0.19-4.1           FNN_1.1.4.1             BiocManager_1.30.27     insight_1.4.6          
+## [137] carData_3.0-6           rpart_4.1.24            reformulas_0.4.4        farver_2.1.2           
+## [141] mgcv_1.9-3              yaml_2.3.12             MatrixGenerics_1.18.1   foreign_0.8-90         
+## [145] ggthemes_5.2.0          cli_3.6.5               purrr_1.2.1             stats4_4.4.2           
+## [149] webshot_0.5.5           dbscan_1.2.3            lifecycle_1.0.5         mvtnorm_1.3-3          
+## [153] lava_1.8.2              kernlab_0.9-33          backports_1.5.0         BiocParallel_1.40.2    
+## [157] annotate_1.84.0         timechange_0.4.0        gtable_0.3.6            parallel_4.4.2         
+## [161] limma_3.62.2            mlr3cluster_0.3.0       jsonlite_2.0.0          edgeR_4.4.2            
+## [165] bit64_4.6.0-1           glasso_1.11             litedown_0.9            RcppParallel_5.1.11-2  
+## [169] dCUR_1.0.2              ClusterR_1.3.6          zeallot_0.2.0           timeDate_4052.112      
+## [173] lazyeval_0.2.2          shiny_1.13.0            htmltools_0.5.9         nmfbin_0.2.1           
+## [177] mlr3pipelines_0.11.0    tinytex_0.58            glue_1.8.0              ggstatsplot_0.13.5     
+## [181] XVector_0.46.0          mclust_6.1.2            gtsummary_2.5.0         boot_1.3-32            
+## [185] DDoutlier_0.1.0         mlr3_1.5.0              R6_2.6.1                broom.mixed_0.2.9.7    
+## [189] sva_3.54.0              forcats_1.0.1           labeling_0.4.3          GenomeInfoDb_1.42.3    
+## [193] ipred_0.9-15            mlr3misc_0.21.0         nloptr_2.2.1            rstantools_2.6.0       
+## [197] tidyselect_1.2.1        vipor_0.4.7             optmatch_0.10.8         htmlTable_2.4.3        
+## [201] xml2_1.5.2              car_3.1-5               AnnotationDbi_1.68.0    future_1.69.0          
+## [205] ModelMetrics_1.2.2.2    fastICA_1.2-7           statsExpressions_1.7.3  rsvd_1.0.5             
+## [209] S7_0.2.1                furrr_0.3.1             data.table_1.18.2.1     htmlwidgets_1.6.4      
+## [213] rlang_1.1.7             uuid_1.2-2              lmerTest_3.2-1          hardhat_1.4.2          
+## [217] beeswarm_0.4.0          prodlim_2026.03.11
 \end{verbatim}
 
 \section*{References}\label{references}
@@ -1738,245 +1099,112 @@ per-stage iteration budget twenty-fold changes it in the fourth decimal.
 \phantomsection\label{refs}
 \begin{CSLReferences}{1}{0}
 \bibitem[\citeproctext]{ref-absil2008optimization}
-Absil, P-A, R Mahony, and R Sepulchre. 2008. \emph{Optimization
-Algorithms on Matrix Manifolds}. Princeton University Press.
+Absil, P-A, R Mahony, and R Sepulchre. 2008. \emph{Optimization Algorithms on Matrix Manifolds}. Princeton University Press.
 
 \bibitem[\citeproctext]{ref-Aghdam2025}
-Aghdam, Maryam Akhavan, Sema Bozdag, and Fahad Saeed. 2025.
-{``Machine-Learning Models for Alzheimer's Disease Diagnosis Using
-Neuroimaging Data: Survey, Reproducibility, and Generalizability
-Evaluation.''} \emph{Brain Informatics} 12 (8).
-\url{https://doi.org/10.1186/s40708-025-00252-3}.
-
-\bibitem[\citeproctext]{ref-armijo1966minimization}
-Armijo, Larry. 1966. {``Minimization of Functions Subject to Lipschitz
-Condition and Continuous Differential Part.''} \emph{Pacific Journal of
-Mathematics} 16 (1): 1--3.
+Aghdam, Maryam Akhavan, Sema Bozdag, and Fahad Saeed. 2025. {``Machine-Learning Models for Alzheimer's Disease Diagnosis Using Neuroimaging Data: Survey, Reproducibility, and Generalizability Evaluation.''} \emph{Brain Informatics} 12 (8). \url{https://doi.org/10.1186/s40708-025-00252-3}.
 
 \bibitem[\citeproctext]{ref-barzilai1988two}
-Barzilai, Jonathan, and Jonathan M. Borwein. 1988. {``Two-Point Step
-Size Gradient Methods.''} \emph{IMA Journal of Numerical Analysis} 8
-(1): 141--48. \url{https://doi.org/10.1093/imanum/8.1.141}.
+Barzilai, Jonathan, and Jonathan M. Borwein. 1988. {``Two-Point Step Size Gradient Methods.''} \emph{IMA Journal of Numerical Analysis} 8 (1): 141--48. \url{https://doi.org/10.1093/imanum/8.1.141}.
 
 \bibitem[\citeproctext]{ref-birgin2000nonmonotone}
-Birgin, Ernesto G., José Mario Martı́nez, and Marcos Raydan. 2000.
-{``Nonmonotone Spectral Projected Gradient Methods on Convex Sets.''}
-\emph{SIAM Journal on Optimization} 10 (4): 1196--1211.
-\url{https://doi.org/10.1137/S1052623497330963}.
-
-\bibitem[\citeproctext]{ref-blei2003latent}
-Blei, David M., Andrew Y. Ng, and Michael I. Jordan. 2003. {``Latent
-Dirichlet Allocation.''} \emph{Journal of Machine Learning Research} 3:
-993--1022.
+Birgin, Ernesto G., José Mario Martı́nez, and Marcos Raydan. 2000. {``Nonmonotone Spectral Projected Gradient Methods on Convex Sets.''} \emph{SIAM Journal on Optimization} 10 (4): 1196--1211. \url{https://doi.org/10.1137/S1052623497330963}.
 
 \bibitem[\citeproctext]{ref-bolte2014proximal}
-Bolte, Jerome, Shoham Sabach, and Marc Teboulle. 2014. {``Proximal
-Alternating Linearized Minimization for Nonconvex and Nonsmooth
-Problems.''} \emph{Mathematical Programming} 146: 459--94.
+Bolte, Jerome, Shoham Sabach, and Marc Teboulle. 2014. {``Proximal Alternating Linearized Minimization for Nonconvex and Nonsmooth Problems.''} \emph{Mathematical Programming} 146: 459--94.
 
 \bibitem[\citeproctext]{ref-boumal2023intro}
-Boumal, Nicolas. 2023. \emph{An Introduction to Optimization on Smooth
-Manifolds}. Cambridge University Press.
+Boumal, Nicolas. 2023. \emph{An Introduction to Optimization on Smooth Manifolds}. Cambridge University Press.
 
 \bibitem[\citeproctext]{ref-boumal2011rtrmc}
-Boumal, Nicolas, and P-A Absil. 2011. {``RTRMC: A Riemannian
-Trust-Region Method for Low-Rank Matrix Completion.''} \emph{Advances in
-Neural Information Processing Systems} 24.
+Boumal, Nicolas, and P-A Absil. 2011. {``RTRMC: A Riemannian Trust-Region Method for Low-Rank Matrix Completion.''} \emph{Advances in Neural Information Processing Systems} 24.
 
 \bibitem[\citeproctext]{ref-boumal2019global}
-Boumal, Nicolas, P-A Absil, and Coralia Cartis. 2019. {``Global
-Convergence of the Riemannian Trust-Region Method for Optimization on
-Manifolds.''} \emph{SIAM Journal on Optimization} 29 (1): 178--201.
+Boumal, Nicolas, P-A Absil, and Coralia Cartis. 2019. {``Global Convergence of the Riemannian Trust-Region Method for Optimization on Manifolds.''} \emph{SIAM Journal on Optimization} 29 (1): 178--201.
 
 \bibitem[\citeproctext]{ref-boumal2014manopt}
-Boumal, Nicolas, Bamdev Mishra, P-A Absil, and Rodolphe Sepulchre. 2014.
-{``{Manopt}, a {M}atlab Toolbox for Optimization on Manifolds.''} In
-\emph{Journal of Machine Learning Research}, 15:1455--59. 1.
+Boumal, Nicolas, Bamdev Mishra, P-A Absil, and Rodolphe Sepulchre. 2014. {``{Manopt}, a {M}atlab Toolbox for Optimization on Manifolds.''} In \emph{Journal of Machine Learning Research}, 15:1455--59. 1.
 
 \bibitem[\citeproctext]{ref-Bu2022FeedbackGD}
-Bu, Fanchen, and Dong Eui Chang. 2022. {``Feedback Gradient Descent:
-Efficient and Stable Optimization with Orthogonality for DNNs.''} In
-\emph{Proceedings of the AAAI Conference on Artificial Intelligence},
-36:6106--14. 6. \url{https://doi.org/10.1609/aaai.v36i6.20558}.
+Bu, Fanchen, and Dong Eui Chang. 2022. {``Feedback Gradient Descent: Efficient and Stable Optimization with Orthogonality for DNNs.''} In \emph{Proceedings of the AAAI Conference on Artificial Intelligence}, 36:6106--14. 6. \url{https://doi.org/10.1609/aaai.v36i6.20558}.
 
 \bibitem[\citeproctext]{ref-Chen2024}
-Chen, Yasong, Guangwei Qu, and Junjian Zhao. 2024. {``Orthogonal Graph
-Regularized Non-Negative Matrix Factorization Under Sparse Constraints
-for Clustering.''} \emph{Expert Systems with Applications} 251: 123797.
-\url{https://doi.org/10.1016/j.eswa.2024.123797}.
+Chen, Yasong, Guangwei Qu, and Junjian Zhao. 2024. {``Orthogonal Graph Regularized Non-Negative Matrix Factorization Under Sparse Constraints for Clustering.''} \emph{Expert Systems with Applications} 251: 123797. \url{https://doi.org/10.1016/j.eswa.2024.123797}.
 
 \bibitem[\citeproctext]{ref-Cuingnet2011}
-Cuingnet, R'emi, Emilie Gerardin, J'er\^{}ome Tessieras, Guillaume
-Auzias, St'ephane L'eh'ericy, Marie-Odile Habert, Marie Chupin, Habib
-Benali, Olivier Colliot, and The Alzheimer's Disease Neuroimaging
-Initiative. 2011. {``Automatic Classification of Patients with
-Alzheimer's Disease from Structural {MRI}: A Comparison of Ten Methods
-Using the {ADNI} Database.''} \emph{NeuroImage} 56 (2): 766--81.
-\url{https://doi.org/10.1016/j.neuroimage.2010.06.013}.
+Cuingnet, R'emi, Emilie Gerardin, J'er\^{}ome Tessieras, Guillaume Auzias, St'ephane L'eh'ericy, Marie-Odile Habert, Marie Chupin, Habib Benali, Olivier Colliot, and The Alzheimer's Disease Neuroimaging Initiative. 2011. {``Automatic Classification of Patients with Alzheimer's Disease from Structural {MRI}: A Comparison of Ten Methods Using the {ADNI} Database.''} \emph{NeuroImage} 56 (2): 766--81. \url{https://doi.org/10.1016/j.neuroimage.2010.06.013}.
 
 \bibitem[\citeproctext]{ref-ding2006orthogonal}
-Ding, Chris, Tao Li, Wei Peng, and Haesun Park. 2006. {``Orthogonal
-Nonnegative Matrix Tri-Factorizations for Clustering.''} In
-\emph{Proceedings of the 12th ACM SIGKDD International Conference on
-Knowledge Discovery and Data Mining}, 126--35.
-\url{https://doi.org/10.1145/1150402.1150420}.
-
-\bibitem[\citeproctext]{ref-edelman1998geometry}
-Edelman, Alan, Tom'as A. Arias, and Steven T. Smith. 1998. {``The
-Geometry of Algorithms with Orthogonality Constraints.''} \emph{SIAM
-Journal on Matrix Analysis and Applications} 20 (2): 303--53.
-\url{https://doi.org/10.1137/S0895479895290954}.
+Ding, Chris, Tao Li, Wei Peng, and Haesun Park. 2006. {``Orthogonal Nonnegative Matrix Tri-Factorizations for Clustering.''} In \emph{Proceedings of the 12th ACM SIGKDD International Conference on Knowledge Discovery and Data Mining}, 126--35. \url{https://doi.org/10.1145/1150402.1150420}.
 
 \bibitem[\citeproctext]{ref-gao2019parallelizing}
-Gao, Bin, Xin Liu, Xun Chen, and Yaxiang Yuan. 2019. {``Parallelizing
-Riemannian Optimization on the Stiefel Manifold.''} \emph{SIAM Journal
-on Scientific Computing} 41 (2): C121--48.
+Gao, Bin, Xin Liu, Xun Chen, and Yaxiang Yuan. 2019. {``Parallelizing Riemannian Optimization on the Stiefel Manifold.''} \emph{SIAM Journal on Scientific Computing} 41 (2): C121--48.
 
 \bibitem[\citeproctext]{ref-goessmann2020restricted}
-Goeßmann, Alex. 2020. {``The Restricted Isometry of ReLU Networks:
-Generalization Through Norm Concentration.''}
-\url{https://doi.org/10.48550/arXiv.2007.00479}.
+Goeßmann, Alex. 2020. {``The Restricted Isometry of ReLU Networks: Generalization Through Norm Concentration.''} \url{https://doi.org/10.48550/arXiv.2007.00479}.
 
 \bibitem[\citeproctext]{ref-golub1999molecular}
-Golub, Todd R., Donna K. Slonim, Pablo Tamayo, Christine Huard, Michelle
-Gaasenbeek, Jill P. Mesirov, Hilary Coller, et al. 1999. {``Molecular
-Classification of Cancer: Class Discovery and Class Prediction by Gene
-Expression Monitoring.''} \emph{Science} 286 (5439): 531--37.
-\url{https://doi.org/10.1126/science.286.5439.531}.
+Golub, Todd R., Donna K. Slonim, Pablo Tamayo, Christine Huard, Michelle Gaasenbeek, Jill P. Mesirov, Hilary Coller, et al. 1999. {``Molecular Classification of Cancer: Class Discovery and Class Prediction by Gene Expression Monitoring.''} \emph{Science} 286 (5439): 531--37. \url{https://doi.org/10.1126/science.286.5439.531}.
 
 \bibitem[\citeproctext]{ref-guo2019frobenius}
-Guo, Peichang. 2019. {``A Frobenius Norm Regularization Method for
-Convolutional Kernels to Avoid Unstable Gradient Problem.''}
-\url{https://doi.org/10.48550/arXiv.1907.11235}.
+Guo, Peichang. 2019. {``A Frobenius Norm Regularization Method for Convolutional Kernels to Avoid Unstable Gradient Problem.''} \url{https://doi.org/10.48550/arXiv.1907.11235}.
 
 \bibitem[\citeproctext]{ref-henaff2011deep}
-Henaff, Mikael, Kevin Jarrett, Koray Kavukcuoglu, and Yann LeCun. 2011.
-{``Unsupervised Learning of Sparse Features for Scalable Audio
-Classification.''} In \emph{Proceedings of the 12th International
-Society for Music Information Retrieval Conference, {ISMIR} 2011, Miami,
-Florida, USA, October 24-28, 2011}, edited by Anssi Klapuri and Colby
-Leider, 681--86. University of Miami.
-\url{http://ismir2011.ismir.net/papers/PS6-5.pdf}.
+Henaff, Mikael, Kevin Jarrett, Koray Kavukcuoglu, and Yann LeCun. 2011. {``Unsupervised Learning of Sparse Features for Scalable Audio Classification.''} In \emph{Proceedings of the 12th International Society for Music Information Retrieval Conference, {ISMIR} 2011, Miami, Florida, USA, October 24-28, 2011}, edited by Anssi Klapuri and Colby Leider, 681--86. University of Miami. \url{http://ismir2011.ismir.net/papers/PS6-5.pdf}.
 
 \bibitem[\citeproctext]{ref-hyvarinen2000independent}
-Hyvärinen, Aapo, and Erkki Oja. 2000. {``Independent Component Analysis:
-Algorithms and Applications.''} \emph{Neural Networks} 13 (4-5):
-411--30.
-
-\bibitem[\citeproctext]{ref-koren2009matrix}
-Koren, Yehuda, Robert Bell, and Chris Volinsky. 2009. {``Matrix
-Factorization Techniques for Recommender Systems.''} \emph{Computer} 42
-(8): 30--37. \url{https://doi.org/10.1109/MC.2009.263}.
+Hyvärinen, Aapo, and Erkki Oja. 2000. {``Independent Component Analysis: Algorithms and Applications.''} \emph{Neural Networks} 13 (4-5): 411--30.
 
 \bibitem[\citeproctext]{ref-kurtz2023group}
-Kurtz, Yoav, Noga Bar, and Raja Giryes. 2023. {``Group Orthogonalization
-Regularization for Vision Models Adaptation and Robustness.''}
-\url{https://doi.org/10.48550/arXiv.2306.10001}.
+Kurtz, Yoav, Noga Bar, and Raja Giryes. 2023. {``Group Orthogonalization Regularization for Vision Models Adaptation and Robustness.''} \url{https://doi.org/10.48550/arXiv.2306.10001}.
 
 \bibitem[\citeproctext]{ref-lee2001algorithms}
-Lee, Daniel D., and H. Sebastian Seung. 2001a. {``Algorithms for
-Non-Negative Matrix Factorization.''} \emph{Advances in Neural
-Information Processing Systems} 13: 556--62.
+Lee, Daniel D., and H. Sebastian Seung. 2001a. {``Algorithms for Non-Negative Matrix Factorization.''} \emph{Advances in Neural Information Processing Systems} 13: 556--62.
 
 \bibitem[\citeproctext]{ref-lee2001nmf}
-Lee, Daniel D, and H. Sebastian Seung. 2001b. {``Algorithms for
-Non-Negative Matrix Factorization.''} In \emph{NIPS}.
+Lee, Daniel D, and H. Sebastian Seung. 2001b. {``Algorithms for Non-Negative Matrix Factorization.''} In \emph{NIPS}.
 
 \bibitem[\citeproctext]{ref-li2023unilateral}
-Li, Yuanxian, Yichen Zhang, and Zhiqiang Zhang. 2023. {``Unilateral
-Orthogonal Nonnegative Matrix Factorization.''} \emph{SIAM Journal on
-Imaging Sciences} 16 (3): 1497--527.
-\url{https://doi.org/10.1137/22M1508315}.
+Li, Yuanxian, Yichen Zhang, and Zhiqiang Zhang. 2023. {``Unilateral Orthogonal Nonnegative Matrix Factorization.''} \emph{SIAM Journal on Imaging Sciences} 16 (3): 1497--527. \url{https://doi.org/10.1137/22M1508315}.
 
 \bibitem[\citeproctext]{ref-parikh2014proximal}
-Parikh, Neal, and Stephen Boyd. 2014. {``Proximal Algorithms.''}
-\emph{Foundations and Trends® in Optimization} 1 (3): 127--239.
-
-\bibitem[\citeproctext]{ref-polyak1992acceleration}
-Polyak, Boris T, and Anatoly B Juditsky. 1992. {``Acceleration of
-Stochastic Approximation by Averaging.''} \emph{SIAM Journal on Control
-and Optimization} 30 (3): 838--55.
+Parikh, Neal, and Stephen Boyd. 2014. {``Proximal Algorithms.''} \emph{Foundations and Trends® in Optimization} 1 (3): 127--239.
 
 \bibitem[\citeproctext]{ref-racine_personalized_2018}
-Racine, Annie M., Michael Brickhouse, David A. Wolk, Bradford C.
-Dickerson, and Alzheimer's Disease Neuroimaging Initiative. 2018. {``The
-Personalized {Alzheimer}'s Disease Cortical Thickness Index Predicts
-Likely Pathology and Clinical Progression in Mild Cognitive
-Impairment.''} Edited by David Wolk, Victor Villemagne, and Bradford
-Dickerson. \emph{Alzheimer's \& Dementia: Diagnosis, Assessment \&
-Disease Monitoring} 10 (1): 301--10.
-\url{https://doi.org/10.1016/j.dadm.2018.02.007}.
+Racine, Annie M., Michael Brickhouse, David A. Wolk, Bradford C. Dickerson, and Alzheimer's Disease Neuroimaging Initiative. 2018. {``The Personalized {Alzheimer}'s Disease Cortical Thickness Index Predicts Likely Pathology and Clinical Progression in Mild Cognitive Impairment.''} Edited by David Wolk, Victor Villemagne, and Bradford Dickerson. \emph{Alzheimer's \& Dementia: Diagnosis, Assessment \& Disease Monitoring} 10 (1): 301--10. \url{https://doi.org/10.1016/j.dadm.2018.02.007}.
 
 \bibitem[\citeproctext]{ref-rahiche2022variational}
-Rahiche, Abderrahmane et al. 2022. {``Variational Bayesian Orthogonal
-Nonnegative Matrix Factorization over the Stiefel Manifold.''}
-\emph{IEEE Transactions on Image Processing} 31: 5543--58.
-\url{https://doi.org/10.1109/TIP.2022.3194701}.
+Rahiche, Abderrahmane et al. 2022. {``Variational Bayesian Orthogonal Nonnegative Matrix Factorization over the Stiefel Manifold.''} \emph{IEEE Transactions on Image Processing} 31: 5543--58. \url{https://doi.org/10.1109/TIP.2022.3194701}.
 
 \bibitem[\citeproctext]{ref-ricci2025orthogonality}
-Ricci, Simone, Niccolo Biondi, Federico Pernici, Ioannis Patras, and
-Alberto Del Bimbo. 2025. {``\(\lambda\)-Orthogonality Regularization for
-Compatible Representation Learning.''} In \emph{Advances in Neural
-Information Processing Systems}. \url{https://arxiv.org/abs/2509.16664}.
+Ricci, Simone, Niccolo Biondi, Federico Pernici, Ioannis Patras, and Alberto Del Bimbo. 2025. {``\(\lambda\)-Orthogonality Regularization for Compatible Representation Learning.''} In \emph{Advances in Neural Information Processing Systems}. \url{https://arxiv.org/abs/2509.16664}.
 
 \bibitem[\citeproctext]{ref-sattari_assessing_2022}
-Sattari, Nasim, Fariborz Faeghi, Babak Shekarchi, and Mohammad Hossein
-Heidari. 2022. {``Assessing the {Changes} of {Cortical} {Thickness} in
-{Alzheimer} {Disease} {With} {MRI} {Using} {Freesurfer} {Software}.''}
-\emph{Basic and Clinical Neuroscience} 13 (2): 185--92.
-\url{https://doi.org/10.32598/bcn.2021.1779.1}.
+Sattari, Nasim, Fariborz Faeghi, Babak Shekarchi, and Mohammad Hossein Heidari. 2022. {``Assessing the {Changes} of {Cortical} {Thickness} in {Alzheimer} {Disease} {With} {MRI} {Using} {Freesurfer} {Software}.''} \emph{Basic and Clinical Neuroscience} 13 (2): 185--92. \url{https://doi.org/10.32598/bcn.2021.1779.1}.
 
 \bibitem[\citeproctext]{ref-schonemann1966generalized}
-Schönemann, Peter H. 1966. {``A Generalized Solution of the Orthogonal
-Procrustes Problem.''} \emph{Psychometrika} 31 (1): 1--10.
+Schönemann, Peter H. 1966. {``A Generalized Solution of the Orthogonal Procrustes Problem.''} \emph{Psychometrika} 31 (1): 1--10.
 
 \bibitem[\citeproctext]{ref-strazar2016orthogonal}
-Stražar, Martin, and Marinka Žitnik. 2016. {``Orthogonal Matrix
-Factorization Enables Integrative Analysis of Multiple RNA Binding
-Protein Binding Sites.''} \emph{Bioinformatics} 32: i417--25.
+Stražar, Martin, and Marinka Žitnik. 2016. {``Orthogonal Matrix Factorization Enables Integrative Analysis of Multiple RNA Binding Protein Binding Sites.''} \emph{Bioinformatics} 32: i417--25.
 
 \bibitem[\citeproctext]{ref-witten2011}
-Witten, Daniela M., Robert Tibshirani, and Trevor Hastie. 2009. {``A
-Penalized Matrix Decomposition, with Applications to Sparse Principal
-Components and Canonical Correlation Analysis.''} \emph{Biostatistics}
-10 (3): 515--34. \url{https://doi.org/10.1093/biostatistics/kxp008}.
+Witten, Daniela M., Robert Tibshirani, and Trevor Hastie. 2009. {``A Penalized Matrix Decomposition, with Applications to Sparse Principal Components and Canonical Correlation Analysis.''} \emph{Biostatistics} 10 (3): 515--34. \url{https://doi.org/10.1093/biostatistics/kxp008}.
 
 \bibitem[\citeproctext]{ref-wu2023towards}
-Wu, Changhao. 2023. {``Towards Better Orthogonality Regularization with
-Disentangled Norm in Training Deep CNNs.''}
-\url{https://doi.org/10.48550/arXiv.2306.09939}.
+Wu, Changhao. 2023. {``Towards Better Orthogonality Regularization with Disentangled Norm in Training Deep CNNs.''} \url{https://doi.org/10.48550/arXiv.2306.09939}.
 
 \bibitem[\citeproctext]{ref-yang2021orthogonal}
-Yang, Mingming, and Songhua Xu. 2021. {``Orthogonal Nonnegative Matrix
-Factorization Using a Novel Deep Autoencoder Network.''}
-\emph{Knowledge-Based Systems} 227: 107236.
-\url{https://doi.org/10.1016/j.knosys.2021.107236}.
+Yang, Mingming, and Songhua Xu. 2021. {``Orthogonal Nonnegative Matrix Factorization Using a Novel Deep Autoencoder Network.''} \emph{Knowledge-Based Systems} 227: 107236. \url{https://doi.org/10.1016/j.knosys.2021.107236}.
 
 \bibitem[\citeproctext]{ref-yoo2009orthogonal}
-Yoo, Jingu, and Seungjin Choi. 2009. {``Orthogonal Nonnegative Matrix
-Factorization Using Linear Least Squares and Applications to Gene
-Expression Data.''} \emph{Neurocomputing} 72: 3670--74.
-
-\bibitem[\citeproctext]{ref-you2017large}
-You, Yang, Jing Li, Sashank J. Reddi, Jonathan Hseu, Sanjiv Kumar,
-Srinadh Bhojanapalli, Xiaodan Song, James Demmel, Kurt Keutzer, and
-Cho-Jui Hsieh. 2020. {``{Large Batch Optimization for Deep Learning:
-Training BERT in 76 minutes}.''} In \emph{International Conference on
-Learning Representations}.
-\url{https://openreview.net/forum?id=hKsZjzF4H5Z}.
+Yoo, Jingu, and Seungjin Choi. 2009. {``Orthogonal Nonnegative Matrix Factorization Using Linear Least Squares and Applications to Gene Expression Data.''} \emph{Neurocomputing} 72: 3670--74.
 
 \bibitem[\citeproctext]{ref-Zhang2016EfficientON}
-Zhang, Wei Emma, Mingkui Tan, Quan Z. Sheng, Lina Yao, and Qinfeng Shi.
-2016. {``Efficient Orthogonal Non-Negative Matrix Factorization over
-Stiefel Manifold.''} In \emph{Proceedings of the 25th ACM International
-on Conference on Information and Knowledge Management}, 1743--52. {ACM}.
-\url{https://doi.org/10.1145/2983323.2983761}.
+Zhang, Wei Emma, Mingkui Tan, Quan Z. Sheng, Lina Yao, and Qinfeng Shi. 2016. {``Efficient Orthogonal Non-Negative Matrix Factorization over Stiefel Manifold.''} In \emph{Proceedings of the 25th ACM International on Conference on Information and Knowledge Management}, 1743--52. {ACM}. \url{https://doi.org/10.1145/2983323.2983761}.
 
 \bibitem[\citeproctext]{ref-zou2006sparse}
-Zou, Hui, Trevor Hastie, and Robert Tibshirani. 2006. {``Sparse
-Principal Component Analysis.''} \emph{Journal of Computational and
-Graphical Statistics} 15 (2): 265--86.
-\url{https://doi.org/10.1198/106186006X113430}.
+Zou, Hui, Trevor Hastie, and Robert Tibshirani. 2006. {``Sparse Principal Component Analysis.''} \emph{Journal of Computational and Graphical Statistics} 15 (2): 265--86. \url{https://doi.org/10.1198/106186006X113430}.
 
 \end{CSLReferences}
 
