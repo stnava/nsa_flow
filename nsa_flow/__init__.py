@@ -34,12 +34,12 @@ from .project import project_nonneg, project_scaled_stiefel, polar_factor
 from .solve import nsa_flow, NSAResult
 from .reconstruct import (GramOperator, nsa_flow_data, reconstruction_fidelity,
                           grad_reconstruction_fidelity, relax_into_nonneg)
-from .signed import nsa_flow_signed
+from .signed import consolidate_supports, nsa_flow_signed, part_sparsity
 from .subspace import (SubspaceAnchor, negative_mass, subspace_fidelity,
                        grad_subspace_fidelity)
 from .layers import NSAFlowLinear, NSAFlowConv2d, NSAFlowLayer
 
-__version__ = "2.5.0"
+__version__ = "2.7.0"
 
 __all__ = [
     # energy
@@ -55,6 +55,8 @@ __all__ = [
     "nsa_flow", "NSAResult",
     "nsa_flow_data", "reconstruction_fidelity", "grad_reconstruction_fidelity",
     "relax_into_nonneg", "GramOperator",
+    # signed lifting: V = V+ - V-, both lobes sparse
+    "consolidate_supports", "part_sparsity",
     # sign-blind fidelity, for signed targets
     "SubspaceAnchor", "negative_mass", "subspace_fidelity",
     "grad_subspace_fidelity",

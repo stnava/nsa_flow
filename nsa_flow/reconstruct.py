@@ -187,6 +187,8 @@ def relax_into_nonneg(S, c, k, w, mus=None, max_iter=600, tol=1e-10, sigma=1e-4,
     ops = _as_ops(S)
     inv_k = 1.0 / (1.0 - 1.0 / k) if k > 1 else 0.0
     if mus is None:
+        # Continuation in mu, which is NOT the `continuation` argument of
+        # nsa_flow (that one steps in w and is only a diagnostic).
         # Nine stages, and the resolution of this path is load-bearing: on ADNI a
         # three-stage path yields basis reproducibility 0.708 at 150 iterations
         # and 0.725 at 3000, while this one yields 0.975.  Refining the path is

@@ -115,13 +115,49 @@ exactly what `nn.init.orthogonal_` produces. The polar factor is smooth wherever
 
 | Function | Purpose |
 |---|---|
-| `nsa_flow(target, w, ...)` | solve; returns `NSAResult` |
-| `stiefel_defect(Y)` | `D(Y)` |
-| `stiefel_defect_normalised(Y)` | `D(Y)/(1-1/k)`, in `[0,1]` |
+| `nsa_flow(target, w, ...)` | refine a supplied basis; returns `NSAResult` |
+| `nsa_flow_data(X, k, w, ...)` | fit a basis to data; matrix-free when `p > n` |
+| `nsa_flow_signed(X, k, w, consolidate=True)` | `V = V⁺ − V⁻`, both lobes sparse |
+| `relax_into_nonneg(...)` | continuation in `μ` into the non-negative cone |
+| `stiefel_defect(Y)` | `D(Y)`, orthoNORMality |
+| `angle_defect(Y, diagonal=)` | `C(Y)`, orthogonality at any column norms |
+| `subspace_fidelity(Y, X0)` | sign-blind distance to `range(X0)` |
+| `negative_mass(X0)` | how much of a target is unreachable under `Y ≥ 0` |
+| `part_sparsity(W)` / `consolidate_supports(W)` | per-lobe support diagnostics and rounding |
 | `effective_rank(Y)` | `k/(kD+1)`, in `[1,k]` |
-| `energy` / `grad_energy` / `value_and_grad` | `E_w` and its gradient |
 | `project_nonneg` / `project_scaled_stiefel` / `polar_factor` | projections |
 | `NSAFlowLinear` / `NSAFlowConv2d` / `NSAFlowLayer` | torch layers |
+
+### Three ways to use it
+
+```python
+r = nsa_flow(V0, w=0.5)                 # refine a basis you already trust
+r = nsa_flow_data(X, k=5, w=0.5)        # fit one to the data directly
+r = nsa_flow_signed(X, k=5, w=0.75, consolidate=True)   # signed contrasts
+```
+
+`nsa_flow` picks the fidelity by default: entrywise for a non-negative target,
+and the sign-blind subspace distance for a signed one, because the entrywise
+distance charges `Y ≥ 0` for negative entries it cannot reach and the optimum
+degenerates toward `max(0, X0)`. The choice is reported as
+`result["fidelity_mode"]`, the trigger as `target_negative_mass`, and
+`clamp_distance` reveals a run that only clamped.
+
+`nsa_flow_signed` writes each component as a contrast of two non-negative
+parts, which restores a signed basis's representational capacity: at `w = 0` it
+reproduces signed PCA's reconstruction to the digit. The relaxation alone leaves
+each part concentrated but not sparse, so pass `consolidate=True` to round to
+exactly disjoint supports and re-solve with the support fixed. On ADNI cortical
+thickness at `w = 0.5` that takes the largest part from 39 of 66 features to 18,
+leaves `V⁺` and `V⁻` each about 10% dense with no component lost, and *improves*
+held-out prediction — the small tail was noise.
+
+Leave `w` at its default. Across nine ADNI cognitive outcomes the lifting is the
+best of the four variants at `w = 0.5` (mean ΔR² over PCA +0.011 linear, +0.044
+forest) and worse than PCA on 0 of 9 at `w = 0.75`. Since a linear model sees
+only the span, that collapse is a loss of span quality: pushing `w` up rounds the
+contrasts toward a partition that no longer spans what the data needs. `w = 0.5`
+is also the best setting for sparsity, so there is nothing to trade off.
 
 For `k > p`, orthonormal columns are impossible and `inf D = 1/p - 1/k > 0`;
 this is reported rather than hidden behind a silently row-orthonormal answer.

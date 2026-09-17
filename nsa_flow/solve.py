@@ -159,7 +159,16 @@ def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
         ``w_start`` to ``w``, warm-starting each from the last, and (with
         ``keep_trace``) record the whole path.  This is a *diagnostic*: across
         every problem family tested, random restarts and cold starts reach the
-        same optimum for ``w < 1``, so continuation is not needed to find it.
+        same optimum for ``w < 1``, so continuation in ``w`` is not needed to
+        find it.
+
+        Not to be confused with the continuation in ``mu`` performed by
+        ``relax_into_nonneg``, which follows the path from a signed basis into
+        the non-negative cone.  That one *is* load-bearing: the stationary point
+        reached depends on how finely it is resolved, and a three-stage path
+        gives a materially worse answer than the nine-stage default however many
+        iterations each stage is given.  The two are independent; this argument
+        does nothing for the other.
     fidelity : {"auto", "anchor", "subspace"}
         Which notion of "close to ``target``" to use.
 

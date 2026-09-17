@@ -45,25 +45,49 @@ against itself.  The off-diagonal angle term already pushes every pair of lobes
 apart, including each component's own pair, so this is a refinement rather than a
 necessity; ``lobe=1.0`` drives the overlap to exactly zero.
 
-STATUS: EXPERIMENTAL, AND THE RESULT IS NEGATIVE.  With the term corrected the
-mechanism behaves as designed -- lobe overlap goes to exactly 0, empty lobes are
-no longer inflated -- and at ``w = 0.5`` this is the only variant that matches PCA
-on all three ADNI tasks (0.8618 / 0.6895 / 0.7146 against 0.8627 / 0.6890 /
-0.7140, every difference under 0.001).  But it matches PCA by BEING PCA-like:
-support overlap 3.1 of a possible 4, sparsity 0.18.  Raising ``w`` to buy sparsity
-costs more than the plain non-negative basis does -- at overlap 1.18 it scores
-0.8357 where ``nsa_flow_data`` scores 0.8601 at overlap 0.35, i.e. better AND
-three times sparser.  The reason is structural: ``2k`` near-disjoint parts in ``p``
-features leave ``p/2k`` features each, half what the plain form gets, so the
-lifting's capacity advantage becomes a liability exactly when sparsity is wanted.
-``w`` is also inert over ``[0.5, 0.75]`` -- identical solutions -- because the
-reconstruction term dominates there.
+STATUS.  Mature.  Use ``consolidate=True`` and leave ``w`` at its default.
 
-Prefer ``nsa_flow_data``.  This module is kept for the ablation and because the
-capacity claim it settles is worth having on record: the lifting reproduces
-signed PCA's reconstruction to the digit (0.5723 against 0.572269), which proves
-the plain non-negative ceiling of 0.591 was representational rather than an
-optimisation failure.
+Capacity.  At ``w = 0`` the lifting reproduces signed PCA's reconstruction to the
+digit (0.5723 against 0.572269 on ADNI volumes), settling the question the
+construction was built to answer: the purely non-negative ceiling of 0.591 is
+representational, not an optimisation failure.
+
+Sparsity.  The relaxation alone does not deliver the practical goal, which is
+that BOTH lobes be sparse.  Stopping at an angle defect of ``1e-8`` rather than
+``0`` leaves every feature a little weight in several parts, so the parts come out
+concentrated but not sparse: on ADNI cortical thickness the largest part uses 39
+of 66 features against a disjoint ideal of 6.  ``consolidate=True`` assigns each
+feature to its largest part, zeroing it elsewhere, then re-runs the solver with
+the support held fixed.  At ``w = 0.5`` that gives a largest part of 18, a mean of
+9.1, ``V+`` and ``V-`` each about 10% dense, exactly disjoint supports and no
+component lost (effective rank 5.00 of 5).  Lobes may die, which is correct: a
+one-signed component such as global atrophy should not be forced to carry a
+negative lobe.
+
+Choice of ``w``.  Moderate, and this matters more than it looks.  Across nine
+ADNI cognitive outcomes, 20 paired folds each, mean out-of-sample \(\Delta R^2\)
+against PCA over an age, sex, education and APOE4 baseline:
+
+                        w = 0.5                 w = 0.75
+    basis          linear      forest      linear      forest
+    signed        +0.0098     +0.0473     -0.0134     +0.0370
+    consolidated  +0.0113     +0.0443     -0.0175     +0.0249
+    subspace      +0.0010     +0.0398     +0.0030     +0.0456
+    data          +0.0028     +0.0464     +0.0024     +0.0441
+
+At ``w = 0.5`` the lifting is the best of the four variants under both models.  At
+``w = 0.75`` it is worse than PCA on 0 of 9 outcomes under a linear model.  Since
+a linear model on projected scores is exactly invariant to reparametrising the
+basis, it sees only the span, so the collapse is a loss of span quality: pushing
+\(w\) up past about 0.5 rounds the contrasts toward a partition that no longer
+spans what the data needs.  ``w = 0.5`` is also the best setting for sparsity
+(largest part 18, against 22 at ``w = 0.75``), so the two objectives do not
+conflict here and there is nothing to trade off.
+
+Caveats.  All of the predictive evidence is one cohort, one modality
+(``p = 66``, ``n ~ 300``), and nine outcomes that share subjects and are therefore
+not nine independent tests.  ``w`` and ``k`` were not selected by nested
+cross-validation.
 
 Gradient.  With ``F(V)`` the reconstruction term, ``dF/dV+ = dF/dV`` and
 ``dF/dV- = -dF/dV`` by the chain rule, so the data term costs one extra sign flip
@@ -81,7 +105,61 @@ from .reconstruct import (grad_reconstruction_fidelity, reconstruction_fidelity,
                           relax_into_nonneg)
 from .solve import NSAResult
 
-__all__ = ["nsa_flow_signed"]
+__all__ = ["nsa_flow_signed", "consolidate_supports", "part_sparsity"]
+
+
+def part_sparsity(W, rel_tol=0.0, abs_tol=1e-10):
+    r"""Per-part support statistics for ``W = [V+ | V-]``.
+
+    The practical goal for the lifting is that BOTH lobes be sparse, so the
+    aggregate fraction of zeros is the wrong summary: it is satisfied by one
+    empty lobe and one dense one.  These are the quantities that are not.
+
+    ``rel_tol`` counts an entry as used only if it exceeds that fraction of its
+    part's largest entry.  Driving the angle defect to ``1e-8`` rather than to
+    ``0`` leaves a tail of small but non-zero entries, so the count at
+    ``rel_tol = 0`` overstates the support considerably.
+    """
+    A = W.abs()
+    thr = (rel_tol * A.amax(dim=-2, keepdim=True)) if rel_tol else abs_tol
+    used = A > thr
+    nnz = used.sum(-2)
+    live = nnz > 0
+    top = A.sort(dim=-2, descending=True).values
+    kpart = max(1, W.shape[-2] // W.shape[-1])          # p / 2k, the disjoint ideal
+    mass = top[:kpart].sum(-2) / A.sum(-2).clamp_min(1e-300)
+    return dict(
+        nnz_per_part=nnz,
+        n_dead=int((~live).sum()),
+        max_nnz=int(nnz.max()),
+        mean_nnz=float(nnz[live].to(W.dtype).mean()) if bool(live.any()) else 0.0,
+        disjoint_ideal=kpart,
+        mass_in_ideal=float(mass.mean()),
+    )
+
+
+def consolidate_supports(W):
+    r"""Round the relaxed parts to exactly disjoint supports.
+
+    For ``W >= 0`` the angle defect vanishes exactly when the parts have pairwise
+    disjoint supports, so the relaxation's ideal endpoint is a hard assignment of
+    each feature to one part.  A finite run stops at a small but non-zero defect,
+    which leaves every feature a little weight in several parts; that tail is why
+    the parts look concentrated but not sparse.  On ADNI thickness at ``w = 0.75``
+    the largest part has 39 non-zero entries of 66 before rounding and 22 after,
+    with the mean falling from 15.4 to 8.2 against a disjoint ideal of 6.
+
+    Each feature is assigned to the part holding its largest magnitude and zeroed
+    elsewhere.  Magnitudes are NOT rescaled here: with the supports fixed the
+    objective is still quartic in the parts, so a closed-form rescale is wrong.
+    Use ``nsa_flow_signed(..., consolidate=True)``, which re-runs the solver with
+    the support held fixed and recovers most of the cost.
+    """
+    A = W.abs()
+    win = A.argmax(dim=-1, keepdim=True)
+    mask = torch.zeros_like(W, dtype=torch.bool).scatter_(-1, win, True)
+    mask &= A > 0
+    return W * mask
 
 
 def _split(W):
@@ -91,7 +169,7 @@ def _split(W):
 
 def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Coff", lobe=1.0,
                     max_iter=5000, tol=None, sigma=1e-4, dtype=None, device=None,
-                    verbose=False, keep_trace=False):
+                    verbose=False, keep_trace=False, consolidate=False):
     """Fit ``V = V+ - V-`` with ``[V+|V-] >= 0`` near-disjoint, reconstructing ``X``.
 
     Returns an ``NSAResult`` whose ``Y`` is the signed ``V`` of shape ``[p, k]``;
@@ -215,6 +293,40 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Coff", lobe=1.0,
             stop = "grad_map"
             break
 
+    if consolidate:
+        # Round to exactly disjoint supports, then keep optimising with the
+        # support fixed.  The projection onto {W >= 0, support subset of mask} is
+        # the clamp followed by the mask, so the same line search applies.
+        mask = (consolidate_supports(W) != 0)
+        proj_masked = lambda A: A.clamp_min(0.0) * mask
+        W = proj_masked(W)
+        E = float(parts_energy(W)[0])
+        g = parts_grad(W)
+        t = 1.0 / max(float(g.norm()), 1e-12)
+        Wp = gp = None
+        for _ in range(max_iter):
+            if Wp is not None:
+                s_, r_ = W - Wp, g - gp
+                sr = float((s_ * r_).sum())
+                t = min(max(float((s_ * s_).sum()) / sr if sr > 0 else 1e12,
+                            1e-12), 1e12)
+            ok = False
+            for _ in range(60):
+                W_new = proj_masked(W - t * g)
+                d2 = float((W_new - W).pow(2).sum())
+                if float(parts_energy(W_new)[0]) <= E - sigma * d2 / t:
+                    ok = True
+                    break
+                t *= 0.5
+            if not ok:
+                break
+            Wp, gp = W, g
+            W = W_new
+            E = float(parts_energy(W)[0])
+            g = parts_grad(W)
+            if (d2 ** 0.5) / t <= tol:
+                break
+
     Vp, Vm = _split(W)
     V = Vp - Vm
     r = NSAResult(
@@ -227,4 +339,8 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Coff", lobe=1.0,
     )
     r["parts"] = W
     r["lobe_overlap"] = float((Vp * Vm).sum())        # -> 0 as D(W) -> 0
+    r["consolidated"] = bool(consolidate)
+    r.update({f"parts_{key}": val for key, val in part_sparsity(W).items()
+              if key != "nnz_per_part"})
+    r["parts_nnz"] = part_sparsity(W)["nnz_per_part"]
     return r

@@ -380,6 +380,14 @@ def _basis(Xc, k, w, mode):
         return L / np.linalg.norm(L, axis=0, keepdims=True)
     if mode == "data":
         return nsa_flow_data(T, k=k, w=w).Y.numpy()
+    if mode in ("signed", "signed_consolidated"):
+        # V = V+ - V-, the lifting; .Y is the signed p x k basis
+        from nsa_flow import nsa_flow_signed
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return nsa_flow_signed(
+                T, k=k, w=w, init="split",
+                consolidate=(mode == "signed_consolidated")).Y.numpy()
     L = PCA(k, random_state=0).fit(Xc).components_.T
     L = L / np.linalg.norm(L, axis=0, keepdims=True)
     with warnings.catch_warnings():
