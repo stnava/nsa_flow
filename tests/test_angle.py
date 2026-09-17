@@ -114,3 +114,50 @@ def test_both_variants_have_correct_closed_form_gradients(diagonal):
     g = grad_angle_defect(V.detach(), diagonal=diagonal)
     assert (V.grad - g).abs().max() < 1e-12
     assert (g * V.detach()).sum(0).abs().max() < 1e-12     # tangential per column
+
+
+def test_rank_collapse_scores_exactly_one_over_k():
+    """The dead-column charge is 1/(k(k-1)) each, so k-1 dead columns give 1/k.
+
+    Pinned exactly rather than loosely, because the loose form of this assertion
+    would also pass for the pairwise-only defect plus any nonzero fudge.  This is
+    the value the paper quotes.
+    """
+    for k in (3, 5, 8):
+        Z = torch.zeros(20, k, dtype=F64)
+        Z[:, 0] = torch.rand(20, dtype=F64)
+        assert abs(float(angle_defect(Z)) - 1.0 / k) < 1e-9
+        # and the pairwise-only form rewards it, which is the whole point
+        assert float(angle_defect(Z, diagonal=False)) < 1e-30
+
+
+def test_documented_formula_reproduces_the_implementation():
+    """The two-sum equation in the module docstring and in the paper IS the code.
+
+    Written out independently so that simplifying ``angle_defect`` to the
+    pairwise sum -- the natural misreading of the defining equation -- fails here
+    instead of silently reintroducing the collapse-rewarding functional.
+    """
+    eps = 1e-12
+
+    def documented(V):
+        k = V.shape[-1]
+        nrm = V.norm(dim=-2)
+        U = V / nrm.clamp_min(eps)
+        G = U.T @ U
+        pairwise = (G - torch.diag(torch.diagonal(G))).pow(2).sum()
+        floored = ((1.0 - torch.clamp(nrm ** 2 / eps ** 2, max=1.0)) ** 2).sum()
+        return float((pairwise + floored) / (k * (k - 1)))
+
+    torch.manual_seed(0)
+    cases = [torch.rand(12, 5, dtype=F64),                      # generic
+             torch.rand(12, 5, dtype=F64) * 1e-6,               # small but > eps
+             torch.eye(6, dtype=F64)[:, :4] * 7.0]              # orthogonal
+    Z = torch.zeros(10, 4, dtype=F64)                           # one live column
+    Z[:, 0] = torch.arange(1.0, 11.0, dtype=F64)
+    cases.append(Z)
+    Z2 = torch.zeros(10, 5, dtype=F64)                          # two live columns
+    Z2[:, :2] = torch.rand(10, 2, dtype=F64)
+    cases.append(Z2)
+    for V in cases:
+        assert abs(float(angle_defect(V)) - documented(V)) < 1e-12

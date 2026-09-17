@@ -11,9 +11,22 @@ v1's off-diagonal-only defect is not the answer either: a matrix with one nonzer
 column and ``k-1`` zero columns scores exactly ``0``, because a zero column is
 orthogonal to everything.  Pure off-diagonal orthogonality rewards total collapse.
 
-Normalise per column instead and penalise angles:
+Normalise per column instead and penalise angles.  Write ``vhat_i = v_i / max(|v_i|,
+eps)`` and ``Ghat = Vhat' Vhat``; then
 
-    C(V) = (1 / (k(k-1))) sum_{i != j} cos^2(v_i, v_j),   cos_ij = <v_i,v_j> / (|v_i||v_j|)
+    C(V) = ||Ghat - I_k||_F^2 / (k(k-1))
+
+         = (1/(k(k-1))) [ sum_{i != j} cos^2(v_i, v_j)
+                          + sum_i (1 - min(1, |v_i|^2/eps^2))^2 ]
+
+with ``cos_ij = <v_i,v_j> / (|v_i||v_j|)``.  KEEP THE IDENTITY.  The second sum is
+exactly zero whenever every column has norm at least ``eps``, so the pairwise sum
+alone is the whole story in the generic case and looks like the definition -- but
+it is not, and an implementation written from the pairwise form alone reproduces
+precisely the v1 collapse failure described above.  Each floored column is charged
+``1/(k(k-1))``, so one live column and ``k-1`` dead ones scores ``(k-1)/(k(k-1)) =
+1/k``, exactly ``0.2`` at ``k = 5``, against ``0`` for the pairwise sum.  That is what
+``diagonal=True`` computes and it is the default for this reason.
 
 Properties (all asserted in ``tests/test_angle.py``):
 
@@ -49,12 +62,15 @@ def cosine_matrix(V, eps=_EPS):
 
 
 def angle_defect(V, eps=_EPS, diagonal=True):
-    r"""``C(V) = mean over ordered pairs i != j of cos^2(v_i, v_j)``, in ``[0, 1]``.
+    r"""``C(V) = ||Ghat - I_k||_F^2 / (k(k-1))``, in ``[0, 1]``.  See the module
+    docstring for the equivalent two-sum form; do not simplify this to the
+    pairwise sum over ``i != j``, which is a different and worse functional.
 
-    ``diagonal=True`` subtracts the identity, so a column whose norm has been
+    ``diagonal=True`` subtracts the full identity, so a column whose norm has been
     floored contributes ``cos_ii = 0`` against a target of 1 and is charged
     ``1/(k(k-1))``.  That doubles as a dead-column penalty and is why ``C`` scores
-    0.2 on a rank-collapsed matrix where the off-diagonal-only defect scores 0.
+    exactly ``1/k`` on a rank-collapsed matrix -- 0.2 at ``k = 5`` -- where the
+    pairwise-only defect scores 0.
 
     ``diagonal=False`` drops that term and measures *only* the pairwise angles.
     Use it when a dead column is a legitimate outcome and something else keeps

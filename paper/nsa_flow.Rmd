@@ -125,9 +125,42 @@ For the orthogonality loss, let \( G = Y^\top Y / \operatorname{tr}(Y^\top Y) \)
 \[
 D(Y) = \Big\| G - \tfrac{1}{k} I_k \Big\|_F^2,
 \qquad
-C(Y) = \frac{1}{k(k-1)} \sum_{i \neq j} \cos^2(y_i, y_j),
+C(Y) = \frac{1}{k(k-1)} \big\| \widehat{G} - I_k \big\|_F^2,
+\qquad
+\widehat{G}_{ij} = \langle \hat y_i, \hat y_j \rangle,
+\quad
+\hat y_i = \frac{y_i}{\max(\|y_i\|, \varepsilon)} .
 \]
-with \( \cos(y_i, y_j) = \langle y_i, y_j\rangle / (\|y_i\|\,\|y_j\|) \). \(D\) is scale invariant, lies in \([0, 1 - 1/k]\), and vanishes exactly on the scaled Stiefel manifold \( \mathbb{R}_{>0}\cdot St(p,k) \); we report \( \tilde D = D / (1 - 1/k) \) so that it lies in \([0,1]\) and equals \(1\) at rank one. It admits the spectral reading
+
+The identity in \(C\) is not cosmetic and dropping it breaks the functional, so we
+write \(C\) out. For any column with \( \|y_i\| \ge \varepsilon \) we have
+\( \widehat{G}_{ii} = 1 \) and \( \widehat{G}_{ij} = \cos(y_i, y_j) \), giving
+\[
+C(Y) = \frac{1}{k(k-1)} \Bigg[ \underbrace{\sum_{i \neq j} \cos^2(y_i, y_j)}_{\text{pairwise angles}}
+ + \underbrace{\sum_i \Big( 1 - \min\big(1, \|y_i\|^2/\varepsilon^2\big) \Big)^2}_{\text{floored columns}} \Bigg] ,
+\]
+where \( \cos(y_i, y_j) = \langle y_i, y_j\rangle / (\|y_i\|\,\|y_j\|) \). The second
+sum is *exactly* zero on any \(Y\) whose columns all have norm at least
+\(\varepsilon\), which is why the pairwise sum alone is the whole story in the
+generic case and why it is tempting to define \(C\) that way. It is not: each
+column whose norm has collapsed is charged \( 1/(k(k-1)) \), so a \(Y\) with one
+live column and \( k-1 \) dead ones scores
+\[
+C = \frac{k-1}{k(k-1)} = \frac{1}{k},
+\]
+\(0.2\) at \(k = 5\) (row four of Table \@ref(tab:props)), whereas the pairwise sum
+alone scores it \(0\) --- a dead column is orthogonal to everything. Defining \(C\)
+by the pairwise sum therefore reproduces the exact failure that rules out the
+off-diagonal defect (§\@ref(percolumn) and row four of Table \@ref(tab:props)),
+and any implementation written from that equation inherits it. In the code the
+two forms are `angle_defect(V, diagonal=True)` and `diagonal=False`. The variant
+without the identity, \( \|\widehat{G} - \operatorname{diag}(\widehat{G})\|_F^2 \),
+is used in exactly one place, the signed lifting (`nsa_flow.signed`), where an
+empty lobe is the correct answer for a one-signed component and the
+reconstruction term is what keeps the basis non-degenerate; everywhere in this
+paper \(C\) means the form with the identity.
+
+\(D\) is scale invariant, lies in \([0, 1 - 1/k]\), and vanishes exactly on the scaled Stiefel manifold \( \mathbb{R}_{>0}\cdot St(p,k) \); we report \( \tilde D = D / (1 - 1/k) \) so that it lies in \([0,1]\) and equals \(1\) at rank one. It admits the spectral reading
 \[
 D = k \operatorname{Var}(\lambda_i(G)) = \frac{1}{\mathrm{EffRank}(Y)} - \frac{1}{k},
 \]
@@ -188,7 +221,7 @@ is the norm of the projected-gradient mapping. It vanishes at a stationary point
 
 At \( w = 1 \) the fidelity term vanishes and \(D\) is scale invariant, so the scale of \(Y\) is unconstrained: every scaled Stiefel matrix is optimal and nothing selects among clusterings. The implementation warns at \(w = 1\) and reports the observed scale drift.
 
-### Why the penalty must be normalised per column, not globally
+### Why the penalty must be normalised per column, not globally {#percolumn}
 
 The unnormalised penalty \( \| Y^\top Y - I \|_F^2 \) is sensitive to the norm of \(Y\): scaling \( Y \to cY \) scales it by \(c^4\), which makes the optimisation poorly conditioned and the step size hard to choose. An earlier version of this work therefore used a globally normalised off-diagonal defect,
 \[
