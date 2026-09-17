@@ -35,9 +35,11 @@ from .solve import nsa_flow, NSAResult
 from .reconstruct import (GramOperator, nsa_flow_data, reconstruction_fidelity,
                           grad_reconstruction_fidelity, relax_into_nonneg)
 from .signed import nsa_flow_signed
+from .subspace import (SubspaceAnchor, negative_mass, subspace_fidelity,
+                       grad_subspace_fidelity)
 from .layers import NSAFlowLinear, NSAFlowConv2d, NSAFlowLayer
 
-__version__ = "2.4.0"
+__version__ = "2.5.0"
 
 __all__ = [
     # energy
@@ -53,6 +55,9 @@ __all__ = [
     "nsa_flow", "NSAResult",
     "nsa_flow_data", "reconstruction_fidelity", "grad_reconstruction_fidelity",
     "relax_into_nonneg", "GramOperator",
+    # sign-blind fidelity, for signed targets
+    "SubspaceAnchor", "negative_mass", "subspace_fidelity",
+    "grad_subspace_fidelity",
     # experimental; see nsa_flow/signed.py -- prefer nsa_flow_data
     "nsa_flow_signed",
     # layers

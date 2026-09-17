@@ -26,8 +26,11 @@ import warnings
 
 import torch
 
-from .energy import energy, stiefel_defect, effective_rank, value_and_grad
+from .energy import (energy, stiefel_defect, stiefel_defect_normalised,
+                     grad_stiefel_defect, effective_rank, value_and_grad)
 from .project import project_nonneg
+from .subspace import (SubspaceAnchor, negative_mass, subspace_fidelity,
+                       grad_subspace_fidelity)
 
 __all__ = ["nsa_flow", "NSAResult"]
 
@@ -55,6 +58,21 @@ class NSAResult(dict):
                 f"energy={self['energy']:.6e}, fidelity={self['fidelity']:.6e}, "
                 f"defect={self['defect']:.6e}, eff_rank={self['effective_rank']:.3f}, "
                 f"stop={self['stop_reason']}, |Gmap|={self['grad_map']:.2e})")
+
+
+def _subspace_vg(anchor, inv_k):
+    """value_and_grad with the sign-blind fidelity in place of the anchored one."""
+    def vg(Y, X0, w, denom, inv_k_, eye_k, align):
+        F = subspace_fidelity(Y, anchor)
+        k = Y.shape[-1]
+        Dn = (stiefel_defect_normalised(Y) if k > 1
+              else torch.zeros_like(F))
+        E = (1.0 - w) * F + w * Dn
+        g = (1.0 - w) * grad_subspace_fidelity(Y, anchor)
+        if k > 1 and w != 0.0:
+            g = g + (w * inv_k) * grad_stiefel_defect(Y)
+        return E, F, Dn, g
+    return vg
 
 
 def _solve_fixed_w(Y, X0, w, denom, nonneg, max_iter, tol, sigma, verbose, trace,
@@ -87,7 +105,7 @@ def _solve_fixed_w(Y, X0, w, denom, nonneg, max_iter, tol, sigma, verbose, trace
             Y_new = proj(Y - t * g)
             d_ = Y_new - Y
             dn2 = float((d_ * d_).sum())
-            E_new = float(energy(Y_new, X0, w=w, denom=denom, align=align))
+            E_new = float(vg(Y_new, X0, w, denom, inv_k, eye_k, align)[0])
             if E_new <= E - sigma * dn2 / t:
                 accepted = True
                 break
@@ -119,7 +137,8 @@ def _solve_fixed_w(Y, X0, w, denom, nonneg, max_iter, tol, sigma, verbose, trace
 
 def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
              continuation=0, w_start=0.0, sigma=1e-4, dtype=None, device=None,
-             verbose=False, keep_trace=False, compile=False, align=False):
+             verbose=False, keep_trace=False, compile=False, align=False,
+             fidelity="auto", neg_mass_tol=0.01):
     """Fit a non-negative, near-orthogonal ``Y`` close to ``target``.
 
     Parameters
@@ -141,6 +160,29 @@ def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
         ``keep_trace``) record the whole path.  This is a *diagnostic*: across
         every problem family tested, random restarts and cold starts reach the
         same optimum for ``w < 1``, so continuation is not needed to find it.
+    fidelity : {"auto", "anchor", "subspace"}
+        Which notion of "close to ``target``" to use.
+
+        ``"anchor"`` is ``||Y - X0||_F^2 / ||X0||_F^2``, the entrywise distance.  It
+        is the right choice when the target is itself non-negative.
+
+        ``"subspace"`` is ``||(I-P)Y||_F^2 / ||Y||_F^2`` for ``P`` the projector onto
+        ``range(X0)`` -- a *sign-blind* fidelity, invariant under
+        ``X0 -> X0 M`` for any invertible ``M``.  Use it when the target is signed.
+        The anchored distance charges the solution for negative entries a
+        non-negative ``Y`` cannot reach; those charges are constant, so they do not
+        steer the solution and the optimum degenerates toward ``max(0, X0)``.  For
+        PCA input the entrywise target is doubly inappropriate, since eigenvector
+        signs are an arbitrary convention.  Because both this term and the defect
+        are scale-free, the result is rescaled to ``||X0||_F`` to fix the gauge.
+
+        ``"auto"`` (default) chooses ``"subspace"`` when ``nonneg`` is set and the
+        target's negative mass ``||min(0,X0)||_F / ||X0||_F`` exceeds
+        ``neg_mass_tol``, and warns when it does so.  The decision is reported as
+        ``result["fidelity_mode"]``, and the measured negative mass as
+        ``result["target_negative_mass"]``, so it is never silent.
+    neg_mass_tol : float
+        Threshold on the target's negative mass for ``fidelity="auto"``.
     align : bool
         Anchor to ``X0``'s right-``O(k)`` orbit rather than to ``X0`` itself, by
         replacing ``||Y - X0||_F^2`` with ``min_{Q in O(k)} ||Y - X0 Q||_F^2``
@@ -198,6 +240,34 @@ def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
     if tol is None:
         tol = 1e-9 if X0.dtype == torch.float64 else 1e-6
 
+    if fidelity not in ("auto", "anchor", "subspace"):
+        raise ValueError("fidelity must be 'auto', 'anchor' or 'subspace'; "
+                         f"got {fidelity!r}")
+    neg_mass = float(negative_mass(X0))
+    requested = fidelity
+    if fidelity == "auto":
+        # Only switch when there is an orthogonality term to work with.  The
+        # subspace fidelity is scale-free and indifferent to rank, so on its own
+        # at w = 0 it is minimised by any non-negative matrix inside range(X0),
+        # including rank-one ones; what keeps the solution non-degenerate is the
+        # orthogonality term, whose diagonal charges a collapsed column.
+        fidelity = ("subspace"
+                    if (nonneg and neg_mass > neg_mass_tol and float(w) > 0.0)
+                    else "anchor")
+        if fidelity == "subspace":
+            warnings.warn(
+                f"target has negative mass {neg_mass:.3f} "
+                f"(||min(0,X0)||/||X0||) and nonneg=True, so {neg_mass:.0%} of "
+                "its magnitude is unreachable: the entrywise fidelity would be "
+                "dominated by constant, unimprovable terms and the optimum would "
+                "degenerate toward max(0, X0). Switching to the sign-blind "
+                "subspace fidelity, which anchors to range(X0) and is invariant "
+                "to the column signs and rotation of the target. Pass "
+                "fidelity='anchor' to force the entrywise distance, or use "
+                "nsa_flow_data if you have the data itself. The choice is "
+                "reported in result['fidelity_mode'].",
+                RuntimeWarning, stacklevel=2)
+
     p, k = X0.shape
     denom = X0.pow(2).sum()
     if float(denom) <= 0:
@@ -210,7 +280,24 @@ def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
 
     ws = ([float(w)] if continuation <= 0 else
           torch.linspace(float(w_start), float(w), continuation + 1).tolist())
-    vg = _fused(compile)
+    if fidelity == "subspace":
+        if float(w) == 0.0:
+            warnings.warn(
+                "fidelity='subspace' with w=0 is degenerate: the term is "
+                "scale-free and indifferent to rank, so any non-negative matrix "
+                "inside range(X0) is optimal, including rank-one ones. Use w > 0 "
+                "so the orthogonality term keeps the solution non-degenerate, or "
+                "fidelity='anchor'.", RuntimeWarning, stacklevel=2)
+        anchor = SubspaceAnchor(X0)
+        if anchor.rank_deficient:
+            warnings.warn(
+                "target is rank deficient, so the projector onto range(X0) is "
+                "not well determined; the subspace fidelity is regularised and "
+                "should be interpreted with care.", RuntimeWarning, stacklevel=2)
+        inv_k0 = 1.0 / (1.0 - 1.0 / k) if k > 1 else 0.0
+        vg = _subspace_vg(anchor, inv_k0)
+    else:
+        vg = _fused(compile)
     trace = [] if keep_trace else None
     t0 = time.time()
     total_iters, stop, gmap = 0, "max_iter", float("inf")
@@ -221,13 +308,26 @@ def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
                                               tol, sigma, verbose, trace, vg, align)
         total_iters += it
 
-    tot, f, dd = energy(Y, X0, w=float(w), denom=denom, return_parts=True,
-                        align=align)
+    if fidelity == "subspace":
+        # both terms are degree-0 homogeneous, so the scale is a free gauge;
+        # fix it at the target's scale rather than leaving it arbitrary
+        nY = float(Y.norm())
+        if nY > 0:
+            Y = Y * (float(X0.norm()) / nY)
+        tot, f, dd = vg(Y, X0, float(w), denom, None, None, False)[:3]
+        tot, f, dd = float(tot), float(f), float(dd)
+    else:
+        tot, f, dd = energy(Y, X0, w=float(w), denom=denom, return_parts=True,
+                            align=align)
+    clamp_ref = X0.clamp_min(0.0)
+    clamp_dist = float((Y - clamp_ref).norm() / clamp_ref.norm().clamp_min(1e-300))
     return NSAResult(
         Y=Y, target=X0, w=float(w), energy=float(tot), fidelity=float(f),
         defect=float(dd), raw_defect=float(stiefel_defect(Y)),
         effective_rank=float(effective_rank(Y)),
         scale_ratio=float(Y.norm() / X0.norm()), iters=total_iters, align=bool(align),
+        fidelity_mode=fidelity, fidelity_requested=requested,
+        target_negative_mass=neg_mass, clamp_distance=clamp_dist,
         converged=stop != "max_iter", stop_reason=stop, grad_map=float(gmap),
         seconds=time.time() - t0,
         w_schedule=ws, trace=trace, nonneg=bool(nonneg),
