@@ -39,10 +39,37 @@ library(ANTsR)          # retained for nsa_flow_flowchart and imaging helpers on
 ## document's original call signatures and routes them to the current code;
 ## see the shim header for what each v1 argument now maps to, and
 ## nsa_shim_ignored() for the v1-only arguments that no longer have a referent.
+##
+## LOAD ORDER MATTERS.  reticulate initialises PyTorch, which brings its own
+## OpenMP/BLAS runtime; loading caret or randomForest BEFORE it segfaults this
+## document at the first solver call.  Initialise Python first, then the R
+## modelling packages.
 source("nsa_shim.R")
 NSA_VERSION <- nsa_shim_init(normalizePath(file.path("..")))
-library(reticulate); library(tidyr)
+library(reticulate); library(tidyr); library(kableExtra)
 sup <- import("experiments.rmd_support")
+
+## Previously loaded from inside the complexity-table chunk, which is a poor
+## place for them: that chunk looks like it only draws a table, and removing it
+## broke the Golub analysis forty chunks later.
+library(caret)          # trainControl / train, used by the Golub analysis
+library(Rtsne)          # t-SNE embedding for the subtype figure
+library(randomForest)   # the classifier for the diagnosis analyses
+library(gt)             # the diagnosis stability table (tab_style, fmt_number)
+
+## One table style for the whole document.  booktabs rules rather than
+## full grids, no extra vertical space every five rows, numeric columns right
+## aligned and text left, and the float held where it is written.
+ktab <- function(x, caption, digits = 3, align = NULL, ...) {
+  if (is.null(align)) {
+    align <- vapply(x, function(col)
+      if (is.numeric(col)) "r" else "l", character(1))
+  }
+  knitr::kable(x, caption = caption, digits = digits, booktabs = TRUE,
+               linesep = "", align = align, ...) |>
+    kableExtra::kable_styling(latex_options = c("hold_position"),
+                              font_size = 9, position = "center")
+}
 py_to_r_df <- function(x) if (inherits(x, "data.frame")) as.data.frame(x) else as.data.frame(reticulate::py_to_r(x))
 ```
 
@@ -113,6 +140,15 @@ D = \underbrace{\sum_{i \neq j} G_{ij}^2}_{\text{decorrelation}}
 \]
 so \(D = 0\) requires mutual orthogonality and equal column norms, which is orthonormality. \(C\) requires orthogonality at any column norms. Use \(D\) when the components should carry equal weight and \(C\) when they should not: a disjoint non-negative basis whose columns differ in magnitude scores \(D = 0.14\) and \(C = 2\times 10^{-33}\) (Table \@ref(tab:props)). When the basis is fitted to data the two behave the same, because the reconstruction term already equalises the column norms.
 
+```{r props, results='asis'}
+ktab(py_to_r_df(sup$properties_table()) |>
+       dplyr::rename(`case` = case, `D (orthonormality)` = D,
+                     `off-diagonal only` = d_v1, `C (orthogonality)` = C),
+     digits = 4,
+     caption = "The three candidate functionals on the structures that separate them. Zero means the functional recognises the structure as what it is looking for. Rows two and three are what this method exists to produce and only the last two columns score them at zero; row four is rank collapse and only the off-diagonal defect rewards it.")
+```
+
+
 The Euclidean gradient of the \(\tilde D\) form is available in closed form,
 \[
 \nabla_Y E(Y) = (1-w)\,\frac{2 (Y - X_0)}{\|X_0\|_F^2}
@@ -170,41 +206,25 @@ described as measuring the cosines of the angles between columns. It does not. D
 
 ### Computational Complexity
 
-```{r complexitytable, echo=FALSE, tbl.width="100%"}
-# Load required library
-library(gt)
-library(dplyr)  # For data manipulation if needed
-
-# Load required packages
-library(caret)    # For createFolds (if needed later)
-library(Rtsne)    # For t-SNE visualization
-library(ggplot2)  # For plotting
-library(dplyr)    # For data manipulation
-
-# Create the data frame
-data <- tibble(
-  Method = c("Euclidean GD", "Full Polar Retraction", "**NSA-Flow (ours)**", "Cayley Transform"),
-  `Dominant Operation` = c("Gradient", "Gradient + SVD / polar", "Gradient + clamp (no factorisation)", "Linear solve (\\(p \\times p\\))"),
-  `Complexity ($p \\ge k$)` = c("\\( O(pk^2) \\)", "\\( O(pk^2) \\)", "\\( O(pk^2) \\)", "\\( O(p^3) \\) or \\( O(pk^2) \\) (w/ low rank)"),
-  Orthogonality = c("not enforced", "exact", "set by \\(w\\)", "exact"),
-  Notes = c("Does not enforce the constraints.", "A factorisation per step.", "\\(O(npk)\\) matrix-free when \\(p>n\\); certificate reported.", "Prohibitive for large \\(p\\).")
-)
-
-# Create the gt table
-gt_table <- data |>
-  gt( caption = "Computational Complexity of NSA-Flow and Related Methods") |>
-  fmt_markdown(columns = everything()) |> tab_options(
-    table.font.size = px(8)
-  )
-# For LaTeX math in PDF output (if using R Markdown to PDF), add this:
-# gt_table <- gt_table |>
-#   fmt_latex(columns = c(`Complexity ($p \\ge k$)`, `Dominant Operation`, Notes))  # Experimental; requires gt >= 0.10.0
-
-# Display the table
-gt_table
+```{r complexitytable, echo=FALSE}
+cx <- data.frame(
+  Method = c("Euclidean gradient descent", "Full polar retraction",
+             "NSA-Flow", "Cayley transform"),
+  `Dominant operation` = c("gradient",
+                           "gradient + SVD or polar factor",
+                           "gradient + clamp, no factorisation",
+                           "linear solve, $p \\times p$"),
+  `Cost per iteration` = c("$O(pk^2)$", "$O(pk^2)$",
+                           "$O(pk^2)$, or $O(npk)$ matrix-free",
+                           "$O(p^3)$"),
+  Orthogonality = c("not enforced", "exact", "set by $w$", "exact"),
+  check.names = FALSE)
+ktab(cx, caption = "Cost and orthogonality guarantee for NSA-Flow and related updates. The asymptotic cost of NSA-Flow matches a retraction method's, but the per-step work is a few matrix products rather than a factorisation.",
+     escape = FALSE, align = c("l", "l", "l", "l"))
 ```
 
-For tall-skinny matrices (\( p \gg k \)) each iteration costs one Gram product and two \([p,k]\times[k,k]\) products, i.e.\ \( O(pk^2) \), with no SVD, eigendecomposition or QR anywhere in the loop --- the asymptotic cost is the same as a retraction method's, but the constant is much smaller and the per-step work is a few matrix multiplications rather than a factorisation. When the basis is fitted directly to data with \( p > n \) the Gram matrix is never formed either: every quantity follows from \( XV \) and \( X^\top(XV) \), giving \( O(npk) \) per iteration and removing an allocation that is \(0.4\) GB at \( p = 7129 \) and \(3.2\) GB at \( p = 20000 \).  Practically speaking, as will be shown in the Results section, NSA-Flow provides an intuitive "knob" that allows users to impose orthogonality, non-negativity and sparseness via a consistent and intuitive framework.  Table 1 summarizes these comparisons.
+
+For tall-skinny matrices (\( p \gg k \)) each iteration costs one Gram product and two \([p,k]\times[k,k]\) products, i.e.\ \( O(pk^2) \), with no SVD, eigendecomposition or QR anywhere in the loop --- the asymptotic cost is the same as a retraction method's, but the constant is much smaller and the per-step work is a few matrix multiplications rather than a factorisation. When the basis is fitted directly to data with \( p > n \) the Gram matrix is never formed either: every quantity follows from \( XV \) and \( X^\top(XV) \), giving \( O(npk) \) per iteration and removing an allocation that is \(0.4\) GB at \( p = 7129 \) and \(3.2\) GB at \( p = 20000 \).  One parameter sets orthogonality, and with it sparseness, as the Results section shows.
 
 
 ```{r pollen, echo = FALSE, fig.cap = "Illustration of the NSA-Flow optimization as a function of $\\omega$.  The colored manifold is a conceptual representation of the Stiefel manifold, with the curves representing optimization paths for evolving $Y$.  When $\\omega$ is small the orthogonality term is weakly weighted and the iterate is free to deviate from orthonormality; when $\\omega$ is large the term dominates and the solution is drawn toward the manifold."}
@@ -327,7 +347,7 @@ The non-smooth regularization term arising from $R$ is handled in a proximal ste
     \]
     This subproblem simultaneously encourages fidelity to the gradient-updated iterate \( Z^{(t)} \), promotes sparsity through non-negativity, and enforces column orthogonality via the flow. This approach integrates the constraints more tightly into the optimization, providing a unified update that respects both the geometry and the regularization.
 
-The algorithm terminates when the relative change in energy, the norm of the gradient, and the change in the iterate all fall below a predefined tolerance \( \tau \). An adaptive learning rate scheduler is also employed, which reduces the step size \( \alpha \) if the objective function fails to improve for a set number of iterations (patience), thereby enhancing stability and preventing premature termination at plateaus. The final output is the set of sparse loadings \( Y \) that achieved the lowest energy during the optimization.  This is one example where NSA-Flow can be integrated as a proximal operator within a broader optimization framework to enforce orthogonality and non-negativity.  Other approaches (shown below) more directly use NSA-Flow as a standalone method for matrix approximation; for example, by directly approximating the loading matrix of PCA with the bases derived from NSA-Flow.  Both SPCA and the latter approach are demonstrated in the Results section.  The implementation is available in the `nsa_flow_pca` function within the ANTsR package.  We implement a closely related approach for NSA-flow constrained factor analysis in the `nsa_flow_pca_fa` function which is illustrated in an accompanying documentation article (`ANTsR`).
+The algorithm terminates when the projected-gradient mapping norm falls below the tolerance, and reports which stopping rule fired. There is no learning-rate schedule: the Barzilai--Borwein step is scale-free and the Armijo line search halves it until the energy decreases, so the energy is monotone without a patience parameter. The final output is the set of sparse loadings \( Y \) that achieved the lowest energy during the optimization.  This is one example where NSA-Flow can be integrated as a proximal operator within a broader optimization framework to enforce orthogonality and non-negativity.  Other approaches (shown below) more directly use NSA-Flow as a standalone method for matrix approximation; for example, by directly approximating the loading matrix of PCA with the bases derived from NSA-Flow.  Both SPCA and the latter approach are demonstrated in the Results section.  The solver used here is the Python package; `ANTsR`'s `nsa_flow_pca` and `nsa_flow_pca_fa` wrap the superseded version and are not what produced these results.
 
 
 # Results
@@ -390,7 +410,8 @@ omega_default = 0.5
 ## aggression, warm-up, separate fidelity/orthogonality type switches -- have no
 ## counterpart in v2 and are gone.  What remains is w, the iteration cap and the
 ## tolerance.
-nsa_default <- function(Y0, w = omega_default, X0 = NULL, verbose = FALSE) {
+nsa_default <- function(Y0, w = omega_default, X0 = NULL, verbose = FALSE,
+                        fidelity = "auto") {
   nsa_flow_autograd(
     Y0 = Y0,
     X0 = X0,
@@ -398,7 +419,8 @@ nsa_default <- function(Y0, w = omega_default, X0 = NULL, verbose = FALSE) {
     max_iter = 2000,
     tol = 1e-9,
     apply_nonneg = TRUE,
-    verbose = verbose
+    verbose = verbose,
+    fidelity = fidelity
   )
 }
 #
@@ -464,9 +486,9 @@ By adjusting $\omega$, sparsity is indirectly controlled through this global ort
 
 - **Increasing \( w \) (e.g., 0.5–0.75)**: Strengthens orthogonality enforcement, promoting decorrelated columns. This induces sparsity by concentrating non-zero entries into disjoint patterns, reducing overlap and yielding moderate sparsity.
 
-- **High \( w \) (e.g., 0.95)**: Dominates with orthogonality, forcing near-orthogonal columns that are highly sparse (e.g., $\approx$0.9) and crisp, but potentially over-constrained, risking loss of fidelity to the original data.
+- **High \( w \) (e.g., 0.95)**: Dominates with orthogonality, forcing near-orthogonal columns that are highly sparse (\( \approx 0.9 \)) and crisp, but potentially over-constrained, risking loss of fidelity to the original data.
 
-Matrix-level orthogonality produces sparsity without per-entry penalties. In synthetic experiments, heatmaps of the optimised matrices transition from diffuse (low \( w \)) to sharp and disjoint (high \( w \)) (Figure \@ref(fig:stiefelsweepfull)). Convergence plots further show stable optimization across \( w \) values, confirming the parameter's role in balancing these objectives.  Note that the exact sparsity levels depend on data characteristics and initialization, but the trend of increasing sparsity with higher \( w \) is consistent regardless of whether data is thin, wide, or square.
+Matrix-level orthogonality produces sparsity without per-entry penalties. In synthetic experiments, heatmaps of the optimised matrices transition from diffuse (low \( w \)) to sharp and disjoint (high \( w \)) (Figure \@ref(fig:stiefelsweepfull)). The convergence traces in Figure \@ref(fig:convergetraces) show stable optimisation across \( w \) values, confirming the parameter's role in balancing these objectives.  Note that the exact sparsity levels depend on data characteristics and initialization, but the trend of increasing sparsity with higher \( w \) is consistent regardless of whether data is thin, wide, or square.
 
 ```{r synthsetup,fig.height=8,fig.width=5.3, echo=FALSE, message=FALSE}
 generate_synth_data <- function(p=40, k=3, corrval=0.3,noise=0.5, sparse_prob=0.2, include_neg=FALSE) {
@@ -525,12 +547,17 @@ for(i in seq_along(mats)) {
   swplots[[i+1]] <- pheatmap(mats[[i]][rows_show,], cluster_rows = FALSE, cluster_cols = FALSE, color = cols, main = mytit[i], fontsize=5, silent = TRUE, breaks = seq(rng[1], rng[2], length.out = 121))
 }
 grid.arrange(grobs = lapply(swplots, function(x) x$gtable), ncol = 3)
-if ( length(convergeplots) >=4  ) {
-  grid.arrange(grobs=convergeplots[c(1,2,3,5)], top='Convergence Plots for Different w Values', ncol=2 )
+```
+
+```{r convergetraces, fig.width=6.5, fig.height=4.5, echo=FALSE, message=FALSE, fig.cap="Energy terms against iteration at four values of the orthogonality weight. Fidelity and the orthogonality defect are shown on a log scale; the solver is monotone in the total energy by construction, so both curves are traced from the same accepted steps."}
+## Emitted as its own chunk rather than a second plot in the sweep chunk: two
+## figures from one chunk share a caption and receive no cross-reference label,
+## which is why a reference to them rendered as "??".
+if (length(convergeplots) >= 4) {
+  grid.arrange(grobs = convergeplots[c(1, 2, 3, 5)], ncol = 2)
+} else {
+  message("convergence traces unavailable: ", length(convergeplots), " plots")
 }
-#########
-# darkk #
-####################
 ```
 
 
@@ -1176,7 +1203,7 @@ In this application, the brain's cortical thickness data is analgous to a comple
 
 Let \( X \in \mathbb{R}^{N \times p} \) denote the centered cortical thickness matrix, where \( N \) is the number of subjects and \( p = 76 \) is the number of regions (bilateral cortical and subcortical areas from ADNI). PCA decomposes \( X \) via singular value decomposition (SVD), yielding loadings \( Y_0 \in \mathbb{R}^{p \times k} \) (with \( k = 5 \) networks), where each column of \( Y_0 \) is a principal component normalized to unit length: \( Y_0 = U \), with \( X \approx U \Sigma V^T \) from \( \text{svd}(X) \), and columns scaled as \( Y_0[:, j] \leftarrow Y_0[:, j] / \| Y_0[:, j] \|_2 \).
 
-NSA-Flow is then applied in its *estimation* form: rather than refining \( Y_0 \), it fits a non-negative basis \( V \in \mathbb{R}^{p\times k} \) to the centred data directly, minimising \( (1-w)\lVert X - XVV^\top\rVert_F^2/\lVert X\rVert_F^2 + w\,C(V) \) subject to \( V \ge 0 \), with scores given by projection. We use \( Y_0 \) only as the PCA comparator. This matters: anchoring a non-negative solution to a *signed* target such as \( Y_0 \) pulls the iterate toward values it cannot reach, so the constrained optimum is close to a clamp of the signed basis, which costs a factor \(1.36\) in reconstruction error on these data against \(1.03\) for a basis fitted to them.  We sampled $q$ random \( w \) values uniformly from [0.01, 0.99] to sample orthogonality configurations. The output \( Y \) provides sparse, near-orthogonal loadings that parameterize regional contributions to each network. Figure \@ref(fig:nsaloadings) shows the NSA-Flow fit to the PCA loadings for a representative \( w = 0.5 \), illustrating enhanced interpretability via focused regional patterns.
+NSA-Flow refines \( Y_0 \) into a non-negative basis \( Y \in \mathbb{R}^{p\times k}_{\ge 0} \) whose columns are near-disjoint. The fidelity is the sign-blind subspace distance of Section 2: PCA fixes its subspace by the eigenvalue gaps but its column signs only by convention, and the entrywise distance \( \lVert Y - Y_0 \rVert_F^2 \) would charge a non-negative \( Y \) for negative entries of \( Y_0 \) that it cannot reach. Those charges are constant, so they do not steer the solution and the optimum collapses toward \( \max(0, Y_0) \); on these data that costs \(0.028\) AUC on the strongest task. Anchoring to \( \operatorname{range}(Y_0) \) instead keeps the refinement interpretation while removing the unreachable target.  We sampled $q$ random \( w \) values uniformly from [0.01, 0.99] to sample orthogonality configurations. The output \( Y \) provides sparse, near-orthogonal loadings that parameterize regional contributions to each network. Figure \@ref(fig:nsaloadings) shows the NSA-Flow fit to the PCA loadings for a representative \( w = 0.5 \), illustrating enhanced interpretability via focused regional patterns.
 
 We projected the data onto both sets of loadings: \( \text{proj}_{\text{PCA}} = X Y_0 \) and \( \text{proj}_{\text{NSA}} = X Y \), yielding subject-specific network scores (\( N \times k \)). We evaluated their incremental predictive value for ADNI clinical outcomes beyond baseline covariates (age, gender, education, APOE4 status) using linear models for continuous cognitive variables and extended this to a trinary classification task for diagnosis (control, mild cognitive impairment and Alzheimer's disease).
 
@@ -1287,13 +1314,12 @@ results_df <- data.frame(
 for (ww in wws) {
 #    cat(paste0("Running NSA-Flow with optimizer = ", oo, " and w = ", ww, "\n"))
     
-    ## Fit the non-negative basis to the data rather than anchoring it to the
-    ## signed PCA loadings.  Anchoring Y >= 0 to a signed target pulls the
-    ## iterate toward values it cannot reach, so the constrained optimum is
-    ## essentially a clamp of the signed basis -- which costs a factor 1.36 in
-    ## reconstruction error here, against 1.03 for a fitted basis (Table
-    ## \@ref(tab:absTrap)).
-    M_nsa <- nsa_flow_data( X_centered, k = ncol(Y0_pca), w = ww )
+    ## Refine the PCA loadings, which is what this section is about.  The
+    ## fidelity is the sign-blind subspace distance: the entrywise distance
+    ## would charge Y >= 0 for the negative entries of the signed PCA basis,
+    ## which it cannot reach, and the optimum would collapse toward
+    ## max(0, Y0_pca).
+    M_nsa <- nsa_default( Y0_pca, w = ww, fidelity = "subspace" )
 
     if ( any( apply( M_nsa$Y, FUN=var, MARGIN=2) == 0 ) ) {
         cat("Warning: zero-variance component detected, skipping this run.\n")
@@ -1583,7 +1609,7 @@ mywws = seq(0.0, 0.5, by = 0.05 )
 for ( run in 1:2 )
 for (ww in mywws ) {
 # Run NSA (assumes nsa_default is a custom function)
-  M_nsa <- nsa_flow_data( X_centered, k = ncol(Y0_pca), w = ww )
+  M_nsa <- nsa_default( Y0_pca, w = ww, fidelity = "subspace" )
   Ymat <- M_nsa$Y
   proj_nsa <- as.matrix(X) %*% Ymat
   proj_pca <- as.matrix(X) %*% Y0_pca
@@ -1799,8 +1825,13 @@ p1 <- ggplot(auc_long, aes(x = w, y = auc, color = method, linetype = experiment
   geom_point(size = 2.5, shape = 21, fill = "white", stroke = 1.2) +
   scale_color_manual(values = c("NSA-PCA" = "#D55E00", "PCA" = "#0072B2")) +
   scale_linetype_manual(values = c("Run 1" = "solid", "Run 2" = "dashed")) +
-  geom_hline(yintercept = mean(data$random_accuracy), linetype = "dotted", color = "gray40", size = 1) +
-  annotate("text", x = 0.45, y = mean(data$random_accuracy) + 0.005, 
+  ## `data` here used to resolve to the complexity table's tibble, assigned
+  ## 1300 lines earlier and carrying no random_accuracy column, so this was
+  ## mean(NULL) = NaN and the chance line was silently dropped from the figure.
+  geom_hline(yintercept = mean(log_results_df$random_accuracy, na.rm = TRUE),
+             linetype = "dotted", color = "gray40", linewidth = 0.8) +
+  annotate("text", x = 0.45,
+           y = mean(log_results_df$random_accuracy, na.rm = TRUE) + 0.005, 
            label = "Random Chance (~0.406)", color = "gray40", size = 3.5, hjust = 0) +
   labs(
     title = "Cross-Validated AUC for Diagnosis Prediction",
@@ -1877,7 +1908,7 @@ M_nsa <- nsa_default(
       Y0 = Y0_pca,
       w = ww
     )
-} else M_nsa <- nsa_flow_data( X_centered, k = ncol(Y0_pca), w = ww )
+} else M_nsa <- nsa_default( Y0_pca, w = ww, fidelity = "subspace" )
 Ymat <- M_nsa$Y
 proj_nsa <- as.matrix(X) %*% as.matrix(Ymat)
 proj_pca <- as.matrix(X) %*% Y0_pca
@@ -1960,7 +1991,9 @@ combined_df <- rbind(pairwise_df, overall_rows)
 # Create gt table
 combined_gt <- gt(combined_df) |>
   tab_header(
-    title = "Table 3: Classification Results: NSA vs PCA",
+    ## No hardcoded number: this table used \caption* (unnumbered) while
+    ## calling itself "Table 3", which collided with the real Table 3.
+    title = "Classification results, NSA against PCA",
     subtitle = "Pairwise and Overall Multi-Class Summary Across 4 Folds"
   ) |>
   tab_row_group(
@@ -2220,6 +2253,13 @@ difference \( \log p_{\text{NSA}} - \log p_{\text{PCA}} \), so negative favours
 NSA-Flow. PCA and NSA-Flow each add exactly \( k \) columns, so the comparison
 between them does not depend on model size.
 
+The analysis sample is smaller than the imaging sample. Of the subjects with
+complete thickness measurements, APOE4 is missing for a substantial minority, so
+the covariate-adjusted models are fitted on complete cases only and the usable
+\( n \) is roughly four fifths of the imaging \( n \); the tables below report
+it per outcome. This is a complete-case analysis on a covariate, which is a
+limitation rather than a choice, and it applies identically to PCA and NSA-Flow.
+
 ```{r coginsample, results='asis'}
 ## The full sweep (3 fidelity modes x 4 values of w) is saved to
 ## paper/results/e16_cognitive_insample.csv and reaches the same conclusion in
@@ -2237,11 +2277,16 @@ summ <- tab |>
   dplyr::summarise(`outcomes favouring NSA` = sprintf("%d/%d", sum(delta < 0), dplyr::n()),
                    `mean log p difference` = mean(delta),
                    `largest` = min(delta), .groups = "drop")
-knitr::kable(summ, digits = 2,
+ktab(summ, digits = 2,
   caption = "Incremental explanatory power for nine cognitive scores, by fidelity mode. Negative differences favour NSA-Flow.")
-knitr::kable(tidyr::pivot_wider(tab, names_from = mode, values_from = delta),
+```
+
+```{r coginsampleper, results='asis'}
+ktab(tidyr::pivot_wider(tab, names_from = mode, values_from = delta) |>
+       dplyr::rename(outcome = cog) |>
+       dplyr::arrange(subspace),
   digits = 2,
-  caption = "Per-outcome log p difference (NSA minus PCA). Negative favours NSA-Flow.")
+  caption = "Per-outcome log p difference (NSA minus PCA), ordered by the subspace column. Negative favours NSA-Flow.")
 ```
 
 Results are consistent across the three ways of anchoring the basis. The
@@ -2263,15 +2308,18 @@ cannot answer this question.
 ```{r cogcv, results='asis'}
 cog_cv <- py_to_r_df(sup$cognitive_cv(model = "rf", ws = list(0.5),
                                       modes = list("subspace", "data"), n_repeats = 2L))
-knitr::kable(
-  cog_cv |> dplyr::select(cog, mode, r2_covariates, r2_pca, r2_nsa,
-                          dR2_nsa, nsa_minus_pca) |>
+ktab(
+  cog_cv |> dplyr::select(cog, mode, n, r2_covariates, r2_pca, r2_nsa,
+                          nsa_minus_pca) |>
     dplyr::rename(outcome = cog, covariates = r2_covariates, PCA = r2_pca,
-                  NSA = r2_nsa, `gain over covariates` = dR2_nsa,
-                  `NSA minus PCA` = nsa_minus_pca),
+                  NSA = r2_nsa, `NSA - PCA` = nsa_minus_pca) |>
+    dplyr::arrange(mode, dplyr::desc(`NSA - PCA`)),
   digits = 3,
-  caption = "Out-of-sample R-squared for nine cognitive scores. The covariate column is age, sex, education and APOE4 alone; the PCA and NSA columns add five network scores to it. A positive difference in the last column favours NSA-Flow.")
-knitr::kable(
+  caption = "Out-of-sample R-squared for nine cognitive scores, ordered within mode by the advantage over PCA. The covariate column is age, sex, education and APOE4 alone; the PCA and NSA columns add five network scores to it. A positive difference in the last column favours NSA-Flow.")
+```
+
+```{r cogcvsummary, results='asis'}
+ktab(
   cog_cv |> dplyr::group_by(mode) |>
     dplyr::summarise(`outcomes favouring NSA` = sprintf("%d/%d", sum(nsa_minus_pca > 0), dplyr::n()),
                      `gain NSA` = mean(dR2_nsa), `gain PCA` = mean(dR2_pca),
@@ -2365,7 +2413,7 @@ On the Golub leukemia data, NSA-Flow as the proximal operator inside sparse PCA 
 Despite its strengths, NSA-Flow faces challenges:
 
 - **Scalability**: Cost per iteration is \( O(pk^2) \) with no factorisation, or \( O(npk) \) when the basis is fitted to data with \( p > n \). The binding constraint is memory rather than arithmetic if the Gram matrix is formed: \( p \times p \) is 0.4 GB at \( p = 7129 \) and 3.2 GB at \( p = 20000 \), which the matrix-free path avoids.
-- **Nonconvexity**: The energy is nonconvex, so the solver returns a stationary point. Which one depends on the continuation schedule of Section 2, not on the iteration budget: on the ADNI thickness data a three-stage schedule and a nine-stage schedule differ in the attained objective by about a factor of two, while a twentyfold increase in per-stage iterations changes it in the fourth decimal.
+- **Nonconvexity**: The energy is nonconvex, so the solver returns a stationary point. Which one depends on how finely the negativity relaxation in \( \mu \) is resolved, not on the iteration budget, and not on stepping in \( w \): on the ADNI thickness data a three-stage schedule and a nine-stage schedule differ in the attained objective by about a factor of two, while a twentyfold increase in per-stage iterations changes it in the fourth decimal.
 - **Parameter sensitivity**: \( w \) is the only parameter and it is not a nuisance parameter, but it is not free of consequence either. Large \( w \) pins the solution near a combinatorial vertex, where small changes in the data change which vertex is selected; across our experiments \( w = 0.5 \) was better than \( w = 0.9 \) on both reconstruction and reproducibility. At \( w = 1 \) the scale of \( Y \) is unconstrained and the implementation warns.
 - **A signed target is the wrong thing to anchor to**: \( \lVert Y - X_0 \rVert_F^2 \) with \( Y \ge 0 \) charges the solution for negative entries it cannot reach. Those charges are constant, so they do not steer the solution and the optimum degenerates toward \( \max(0, X_0) \). On ADNI this costs 0.028 AUC on the strongest task. Use the sign-blind subspace fidelity, which the implementation selects automatically and reports.
 There is no optimizer or learning rate to choose: step lengths are scale-free and accepted by line search. Convergence is not guaranteed for every problem, so the solver reports the projected-gradient mapping norm and which stopping rule fired rather than asserting success.
@@ -2392,7 +2440,17 @@ This document is entitled `nsa_flow.Rmd` and is available in the [ANTsR reposito
 
 ## Overview
 
-The NSA-Flow package (Non-negative Stiefel Approximating Flow) is a Python library designed for interpretable representation learning in high-dimensional data domains such as neuroimaging, genomics, and text analysis. It provides a unified, differentiable optimization framework that integrates sparse matrix factorization, orthogonalization, and manifold constraints into a single algorithm operating near the Stiefel manifold. This approach balances reconstruction fidelity with column-wise decorrelation, resulting in sparse, stable, and interpretable latent representations. Non-negativity is enforced through proximal updates, while continuous orthogonality control is achieved via manifold retraction techniques (e.g., soft-polar or polar decomposition). Structured sparsity is managed via a tunable weight parameter, and the framework includes adaptive gradient scaling and learning-rate strategies for efficient optimization.
+The NSA-Flow package is a Python library for estimating a matrix that is
+non-negative and approximately orthogonal. It is differentiable end to end and
+intended to be inserted into an existing pipeline. Non-negativity is a hard
+constraint applied by exact projection. Orthogonality is an objective weighted
+by \( w \), not a constraint: nothing is retracted and no factorisation appears
+in the iteration. Sparsity follows from orthogonality rather than from a
+per-entry penalty, so \( w \) is the only parameter. There is no learning rate,
+optimizer choice or gradient scaling to set; step lengths are scale-free and
+accepted by an Armijo line search, and the solver reports a projected-gradient
+mapping norm as a stationarity certificate together with the rule that stopped
+it.
 
 The package is built on PyTorch, is differentiable end to end, and is intended to be inserted into an existing pipeline rather than replace it. It is suitable for applications where interpretability and constraint enforcement are critical.
 
@@ -2540,7 +2598,7 @@ This is the reason \( \gamma \) is reported rather than \( \|\nabla E\| \): at a
 
 ## Remarks on what is and is not claimed
 
-The energy is not convex. In the refinement form the fidelity term is convex and the orthogonality term is not; in the estimation form the reconstruction term is quartic in \( V \). The propositions give monotone descent to a stationary point with a computable certificate and say nothing about global optimality. Which stationary point is reached depends on the continuation schedule of Section 2: on the imaging data, refining the schedule improves the attained objective by about a factor of two, while raising the per-stage iteration budget twentyfold changes it in the fourth decimal.
+The energy is not convex. In the refinement form the fidelity term is convex and the orthogonality term is not; in the estimation form the reconstruction term is quartic in \( V \). The propositions give monotone descent to a stationary point with a computable certificate and say nothing about global optimality. Which stationary point is reached depends on how finely the negativity relaxation of Section 2 is resolved --- the schedule in \( \mu \), which is a distinct mechanism from stepping in \( w \): on the imaging data, refining the schedule improves the attained objective by about a factor of two, while raising the per-stage iteration budget twentyfold changes it in the fourth decimal.
 
 # Session Information
 

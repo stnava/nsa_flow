@@ -41,16 +41,23 @@ nsa_shim_ignored <- function() .nsa_ignored
 ## --- the refinement solver -------------------------------------------------
 ## v1: nsa_flow_autograd(Y0, X0, w, retraction, lr_strategy, optimizer, ...)
 ## v2: minimise (1-w)||Y - X0||_F^2/||X0||_F^2 + w Dtilde(Y) over Y >= 0
+## `fidelity` picks what "close to the target" means.  "auto" uses the
+## entrywise distance for a non-negative target and the sign-blind subspace
+## distance for a signed one, because the entrywise distance charges a
+## non-negative Y for negative entries of X0 it cannot reach and so degenerates
+## toward max(0, X0).  The choice made, the target's negative mass and the
+## distance from max(0, X0) are all returned.
 nsa_flow_autograd <- function(Y0, X0 = NULL, w = 0.5, max_iter = 1000,
                               tol = 1e-8, verbose = FALSE, apply_nonneg = TRUE,
-                              seed = 42, plot = TRUE, ...) {
+                              seed = 42, plot = TRUE, fidelity = "auto", ...) {
   dots <- list(...)
   if (length(dots)) .note_ignored(names(dots))
   target <- if (is.null(X0)) Y0 else X0
-  r <- .nsa$nsa_flow(.as_mat(target), w = w, init = .as_mat(Y0),
-                     nonneg = isTRUE(apply_nonneg),
+  r <- suppressWarnings(.nsa$nsa_flow(
+                     .as_mat(target), w = w, init = .as_mat(Y0),
+                     nonneg = isTRUE(apply_nonneg), fidelity = fidelity,
                      max_iter = as.integer(max_iter), tol = tol,
-                     verbose = isTRUE(verbose), keep_trace = isTRUE(plot))
+                     verbose = isTRUE(verbose), keep_trace = isTRUE(plot)))
   ## A real trace plot.  Returning NULL here would be worse than it looks:
   ## `NULL + labs(...)` evaluates to NULL without error, and assigning NULL to a
   ## list element removes it, so a caller building a list of plots ends up with
@@ -74,7 +81,10 @@ nsa_flow_autograd <- function(Y0, X0 = NULL, w = 0.5, max_iter = 1000,
   list(Y = py_to_r(r$Y$numpy()), energy = r$energy, fidelity = r$fidelity,
        defect = r$defect, iters = r$iters, converged = r$converged,
        stop_reason = r$stop_reason, grad_map = r$grad_map,
-       effective_rank = r$effective_rank, trace = r$trace, plot = gg)
+       effective_rank = r$effective_rank, trace = r$trace, plot = gg,
+       fidelity_mode = r[["fidelity_mode"]],
+       target_negative_mass = r[["target_negative_mass"]],
+       clamp_distance = r[["clamp_distance"]])
 }
 
 ## --- one-shot retraction ---------------------------------------------------

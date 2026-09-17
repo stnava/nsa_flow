@@ -149,12 +149,21 @@
 \newcommand{\mean}{\operatorname{mean}}
 \newcommand{\cand}{\operatorname{cand}}
 \usepackage{booktabs}
-\usepackage{caption}
 \usepackage{longtable}
-\usepackage{colortbl}
 \usepackage{array}
-\usepackage{anyfontsize}
 \usepackage{multirow}
+\usepackage{wrapfig}
+\usepackage{float}
+\usepackage{colortbl}
+\usepackage{pdflscape}
+\usepackage{tabu}
+\usepackage{threeparttable}
+\usepackage{threeparttablex}
+\usepackage[normalem]{ulem}
+\usepackage{makecell}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{anyfontsize}
 \usepackage{bookmark}
 \IfFileExists{xurl.sty}{\usepackage{xurl}}{} % add URL line breaks if available
 \urlstyle{same}
@@ -246,6 +255,24 @@ D = \underbrace{\sum_{i \neq j} G_{ij}^2}_{\text{decorrelation}}
 \]
 so \(D = 0\) requires mutual orthogonality and equal column norms, which is orthonormality. \(C\) requires orthogonality at any column norms. Use \(D\) when the components should carry equal weight and \(C\) when they should not: a disjoint non-negative basis whose columns differ in magnitude scores \(D = 0.14\) and \(C = 2\times 10^{-33}\) (Table \ref{tab:props}). When the basis is fitted to data the two behave the same, because the reconstruction term already equalises the column norms.
 
+\begin{table}[!h]
+\centering
+\caption{\label{tab:props}The three candidate functionals on the structures that separate them. Zero means the functional recognises the structure as what it is looking for. Rows two and three are what this method exists to produce and only the last two columns score them at zero; row four is rank collapse and only the off-diagonal defect rewards it.}
+\centering
+\fontsize{9}{11}\selectfont
+\begin{tabular}[t]{lrrr}
+\toprule
+case & D (orthonormality) & off-diagonal only & C (orthogonality)\\
+\midrule
+orthonormal & 0.0000 & 0.0 & 0.0\\
+orthogonal, unequal norms & 0.6867 & 0.0 & 0.0\\
+disjoint nonneg supports & 0.1357 & 0.0 & 0.0\\
+rank collapse (1 live col) & 0.8000 & 0.0 & 0.2\\
+all columns collinear & 0.8000 & 0.8 & 1.0\\
+\bottomrule
+\end{tabular}
+\end{table}
+
 The Euclidean gradient of the \(\tilde D\) form is available in closed form,
 \[
 \nabla_Y E(Y) = (1-w)\,\frac{2 (Y - X_0)}{\|X_0\|_F^2}
@@ -306,22 +333,24 @@ described as measuring the cosines of the angles between columns. It does not. D
 
 \subsubsection{Computational Complexity}\label{computational-complexity}
 
-\begin{table}[t]
-\caption{\label{tab:complexitytable}Computational Complexity of NSA-Flow and Related Methods} 
-\fontsize{6.0pt}{7.0pt}\selectfont
-\begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}lllll}
+\begin{table}[!h]
+\centering
+\caption{\label{tab:complexitytable}Cost and orthogonality guarantee for NSA-Flow and related updates. The asymptotic cost of NSA-Flow matches a retraction method's, but the per-step work is a few matrix products rather than a factorisation.}
+\centering
+\fontsize{9}{11}\selectfont
+\begin{tabular}[t]{llll}
 \toprule
-Method & Dominant Operation & Complexity (\$p \textbackslash{}ge k\$) & Orthogonality & Notes \\ 
-\midrule\addlinespace[2.5pt]
-Euclidean GD & Gradient & ( O(pk\^{}2) ) & not enforced & Does not enforce the constraints. \\ 
-Full Polar Retraction & Gradient + SVD / polar & ( O(pk\^{}2) ) & exact & A factorisation per step. \\ 
-\textbf{NSA-Flow (ours)} & Gradient + clamp (no factorisation) & ( O(pk\^{}2) ) & set by (w) & (O(npk)) matrix-free when (p\textgreater{}n); certificate reported. \\ 
-Cayley Transform & Linear solve ((p \textbackslash{}times p)) & ( O(p\^{}3) ) or ( O(pk\^{}2) ) (w/ low rank) & exact & Prohibitive for large (p). \\ 
+Method & Dominant operation & Cost per iteration & Orthogonality\\
+\midrule
+Euclidean gradient descent & gradient & $O(pk^2)$ & not enforced\\
+Full polar retraction & gradient + SVD or polar factor & $O(pk^2)$ & exact\\
+NSA-Flow & gradient + clamp, no factorisation & $O(pk^2)$, or $O(npk)$ matrix-free & set by $w$\\
+Cayley transform & linear solve, $p \times p$ & $O(p^3)$ & exact\\
 \bottomrule
-\end{tabular*}
+\end{tabular}
 \end{table}
 
-For tall-skinny matrices (\(p \gg k\)) each iteration costs one Gram product and two \([p,k]\times[k,k]\) products, i.e.~\(O(pk^2)\), with no SVD, eigendecomposition or QR anywhere in the loop --- the asymptotic cost is the same as a retraction method's, but the constant is much smaller and the per-step work is a few matrix multiplications rather than a factorisation. When the basis is fitted directly to data with \(p > n\) the Gram matrix is never formed either: every quantity follows from \(XV\) and \(X^\top(XV)\), giving \(O(npk)\) per iteration and removing an allocation that is \(0.4\) GB at \(p = 7129\) and \(3.2\) GB at \(p = 20000\). Practically speaking, as will be shown in the Results section, NSA-Flow provides an intuitive ``knob'' that allows users to impose orthogonality, non-negativity and sparseness via a consistent and intuitive framework. Table 1 summarizes these comparisons.
+For tall-skinny matrices (\(p \gg k\)) each iteration costs one Gram product and two \([p,k]\times[k,k]\) products, i.e.~\(O(pk^2)\), with no SVD, eigendecomposition or QR anywhere in the loop --- the asymptotic cost is the same as a retraction method's, but the constant is much smaller and the per-step work is a few matrix multiplications rather than a factorisation. When the basis is fitted directly to data with \(p > n\) the Gram matrix is never formed either: every quantity follows from \(XV\) and \(X^\top(XV)\), giving \(O(npk)\) per iteration and removing an allocation that is \(0.4\) GB at \(p = 7129\) and \(3.2\) GB at \(p = 20000\). One parameter sets orthogonality, and with it sparseness, as the Results section shows.
 
 \begin{figure}
 
@@ -392,7 +421,7 @@ The non-smooth regularization term arising from \(R\) is handled in a proximal s
   This subproblem simultaneously encourages fidelity to the gradient-updated iterate \(Z^{(t)}\), promotes sparsity through non-negativity, and enforces column orthogonality via the flow. This approach integrates the constraints more tightly into the optimization, providing a unified update that respects both the geometry and the regularization.
 \end{itemize}
 
-The algorithm terminates when the relative change in energy, the norm of the gradient, and the change in the iterate all fall below a predefined tolerance \(\tau\). An adaptive learning rate scheduler is also employed, which reduces the step size \(\alpha\) if the objective function fails to improve for a set number of iterations (patience), thereby enhancing stability and preventing premature termination at plateaus. The final output is the set of sparse loadings \(Y\) that achieved the lowest energy during the optimization. This is one example where NSA-Flow can be integrated as a proximal operator within a broader optimization framework to enforce orthogonality and non-negativity. Other approaches (shown below) more directly use NSA-Flow as a standalone method for matrix approximation; for example, by directly approximating the loading matrix of PCA with the bases derived from NSA-Flow. Both SPCA and the latter approach are demonstrated in the Results section. The implementation is available in the \texttt{nsa\_flow\_pca} function within the ANTsR package. We implement a closely related approach for NSA-flow constrained factor analysis in the \texttt{nsa\_flow\_pca\_fa} function which is illustrated in an accompanying documentation article (\texttt{ANTsR}).
+The algorithm terminates when the projected-gradient mapping norm falls below the tolerance, and reports which stopping rule fired. There is no learning-rate schedule: the Barzilai--Borwein step is scale-free and the Armijo line search halves it until the energy decreases, so the energy is monotone without a patience parameter. The final output is the set of sparse loadings \(Y\) that achieved the lowest energy during the optimization. This is one example where NSA-Flow can be integrated as a proximal operator within a broader optimization framework to enforce orthogonality and non-negativity. Other approaches (shown below) more directly use NSA-Flow as a standalone method for matrix approximation; for example, by directly approximating the loading matrix of PCA with the bases derived from NSA-Flow. Both SPCA and the latter approach are demonstrated in the Results section. The solver used here is the Python package; \texttt{ANTsR}'s \texttt{nsa\_flow\_pca} and \texttt{nsa\_flow\_pca\_fa} wrap the superseded version and are not what produced these results.
 
 \section{Results}\label{results}
 
@@ -460,10 +489,10 @@ By adjusting \(\omega\), sparsity is indirectly controlled through this global o
 \item
   \textbf{Increasing \(w\) (e.g., 0.5--0.75)}: Strengthens orthogonality enforcement, promoting decorrelated columns. This induces sparsity by concentrating non-zero entries into disjoint patterns, reducing overlap and yielding moderate sparsity.
 \item
-  \textbf{High \(w\) (e.g., 0.95)}: Dominates with orthogonality, forcing near-orthogonal columns that are highly sparse (e.g., \$\approx\$0.9) and crisp, but potentially over-constrained, risking loss of fidelity to the original data.
+  \textbf{High \(w\) (e.g., 0.95)}: Dominates with orthogonality, forcing near-orthogonal columns that are highly sparse (\(\approx 0.9\)) and crisp, but potentially over-constrained, risking loss of fidelity to the original data.
 \end{itemize}
 
-Matrix-level orthogonality produces sparsity without per-entry penalties. In synthetic experiments, heatmaps of the optimised matrices transition from diffuse (low \(w\)) to sharp and disjoint (high \(w\)) (Figure \ref{fig:stiefelsweepfull}). Convergence plots further show stable optimization across \(w\) values, confirming the parameter's role in balancing these objectives. Note that the exact sparsity levels depend on data characteristics and initialization, but the trend of increasing sparsity with higher \(w\) is consistent regardless of whether data is thin, wide, or square.
+Matrix-level orthogonality produces sparsity without per-entry penalties. In synthetic experiments, heatmaps of the optimised matrices transition from diffuse (low \(w\)) to sharp and disjoint (high \(w\)) (Figure \ref{fig:stiefelsweepfull}). The convergence traces in Figure \ref{fig:convergetraces} show stable optimisation across \(w\) values, confirming the parameter's role in balancing these objectives. Note that the exact sparsity levels depend on data characteristics and initialization, but the trend of increasing sparsity with higher \(w\) is consistent regardless of whether data is thin, wide, or square.
 
 \begin{figure}
 
@@ -471,15 +500,16 @@ Matrix-level orthogonality produces sparsity without per-entry penalties. In syn
 
 }
 
-\caption{A synthetic dataset is generated with controlled correlation and noise levels to evaluate NSA-Flow's performance across different orthogonality weights ($\omega$). The data matrix $X_0$ is approximated with NSA-Flow to reveal underlying orthogonal structures, allowing assessment of how varying $\omega$ influences the sparsity and orthogonality of the resulting factorization.}\label{fig:stiefelsweepfull-1}
+\caption{A synthetic dataset is generated with controlled correlation and noise levels to evaluate NSA-Flow's performance across different orthogonality weights ($\omega$). The data matrix $X_0$ is approximated with NSA-Flow to reveal underlying orthogonal structures, allowing assessment of how varying $\omega$ influences the sparsity and orthogonality of the resulting factorization.}\label{fig:stiefelsweepfull}
 \end{figure}
+
 \begin{figure}
 
-{\centering \includegraphics{nsa_flow_files/figure-latex/stiefelsweepfull-2} 
+{\centering \includegraphics{nsa_flow_files/figure-latex/convergetraces-1} 
 
 }
 
-\caption{A synthetic dataset is generated with controlled correlation and noise levels to evaluate NSA-Flow's performance across different orthogonality weights ($\omega$). The data matrix $X_0$ is approximated with NSA-Flow to reveal underlying orthogonal structures, allowing assessment of how varying $\omega$ influences the sparsity and orthogonality of the resulting factorization.}\label{fig:stiefelsweepfull-2}
+\caption{Energy terms against iteration at four values of the orthogonality weight. Fidelity and the orthogonality defect are shown on a log scale; the solver is monotone in the total energy by construction, so both curves are traced from the same accepted steps.}\label{fig:convergetraces}
 \end{figure}
 
 \subsection{Applications}\label{applications}
@@ -549,7 +579,7 @@ In this application, the brain's cortical thickness data is analgous to a comple
 
 Let \(X \in \mathbb{R}^{N \times p}\) denote the centered cortical thickness matrix, where \(N\) is the number of subjects and \(p = 76\) is the number of regions (bilateral cortical and subcortical areas from ADNI). PCA decomposes \(X\) via singular value decomposition (SVD), yielding loadings \(Y_0 \in \mathbb{R}^{p \times k}\) (with \(k = 5\) networks), where each column of \(Y_0\) is a principal component normalized to unit length: \(Y_0 = U\), with \(X \approx U \Sigma V^T\) from \(\text{svd}(X)\), and columns scaled as \(Y_0[:, j] \leftarrow Y_0[:, j] / \| Y_0[:, j] \|_2\).
 
-NSA-Flow is then applied in its \emph{estimation} form: rather than refining \(Y_0\), it fits a non-negative basis \(V \in \mathbb{R}^{p\times k}\) to the centred data directly, minimising \((1-w)\lVert X - XVV^\top\rVert_F^2/\lVert X\rVert_F^2 + w\,C(V)\) subject to \(V \ge 0\), with scores given by projection. We use \(Y_0\) only as the PCA comparator. This matters: anchoring a non-negative solution to a \emph{signed} target such as \(Y_0\) pulls the iterate toward values it cannot reach, so the constrained optimum is close to a clamp of the signed basis, which costs a factor \(1.36\) in reconstruction error on these data against \(1.03\) for a basis fitted to them. We sampled \(q\) random \(w\) values uniformly from {[}0.01, 0.99{]} to sample orthogonality configurations. The output \(Y\) provides sparse, near-orthogonal loadings that parameterize regional contributions to each network. Figure \ref{fig:nsaloadings} shows the NSA-Flow fit to the PCA loadings for a representative \(w = 0.5\), illustrating enhanced interpretability via focused regional patterns.
+NSA-Flow refines \(Y_0\) into a non-negative basis \(Y \in \mathbb{R}^{p\times k}_{\ge 0}\) whose columns are near-disjoint. The fidelity is the sign-blind subspace distance of Section 2: PCA fixes its subspace by the eigenvalue gaps but its column signs only by convention, and the entrywise distance \(\lVert Y - Y_0 \rVert_F^2\) would charge a non-negative \(Y\) for negative entries of \(Y_0\) that it cannot reach. Those charges are constant, so they do not steer the solution and the optimum collapses toward \(\max(0, Y_0)\); on these data that costs \(0.028\) AUC on the strongest task. Anchoring to \(\operatorname{range}(Y_0)\) instead keeps the refinement interpretation while removing the unreachable target. We sampled \(q\) random \(w\) values uniformly from {[}0.01, 0.99{]} to sample orthogonality configurations. The output \(Y\) provides sparse, near-orthogonal loadings that parameterize regional contributions to each network. Figure \ref{fig:nsaloadings} shows the NSA-Flow fit to the PCA loadings for a representative \(w = 0.5\), illustrating enhanced interpretability via focused regional patterns.
 
 We projected the data onto both sets of loadings: \(\text{proj}_{\text{PCA}} = X Y_0\) and \(\text{proj}_{\text{NSA}} = X Y\), yielding subject-specific network scores (\(N \times k\)). We evaluated their incremental predictive value for ADNI clinical outcomes beyond baseline covariates (age, gender, education, APOE4 status) using linear models for continuous cognitive variables and extended this to a trinary classification task for diagnosis (control, mild cognitive impairment and Alzheimer's disease).
 
@@ -573,7 +603,7 @@ We projected the data onto both sets of loadings: \(\text{proj}_{\text{PCA}} = X
 
 \begin{table}[t]
 \caption*{
-{\normalsize  Table 3: Classification Results: NSA vs PCA\small } \\ 
+{\normalsize  Classification results, NSA against PCA\small } \\ 
 {\small  Pairwise and Overall Multi-Class Summary Across 4 Folds\small }
 } 
 \begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}ccccccc}
@@ -582,12 +612,12 @@ We projected the data onto both sets of loadings: \(\text{proj}_{\text{PCA}} = X
 \midrule\addlinespace[2.5pt]
 \multicolumn{7}{l}{Pairwise Results} \\[2.5pt] 
 \midrule\addlinespace[2.5pt]
-CN vs MCI & NSA & 0.647 & 0.412 & 0.626 & 0.658 & {\itshape \cellcolor[HTML]{ADD8E6}{0.586}} \\ 
-CN vs MCI & PCA & 0.562 & 0.591 & 0.567 & 0.612 & {\itshape \cellcolor[HTML]{ADD8E6}{0.583}} \\ 
-CN vs AD & NSA & 0.923 & 0.824 & 0.876 & 0.873 & {\itshape \cellcolor[HTML]{ADD8E6}{0.874}} \\ 
-CN vs AD & PCA & 0.890 & 0.778 & 0.935 & 0.915 & {\itshape \cellcolor[HTML]{ADD8E6}{0.879}} \\ 
-MCI vs AD & NSA & 0.775 & 0.663 & 0.761 & 0.759 & {\itshape \cellcolor[HTML]{ADD8E6}{0.739}} \\ 
-MCI vs AD & PCA & 0.756 & 0.578 & 0.812 & 0.774 & {\itshape \cellcolor[HTML]{ADD8E6}{0.730}} \\ 
+CN vs MCI & NSA & 0.479 & 0.649 & 0.704 & 0.685 & {\itshape \cellcolor[HTML]{ADD8E6}{0.629}} \\ 
+CN vs MCI & PCA & 0.504 & 0.689 & 0.648 & 0.776 & {\itshape \cellcolor[HTML]{ADD8E6}{0.654}} \\ 
+CN vs AD & NSA & 0.840 & 0.790 & 0.908 & 0.922 & {\itshape \cellcolor[HTML]{ADD8E6}{0.865}} \\ 
+CN vs AD & PCA & 0.853 & 0.783 & 0.840 & 0.850 & {\itshape \cellcolor[HTML]{ADD8E6}{0.831}} \\ 
+MCI vs AD & NSA & 0.789 & 0.466 & 0.911 & 0.756 & {\itshape \cellcolor[HTML]{ADD8E6}{0.730}} \\ 
+MCI vs AD & PCA & 0.743 & 0.528 & 0.841 & 0.706 & {\itshape \cellcolor[HTML]{ADD8E6}{0.704}} \\ 
 \midrule\addlinespace[2.5pt]
 \multicolumn{7}{l}{Overall Summary} \\[2.5pt] 
 \midrule\addlinespace[2.5pt]
@@ -620,49 +650,48 @@ difference \(\log p_{\text{NSA}} - \log p_{\text{PCA}}\), so negative favours
 NSA-Flow. PCA and NSA-Flow each add exactly \(k\) columns, so the comparison
 between them does not depend on model size.
 
-\begin{table}
+The analysis sample is smaller than the imaging sample. Of the subjects with
+complete thickness measurements, APOE4 is missing for a substantial minority, so
+the covariate-adjusted models are fitted on complete cases only and the usable
+\(n\) is roughly four fifths of the imaging \(n\); the tables below report
+it per outcome. This is a complete-case analysis on a covariate, which is a
+limitation rather than a choice, and it applies identically to PCA and NSA-Flow.
 
+\begin{table}[!h]
+\centering
 \caption{\label{tab:coginsample}Incremental explanatory power for nine cognitive scores, by fidelity mode. Negative differences favour NSA-Flow.}
 \centering
-\begin{tabular}[t]{l|l|r|r}
-\hline
+\fontsize{9}{11}\selectfont
+\begin{tabular}[t]{llrr}
+\toprule
 mode & outcomes favouring NSA & mean log p difference & largest\\
-\hline
+\midrule
 anchor & 6/9 & -2.02 & -4.42\\
-\hline
 data & 7/9 & -3.77 & -8.02\\
-\hline
 subspace & 7/9 & -1.34 & -2.82\\
-\hline
+\bottomrule
 \end{tabular}
 \end{table}
 
-\begin{table}
-
-\caption{\label{tab:coginsample}Per-outcome log p difference (NSA minus PCA). Negative favours NSA-Flow.}
+\begin{table}[!h]
 \centering
-\begin{tabular}[t]{l|r|r|r}
-\hline
-cog & anchor & data & subspace\\
-\hline
-ADAS13 & -4.17 & -7.37 & -2.75\\
-\hline
+\caption{\label{tab:coginsampleper}Per-outcome log p difference (NSA minus PCA), ordered by the subspace column. Negative favours NSA-Flow.}
+\centering
+\fontsize{9}{11}\selectfont
+\begin{tabular}[t]{lrrr}
+\toprule
+outcome & anchor & data & subspace\\
+\midrule
 ADASQ4 & -4.42 & -8.02 & -2.82\\
-\hline
+ADAS13 & -4.17 & -7.37 & -2.75\\
 CDRSB & -1.46 & -4.59 & -2.29\\
-\hline
-EcogPtTotal & 0.79 & 0.65 & 0.23\\
-\hline
 EcogSPTotal & -2.64 & -2.90 & -1.66\\
-\hline
-FAQ & 0.10 & -2.03 & -0.52\\
-\hline
-LDELTOTAL & -3.61 & -4.92 & -1.31\\
-\hline
-MMSE & 0.27 & 0.27 & 0.48\\
-\hline
 mPACCdigit & -3.07 & -5.01 & -1.44\\
-\hline
+LDELTOTAL & -3.61 & -4.92 & -1.31\\
+FAQ & 0.10 & -2.03 & -0.52\\
+EcogPtTotal & 0.79 & 0.65 & 0.23\\
+MMSE & 0.27 & 0.27 & 0.48\\
+\bottomrule
 \end{tabular}
 \end{table}
 
@@ -682,65 +711,49 @@ repeated 5-fold cross-validation. The model is a random forest, matching the
 diagnosis analysis below; Section \ref{evaluation} explains why a linear model
 cannot answer this question.
 
-\begin{table}
-
-\caption{\label{tab:cogcv}Out-of-sample R-squared for nine cognitive scores. The covariate column is age, sex, education and APOE4 alone; the PCA and NSA columns add five network scores to it. A positive difference in the last column favours NSA-Flow.}
+\begin{table}[!h]
 \centering
-\begin{tabular}[t]{l|l|r|r|r|r|r}
-\hline
-outcome & mode & covariates & PCA & NSA & gain over covariates & NSA minus PCA\\
-\hline
-CDRSB & subspace & -0.048 & 0.232 & 0.317 & 0.365 & 0.085\\
-\hline
-CDRSB & data & -0.048 & 0.232 & 0.349 & 0.397 & 0.117\\
-\hline
-ADAS13 & subspace & 0.073 & 0.407 & 0.426 & 0.353 & 0.019\\
-\hline
-ADAS13 & data & 0.073 & 0.407 & 0.452 & 0.379 & 0.045\\
-\hline
-ADASQ4 & subspace & 0.031 & 0.297 & 0.359 & 0.328 & 0.062\\
-\hline
-ADASQ4 & data & 0.031 & 0.297 & 0.365 & 0.334 & 0.069\\
-\hline
-MMSE & subspace & 0.036 & 0.321 & 0.356 & 0.319 & 0.035\\
-\hline
-MMSE & data & 0.036 & 0.321 & 0.367 & 0.331 & 0.046\\
-\hline
-FAQ & subspace & -0.183 & 0.082 & 0.166 & 0.349 & 0.084\\
-\hline
-FAQ & data & -0.183 & 0.082 & 0.195 & 0.378 & 0.113\\
-\hline
-mPACCdigit & subspace & 0.197 & 0.441 & 0.476 & 0.278 & 0.035\\
-\hline
-mPACCdigit & data & 0.197 & 0.441 & 0.481 & 0.284 & 0.040\\
-\hline
-EcogPtTotal & subspace & -0.189 & 0.032 & 0.062 & 0.252 & 0.030\\
-\hline
-EcogPtTotal & data & -0.189 & 0.032 & 0.022 & 0.211 & -0.010\\
-\hline
-EcogSPTotal & subspace & 0.009 & 0.217 & 0.195 & 0.186 & -0.022\\
-\hline
-EcogSPTotal & data & 0.009 & 0.217 & 0.191 & 0.182 & -0.025\\
-\hline
-LDELTOTAL & subspace & 0.134 & 0.322 & 0.352 & 0.218 & 0.030\\
-\hline
-LDELTOTAL & data & 0.134 & 0.322 & 0.345 & 0.211 & 0.023\\
-\hline
+\caption{\label{tab:cogcv}Out-of-sample R-squared for nine cognitive scores, ordered within mode by the advantage over PCA. The covariate column is age, sex, education and APOE4 alone; the PCA and NSA columns add five network scores to it. A positive difference in the last column favours NSA-Flow.}
+\centering
+\fontsize{9}{11}\selectfont
+\begin{tabular}[t]{llrrrrr}
+\toprule
+outcome & mode & n & covariates & PCA & NSA & NSA - PCA\\
+\midrule
+CDRSB & data & 303 & -0.048 & 0.232 & 0.349 & 0.117\\
+FAQ & data & 299 & -0.183 & 0.082 & 0.195 & 0.113\\
+ADASQ4 & data & 303 & 0.031 & 0.297 & 0.365 & 0.069\\
+MMSE & data & 303 & 0.036 & 0.321 & 0.367 & 0.046\\
+ADAS13 & data & 301 & 0.073 & 0.407 & 0.452 & 0.045\\
+mPACCdigit & data & 303 & 0.197 & 0.441 & 0.481 & 0.040\\
+LDELTOTAL & data & 302 & 0.134 & 0.322 & 0.345 & 0.023\\
+EcogPtTotal & data & 300 & -0.189 & 0.032 & 0.022 & -0.010\\
+EcogSPTotal & data & 294 & 0.009 & 0.217 & 0.191 & -0.025\\
+CDRSB & subspace & 303 & -0.048 & 0.232 & 0.317 & 0.085\\
+FAQ & subspace & 299 & -0.183 & 0.082 & 0.166 & 0.084\\
+ADASQ4 & subspace & 303 & 0.031 & 0.297 & 0.359 & 0.062\\
+mPACCdigit & subspace & 303 & 0.197 & 0.441 & 0.476 & 0.035\\
+MMSE & subspace & 303 & 0.036 & 0.321 & 0.356 & 0.035\\
+EcogPtTotal & subspace & 300 & -0.189 & 0.032 & 0.062 & 0.030\\
+LDELTOTAL & subspace & 302 & 0.134 & 0.322 & 0.352 & 0.030\\
+ADAS13 & subspace & 301 & 0.073 & 0.407 & 0.426 & 0.019\\
+EcogSPTotal & subspace & 294 & 0.009 & 0.217 & 0.195 & -0.022\\
+\bottomrule
 \end{tabular}
 \end{table}
 
-\begin{table}
-
-\caption{\label{tab:cogcv}Summary of the cross-validated comparison.}
+\begin{table}[!h]
 \centering
-\begin{tabular}[t]{l|l|r|r|r}
-\hline
+\caption{\label{tab:cogcvsummary}Summary of the cross-validated comparison.}
+\centering
+\fontsize{9}{11}\selectfont
+\begin{tabular}[t]{llrrr}
+\toprule
 mode & outcomes favouring NSA & gain NSA & gain PCA & difference\\
-\hline
+\midrule
 data & 7/9 & 0.301 & 0.254 & 0.046\\
-\hline
 subspace & 8/9 & 0.294 & 0.254 & 0.040\\
-\hline
+\bottomrule
 \end{tabular}
 \end{table}
 
@@ -811,7 +824,7 @@ Despite its strengths, NSA-Flow faces challenges:
 \item
   \textbf{Scalability}: Cost per iteration is \(O(pk^2)\) with no factorisation, or \(O(npk)\) when the basis is fitted to data with \(p > n\). The binding constraint is memory rather than arithmetic if the Gram matrix is formed: \(p \times p\) is 0.4 GB at \(p = 7129\) and 3.2 GB at \(p = 20000\), which the matrix-free path avoids.
 \item
-  \textbf{Nonconvexity}: The energy is nonconvex, so the solver returns a stationary point. Which one depends on the continuation schedule of Section 2, not on the iteration budget: on the ADNI thickness data a three-stage schedule and a nine-stage schedule differ in the attained objective by about a factor of two, while a twentyfold increase in per-stage iterations changes it in the fourth decimal.
+  \textbf{Nonconvexity}: The energy is nonconvex, so the solver returns a stationary point. Which one depends on how finely the negativity relaxation in \(\mu\) is resolved, not on the iteration budget, and not on stepping in \(w\): on the ADNI thickness data a three-stage schedule and a nine-stage schedule differ in the attained objective by about a factor of two, while a twentyfold increase in per-stage iterations changes it in the fourth decimal.
 \item
   \textbf{Parameter sensitivity}: \(w\) is the only parameter and it is not a nuisance parameter, but it is not free of consequence either. Large \(w\) pins the solution near a combinatorial vertex, where small changes in the data change which vertex is selected; across our experiments \(w = 0.5\) was better than \(w = 0.9\) on both reconstruction and reproducibility. At \(w = 1\) the scale of \(Y\) is unconstrained and the implementation warns.
 \item
@@ -844,7 +857,17 @@ This document is entitled \texttt{nsa\_flow.Rmd} and is available in the \href{h
 
 \subsection{Overview}\label{overview}
 
-The NSA-Flow package (Non-negative Stiefel Approximating Flow) is a Python library designed for interpretable representation learning in high-dimensional data domains such as neuroimaging, genomics, and text analysis. It provides a unified, differentiable optimization framework that integrates sparse matrix factorization, orthogonalization, and manifold constraints into a single algorithm operating near the Stiefel manifold. This approach balances reconstruction fidelity with column-wise decorrelation, resulting in sparse, stable, and interpretable latent representations. Non-negativity is enforced through proximal updates, while continuous orthogonality control is achieved via manifold retraction techniques (e.g., soft-polar or polar decomposition). Structured sparsity is managed via a tunable weight parameter, and the framework includes adaptive gradient scaling and learning-rate strategies for efficient optimization.
+The NSA-Flow package is a Python library for estimating a matrix that is
+non-negative and approximately orthogonal. It is differentiable end to end and
+intended to be inserted into an existing pipeline. Non-negativity is a hard
+constraint applied by exact projection. Orthogonality is an objective weighted
+by \(w\), not a constraint: nothing is retracted and no factorisation appears
+in the iteration. Sparsity follows from orthogonality rather than from a
+per-entry penalty, so \(w\) is the only parameter. There is no learning rate,
+optimizer choice or gradient scaling to set; step lengths are scale-free and
+accepted by an Armijo line search, and the solver reports a projected-gradient
+mapping norm as a stationarity certificate together with the rule that stopped
+it.
 
 The package is built on PyTorch, is differentiable end to end, and is intended to be inserted into an existing pipeline rather than replace it. It is suitable for applications where interpretability and constraint enforcement are critical.
 
@@ -1004,7 +1027,7 @@ This is the reason \(\gamma\) is reported rather than \(\|\nabla E\|\): at a con
 
 \subsection{Remarks on what is and is not claimed}\label{remarks-on-what-is-and-is-not-claimed}
 
-The energy is not convex. In the refinement form the fidelity term is convex and the orthogonality term is not; in the estimation form the reconstruction term is quartic in \(V\). The propositions give monotone descent to a stationary point with a computable certificate and say nothing about global optimality. Which stationary point is reached depends on the continuation schedule of Section 2: on the imaging data, refining the schedule improves the attained objective by about a factor of two, while raising the per-stage iteration budget twentyfold changes it in the fourth decimal.
+The energy is not convex. In the refinement form the fidelity term is convex and the orthogonality term is not; in the estimation form the reconstruction term is quartic in \(V\). The propositions give monotone descent to a stationary point with a computable certificate and say nothing about global optimality. Which stationary point is reached depends on how finely the negativity relaxation of Section 2 is resolved --- the schedule in \(\mu\), which is a distinct mechanism from stepping in \(w\): on the imaging data, refining the schedule improves the attained objective by about a factor of two, while raising the per-stage iteration budget twentyfold changes it in the fourth decimal.
 
 \section{Session Information}\label{session-information}
 
@@ -1027,13 +1050,14 @@ The energy is not convex. In the refinement form the fidelity term is convex and
 ## [1] stats     graphics  grDevices utils     datasets  methods   base     
 ## 
 ## other attached packages:
-##  [1] ggradar_0.2          nnet_7.3-20          randomForest_4.7-1.2 pROC_1.19.0.1        broom_1.0.12        
-##  [6] readr_2.2.0          tibble_3.3.1         ggpubr_0.6.3         igraph_2.2.2         fmsb_0.7.6          
-## [11] NMF_0.28             cluster_2.1.8.1      rngtools_1.5.2       registry_0.5-1       golubEsets_1.48.0   
-## [16] Biobase_2.66.0       BiocGenerics_0.52.0  MASS_7.3-65          patchwork_1.3.2      Rtsne_0.17          
-## [21] caret_7.0-1          lattice_0.22-7       gt_1.3.0             reticulate_1.45.0    ANTsR_0.6.7         
-## [26] DiagrammeR_1.0.11    knitr_1.51           scales_1.4.0         tidyr_1.3.2          dplyr_1.2.0         
-## [31] RColorBrewer_1.1-3   pheatmap_1.0.13      reshape2_1.4.5       gridExtra_2.3        ggplot2_4.0.2       
+##  [1] ggradar_0.2          nnet_7.3-20          pROC_1.19.0.1        broom_1.0.12         readr_2.2.0         
+##  [6] tibble_3.3.1         ggpubr_0.6.3         igraph_2.2.2         fmsb_0.7.6           NMF_0.28            
+## [11] cluster_2.1.8.1      rngtools_1.5.2       registry_0.5-1       golubEsets_1.48.0    Biobase_2.66.0      
+## [16] BiocGenerics_0.52.0  MASS_7.3-65          patchwork_1.3.2      gt_1.3.0             randomForest_4.7-1.2
+## [21] Rtsne_0.17           caret_7.0-1          lattice_0.22-7       kableExtra_1.4.0     reticulate_1.45.0   
+## [26] ANTsR_0.6.7          DiagrammeR_1.0.11    knitr_1.51           scales_1.4.0         tidyr_1.3.2         
+## [31] dplyr_1.2.0          RColorBrewer_1.1-3   pheatmap_1.0.13      reshape2_1.4.5       gridExtra_2.3       
+## [36] ggplot2_4.0.2       
 ## 
 ## loaded via a namespace (and not attached):
 ##   [1] IRanges_2.40.1          gaston_1.6              vroom_1.7.0             Biostrings_2.74.1      
@@ -1041,8 +1065,8 @@ The energy is not convex. In the refinement form the fidelity term is convex and
 ##   [9] png_0.1-9               proxy_0.4-29            ppcor_1.1               bayestestR_0.17.0      
 ##  [13] correlation_0.8.8       parallelly_1.46.1       httpuv_1.6.16           foreach_1.5.2          
 ##  [17] withr_3.0.2             pgenlibr_0.5.5          xfun_0.56               survival_3.8-3         
-##  [21] subtyper_1.3.0          memoise_2.0.1           commonmark_2.0.0        ggbeeswarm_0.7.3       
-##  [25] diptest_0.77-2          emmeans_2.0.0           parameters_0.28.3       gmp_0.7-5.1            
+##  [21] subtyper_1.3.0          memoise_2.0.1           ggbeeswarm_0.7.3        diptest_0.77-2         
+##  [25] emmeans_2.0.0           parameters_0.28.3       gmp_0.7-5.1             systemfonts_1.3.2      
 ##  [29] visreg_2.8.0            zoo_1.8-15              DEoptimR_1.1-4          Formula_1.2-5          
 ##  [33] prabclus_2.3-5          datawizard_1.3.0        rematch2_2.1.2          KEGGREST_1.46.0        
 ##  [37] promises_1.5.0          otel_0.2.0              Evacluster_0.1.0        httr_1.4.8             
@@ -1059,25 +1083,25 @@ The energy is not convex. In the refinement form the fidelity term is convex and
 ##  [81] stringi_1.8.7           wesanderson_0.3.7       gower_1.0.2             minqa_1.2.8            
 ##  [85] lubridate_1.9.5         plyr_1.8.9              crayon_1.5.3            abind_1.4-8            
 ##  [89] locfit_1.5-9.12         bit_4.6.0               sandwich_3.1-1          codetools_0.2-20       
-##  [93] multcomp_1.4-29         recipes_1.3.1           e1071_1.7-17            paletteer_1.7.0        
-##  [97] plotly_4.12.0           mime_0.13               splines_4.4.2           markdown_2.0           
+##  [93] multcomp_1.4-29         textshaping_1.0.5       recipes_1.3.1           e1071_1.7-17           
+##  [97] paletteer_1.7.0         plotly_4.12.0           mime_0.13               splines_4.4.2          
 ## [101] Rcpp_1.1.1              VarSelLCM_2.1.3.2       flexclust_1.5.0         smotefamily_1.4.0      
 ## [105] blob_1.2.4              lme4_2.0-1              fs_1.6.7                listenv_0.10.1         
 ## [109] checkmate_2.3.4         Rdpack_2.6.6            ggsignif_0.6.4          estimability_1.5.1     
 ## [113] ANTsRCore_0.8.1         coca_1.1.0              Matrix_1.7-4            callr_3.7.6            
-## [117] statmod_1.5.1           tzdb_0.5.0              pkgconfig_2.0.3         tools_4.4.2            
-## [121] cachem_1.1.0            rbibutils_2.4.1         RSQLite_2.4.3           numDeriv_2016.8-1.1    
-## [125] viridisLite_0.4.3       globaltest_5.60.0       DBI_1.2.3               fastmap_1.2.0          
-## [129] rmarkdown_2.30          grid_4.4.2              imbalance_1.0.2.1       gprofiler2_0.2.4       
-## [133] coda_0.19-4.1           FNN_1.1.4.1             BiocManager_1.30.27     insight_1.4.6          
-## [137] carData_3.0-6           rpart_4.1.24            reformulas_0.4.4        farver_2.1.2           
-## [141] mgcv_1.9-3              yaml_2.3.12             MatrixGenerics_1.18.1   foreign_0.8-90         
-## [145] ggthemes_5.2.0          cli_3.6.5               purrr_1.2.1             stats4_4.4.2           
-## [149] webshot_0.5.5           dbscan_1.2.3            lifecycle_1.0.5         mvtnorm_1.3-3          
-## [153] lava_1.8.2              kernlab_0.9-33          backports_1.5.0         BiocParallel_1.40.2    
-## [157] annotate_1.84.0         timechange_0.4.0        gtable_0.3.6            parallel_4.4.2         
-## [161] limma_3.62.2            mlr3cluster_0.3.0       jsonlite_2.0.0          edgeR_4.4.2            
-## [165] bit64_4.6.0-1           glasso_1.11             litedown_0.9            RcppParallel_5.1.11-2  
+## [117] statmod_1.5.1           tzdb_0.5.0              svglite_2.2.2           pkgconfig_2.0.3        
+## [121] tools_4.4.2             cachem_1.1.0            rbibutils_2.4.1         RSQLite_2.4.3          
+## [125] numDeriv_2016.8-1.1     globaltest_5.60.0       viridisLite_0.4.3       DBI_1.2.3              
+## [129] fastmap_1.2.0           rmarkdown_2.30          grid_4.4.2              imbalance_1.0.2.1      
+## [133] gprofiler2_0.2.4        coda_0.19-4.1           FNN_1.1.4.1             BiocManager_1.30.27    
+## [137] insight_1.4.6           carData_3.0-6           rpart_4.1.24            reformulas_0.4.4       
+## [141] farver_2.1.2            mgcv_1.9-3              yaml_2.3.12             MatrixGenerics_1.18.1  
+## [145] foreign_0.8-90          ggthemes_5.2.0          cli_3.6.5               purrr_1.2.1            
+## [149] stats4_4.4.2            webshot_0.5.5           dbscan_1.2.3            lifecycle_1.0.5        
+## [153] mvtnorm_1.3-3           lava_1.8.2              kernlab_0.9-33          backports_1.5.0        
+## [157] BiocParallel_1.40.2     annotate_1.84.0         timechange_0.4.0        gtable_0.3.6           
+## [161] parallel_4.4.2          limma_3.62.2            mlr3cluster_0.3.0       jsonlite_2.0.0         
+## [165] edgeR_4.4.2             bit64_4.6.0-1           glasso_1.11             RcppParallel_5.1.11-2  
 ## [169] dCUR_1.0.2              ClusterR_1.3.6          zeallot_0.2.0           timeDate_4052.112      
 ## [173] lazyeval_0.2.2          shiny_1.13.0            htmltools_0.5.9         nmfbin_0.2.1           
 ## [177] mlr3pipelines_0.11.0    tinytex_0.58            glue_1.8.0              ggstatsplot_0.13.5     
