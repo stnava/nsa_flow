@@ -155,3 +155,109 @@ def load_ppmi_continuous(modality="T1w", min_complete=0.9, max_p=None):
         cols = list(F.var().sort_values(ascending=False).index[:max_p])
         F = F[cols]
     return F.to_numpy(float), df, cols
+
+
+# ---------------------------------------------------------------------------
+# Confound-modelled design.  The first PPMI attempt (exp20) used age and
+# education only, which is not enough: see exp20's docstring for why the result
+# it produced had to be retracted.  Two things have to change.
+#
+# Stratify.  SAA status over the whole cohort is largely a restatement of
+# diagnosis (cohort label alone predicts it at AUC 0.920), so it must be scored
+# WITHIN a stratum.  Prodromal is the stratum that matters and the only one with
+# usable balance: 606 negative / 276 positive.  Within PD the label is 91%
+# positive and within CN it is 6%, so neither carries much.
+#
+# Adjust.  The extract has five subject-level confounds that apply everywhere --
+# age, sex, education, imaging protocol (two levels) and brain volume -- plus
+# two that apply only to PD: levodopa-equivalent dose, which lowers symptom
+# scores, and disease duration.  ``duration_yrs`` is undefined outside PD (1405
+# of 1423 values), so any model using it is a within-PD model by construction.
+# Diagnosis is not the only label the target can hide behind.  Within the
+# prodromal group, genetic subtype almost determines SAA status: sporadic
+# prodromals are 63% positive (190/301) while GBA and LRRK2 carriers are 7%
+# (12/166 and 12/171).  Stratifying on diagnosis and stopping there would repeat
+# exp20's error one level down, so ``genotype`` is a confound wherever a stratum
+# mixes subtypes, and the primary SAA target is the sporadic prodromal stratum,
+# where the label is balanced (111 negative / 190 positive) and no genetic or
+# diagnostic variable stands in for it.
+CONFOUNDS_ALL = ["age_BL", "commonSex", "educ", "imaging_protocol", "brainVolume"]
+CONFOUNDS_GEN = CONFOUNDS_ALL + ["genotype"]
+CONFOUNDS_PD = CONFOUNDS_ALL + ["LEDD", "duration_yrs"]
+CONFOUNDS_PD_GEN = CONFOUNDS_PD + ["genotype"]
+
+STRATA = {                      # name -> regex matched against ``joinedDX``
+    "Prodromal": r"^Prodromal",
+    "ProdromalSporadic": r"^ProdromalSporadic$",
+    "PD": r"^PD",
+    "PDSporadic": r"^PDSporadic$",
+    "CN": r"^CN$",
+    "CN+Prodromal": r"^(CN|Prodromal)",
+    "all": None,
+}
+
+
+def load_ppmi_modeled(modality="T1w", stratum="Prodromal", outcome="AsynStatus",
+                      confounds=None, min_complete=0.9, max_p=None):
+    """Return ``(X, y, C, cols, cnames)`` for one stratum, outcome and confound set.
+
+    ``X`` is the imaging matrix, ``y`` the outcome (0/1 for ``AsynStatus``, float
+    otherwise), and ``C`` the confound design with categoricals dummy-coded and
+    the intercept left out.  Complete cases only, on the union of imaging,
+    outcome and confounds, so the confound-adjusted and unadjusted models are
+    fit on exactly the same rows -- otherwise adding a covariate would change
+    the sample and the comparison would not be paired.
+    """
+    confounds = list(CONFOUNDS_ALL if confounds is None else confounds)
+    pref = MODALITIES[modality]
+    head = pd.read_csv(IDPS, nrows=0).columns.tolist()
+    cols = [c for c in head if c.startswith(pref)]
+    keep = [c for c in ["commonID", "yearsbl"] + cols if c in head]
+    idp = pd.read_csv(IDPS, usecols=keep, low_memory=False)
+    idp = (idp.sort_values("yearsbl").drop_duplicates("commonID")
+           if "yearsbl" in idp else idp.drop_duplicates("commonID"))
+
+    clin = pd.read_csv(CLIN, low_memory=False)
+    want = ["subjectID", "joinedDX", outcome] + confounds
+    clin = (clin[[c for c in dict.fromkeys(want) if c in clin.columns]]
+            .drop_duplicates("subjectID").rename(columns={"subjectID": "commonID"}))
+    if "genotype" in confounds:               # derived, not a column in the file
+        clin["genotype"] = (clin.joinedDX.fillna("NA")
+                            .str.extract(r"(Sporadic|GBA|LRRK2|SNCA|PRKN)",
+                                         expand=False).fillna("none"))
+    missing = [c for c in confounds + [outcome] if c not in clin.columns]
+    if missing:
+        raise ValueError(f"not in the clinical extract: {missing}")
+    for t in (idp, clin):
+        t["commonID"] = t["commonID"].astype(str).str.strip()
+    df = idp.merge(clin, on="commonID", how="inner")
+
+    pat = STRATA[stratum] if stratum in STRATA else stratum
+    if pat is not None:
+        df = df[df.joinedDX.fillna("NA").str.match(pat)]
+    df = df.reset_index(drop=True)
+
+    F = df[cols].apply(pd.to_numeric, errors="coerce")
+    ok = (F.notna().mean() >= min_complete) & (F.std(numeric_only=True) > 0)
+    cols = [c for c in cols if ok.get(c, False)]
+    F = F[cols]
+
+    # dummy-code before dropping rows so a level lost to the stratum disappears
+    des = df[confounds].copy()
+    for c in confounds:
+        if des[c].dtype == object or des[c].nunique(dropna=True) <= 2:
+            des[c] = des[c].astype("category")
+    des = pd.get_dummies(des, drop_first=True, dummy_na=False).astype(float)
+    des = des.loc[:, des.std() > 0]
+
+    yy = df[outcome]
+    yy = (yy == "Positive").astype(float).where(yy.notna()) \
+        if outcome == "AsynStatus" else pd.to_numeric(yy, errors="coerce")
+    row_ok = F.notna().all(axis=1) & des.notna().all(axis=1) & yy.notna()
+    F, des, yy = F[row_ok], des[row_ok], yy[row_ok]
+    if max_p is not None and len(cols) > max_p:
+        cols = list(F.var().sort_values(ascending=False).index[:max_p])
+        F = F[cols]
+    y = yy.to_numpy(int) if outcome == "AsynStatus" else yy.to_numpy(float)
+    return (F.to_numpy(float), y, des.to_numpy(float), cols,
+            list(des.columns))
