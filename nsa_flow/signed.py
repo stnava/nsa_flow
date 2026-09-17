@@ -45,38 +45,41 @@ against itself.  The off-diagonal angle term already pushes every pair of lobes
 apart, including each component's own pair, so this is a refinement rather than a
 necessity; ``lobe=1.0`` drives the overlap to exactly zero.
 
-WHEN THE LIFTING IS INERT.  Read this before the interpretation above.  The
-negative lobes do not survive a nonzero ``w`` under the default ``init="relax"``.
-On ADNI cortical thickness (centred, ``k = 5``):
+BUG: THE DEFAULT init="relax" NEVER RUNS THE SOLVER AT w > 0.  Read this first.
+The relax branch builds its starting point as
 
-    w      one-signed components   dead parts   reconstruction
-    0.00         0 of 5             0 of 10         0.2837
-    0.25         5 of 5             5 of 10         0.3080
-    0.50         5 of 5             5 of 10         0.3084
+    W = cat([V0.clamp_min(0), zeros_like(V0)])
 
-At ``w = 0.25`` and above, ``V-`` is zero everywhere and ``V = V+``: the result is
-a non-negative basis, and "these regions minus those regions" does not describe
-it.  The same holds on raw (uncentred) thickness.
+so ``V-`` is EXACTLY ZERO by construction rather than by optimisation.  An
+exactly-zero column has an identically-zero angle-defect gradient, so it is a
+degenerate fixed point that can never leave zero; with ``w > 0`` the first
+Armijo line search then fails and the function returns that initialisation
+unchanged.  Measured on ADNI cortical thickness (centred, ``k = 5``):
 
-The two solvers do not merely agree at that point, they are solving for the same
-kind of object: against ``nsa_flow_data`` at ``w = 0.5`` the matched column
-cosines are 0.9998 to 1.0000, the sparsity is identical to three decimals
-(0.618), the spanned subspaces coincide (mean principal cosine 1.0) and the
-largest entrywise difference is 0.0145.  They are distinct optimisation problems
--- ``Coff`` on ``2k`` parts against ``C`` on ``k`` columns -- so small differences
-remain and the two can still separate slightly in a fold-by-fold evaluation, but
-any claim that the lifting contributes contrast at the default is not supported.
+    w     init      iters   stop          grad_map   dead parts
+    0.00  relax       652   line_search   2.45e-09     0 of 10
+    0.10  relax         1   line_search   inf          5 of 10
+    0.25  relax         1   line_search   inf          5 of 10
+    0.50  relax         1   line_search   inf          5 of 10
+    0.25  split      1200   line_search   2.39e-09     0 of 10
+    0.50  split      1407   line_search   2.75e-09     0 of 10
 
-Contrast capacity requires one of two settings, each with a cost.  ``w = 0``
-keeps all ten parts alive but applies no orthogonality at all.  ``init="split"``
-keeps them alive at ``w = 0.5`` (0 of 10 dead, effective rank 5.34) but roughly
-halves the sparsity, 0.427 against 0.618, and on raw data falls to 0.206.
-Consolidating a split solution kills the lobes again (3 of 10 dead centred, 5 of
-10 raw), so sparsity and contrast are not simultaneously available here.
+The reported ``grad_map`` of ``inf`` is the sentinel the loop initialises, not a
+measured value: it is only assigned after a step is accepted, so a first-iteration
+failure reports ``inf`` whatever the true stationarity was.
 
-The distinction matters because a single empty lobe IS correct -- global atrophy
-is one-signed -- whereas all five components coming out one-signed means the
-construction is doing nothing.
+Consequences, stated plainly because an earlier version of this docstring got
+them wrong.  The "lobes do not survive a nonzero w" behaviour described here
+before was this bug, not a property of the lifting, and the sparsity difference
+quoted against ``init="split"`` compared a converged split solution against a
+failed relax initialisation.  ``init="split"`` converges at ``w = 0.5`` with all
+``2k`` parts alive, so contrast capacity and a nonzero ``w`` are NOT in conflict.
+It also explains why the signed and data-anchored bases matched to four decimals:
+``relax_into_nonneg`` is what ``nsa_flow_data`` initialises from too, so
+``init="relax"`` returns approximately that same solution.
+
+Until the relax branch is fixed, use ``init="split"``.  Any result computed with
+the default at ``w > 0`` is a result about an unoptimised initialisation.
 
 Capacity.  At ``w = 0`` the lifting reproduces signed PCA's reconstruction to the
 digit (0.5723 against 0.572269 on ADNI volumes), settling the question the
