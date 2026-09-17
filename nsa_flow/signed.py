@@ -45,7 +45,8 @@ against itself.  The off-diagonal angle term already pushes every pair of lobes
 apart, including each component's own pair, so this is a refinement rather than a
 necessity; ``lobe=1.0`` drives the overlap to exactly zero.
 
-STATUS.  Mature.  Use ``consolidate=True`` and leave ``w`` at its default.
+STATUS.  The implementation is mature: use ``consolidate=True`` and leave ``w``
+at its default.  The predictive case for it is not settled -- see Caveats.
 
 Capacity.  At ``w = 0`` the lifting reproduces signed PCA's reconstruction to the
 digit (0.5723 against 0.572269 on ADNI volumes), settling the question the
@@ -92,6 +93,21 @@ at AUC 0.920), and for UPDRS-I neither medication dose nor disease duration was
 adjusted.  See ``experiments/exp20_ppmi_replication.py``, which records the
 attempt, its numbers and why they are uninterpretable.
 
+Repaired, PPMI does not replicate the ADNI result.  ``exp22`` reruns the same
+cohort with the confounds modelled: SAA scored within the SPORADIC prodromal
+stratum, since genetic subtype almost determines the label inside the prodromal
+group (sporadic 63% positive, GBA 7.2%, LRRK2 7.0%); age, sex, education,
+imaging protocol and brain volume adjusted everywhere; genotype added where a
+stratum mixes subtypes; medication dose and disease duration added in PD.
+Across 80 basis-vs-PCA comparisons no basis significantly beats PCA anywhere and
+13 are significantly worse, so exp20's apparent UPDRS-I wins were
+confound-driven.  The only positive pattern is that on the two clean sporadic
+targets under a forest, consolidation is above PCA in 4 of 4 comparisons (mean
++0.0152) and is the only basis with a positive mean there -- but no comparison
+reaches significance and the four are not independent.  That is a direction, not
+a replication.  UPDRS-I is not predictable from T1w in this cohort at all: the
+forest R^2 is negative in absolute terms for every basis including PCA.
+
 Replication on confound-light data splits, and it splits on ``p``.  Two UCI
 sets (``experiments/exp21_uci_replication.py``) were run instead, chosen because
 they are single-source with no acquisition covariates to adjust for.  On
@@ -102,17 +118,21 @@ diabetes (``n = 442``, ``p = 10``, regression) the lifting beats PCA by
 to ``0.012`` AUC and consolidation loses ``0.017`` to ``0.018``, small but
 consistent across folds.  At ``p = 13`` with ``k = 3`` a disjoint partition
 leaves about four features per part, so the consolidated basis is close to a
-hard feature partition and pays for it.  The honest summary across all three
+hard feature partition and pays for it.  The honest summary across all four
 datasets is that these bases are competitive-to-better on regression and pay a
 modest reproducible price on small-``p`` classification, and that consolidation
 is a sparsity control rather than an accuracy one.
 
-Caveats.  The biomedical-imaging evidence is one cohort, one modality
-(``p = 66``, ``n ~ 300``), and nine outcomes that share subjects and are therefore
-not nine independent tests; the two UCI sets are independent of it but are
-tabular and small-``p``, so they check whether the result travels, not whether it
-holds on other imaging cohorts.  ``w`` and ``k`` were not selected by nested
-cross-validation anywhere.
+Caveats.  The evidence is mixed and the reader should weight it accordingly.
+The positive imaging result is one cohort, one modality (``p = 66``,
+``n ~ 300``), and nine outcomes that share subjects and are therefore not nine
+independent tests.  The one attempt at a second imaging cohort, on PPMI with
+confounds properly modelled, did not replicate it.  The two UCI sets go one each
+way.  What is solid is the sparsity behaviour, which is structural rather than
+statistical: consolidation gives exactly disjoint supports in both lobes at
+roughly 10% density with no component lost, on every dataset tried.  What is not
+established is that this buys predictive accuracy in general.  ``w`` and ``k``
+were not selected by nested cross-validation anywhere.
 
 Gradient.  With ``F(V)`` the reconstruction term, ``dF/dV+ = dF/dV`` and
 ``dF/dV- = -dF/dV`` by the chain rule, so the data term costs one extra sign flip

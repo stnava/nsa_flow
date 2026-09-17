@@ -34,6 +34,42 @@ Two designs are run, and the pair is the point:
 The confound-only model is fit on the same folds and reported, so "imaging adds
 this much" is a number rather than an assumption.  Everything is compared
 against PCA on identical folds with a paired t-test.
+
+RESULT.  Modelling the confounds removes the effect.  Across 80 basis-vs-PCA
+comparisons (5 tasks x 2 models x 2 designs x 4 non-PCA bases) there is not one
+in which any basis significantly beats PCA, and 13 in which one is
+significantly worse.  exp20's apparent UPDRS-I wins (+0.015 to +0.017, p < 0.04)
+do not survive: they were confound-driven, exactly as suspected.  See
+``paper/results/e22_ppmi_modeled.csv``.
+
+Two things are worth separating from that verdict.
+
+Imaging does carry signal beyond the confounds, but only under the forest and
+only on the clean sporadic targets.  For SAA in sporadic prodromals the
+confound-only AUC is 0.6445 and every basis adds 0.020 to 0.037 (consolidated
++0.0374 joint, p = 0.011; +0.0328 residual, p = 0.004).  Under logistic
+regression the confounds alone reach 0.7411 and adding imaging scores makes it
+WORSE for every basis including PCA (-0.021 to -0.031, p < 0.02), so whatever
+the imaging contributes here is not linear in the projected scores.
+
+UPDRS-I is not predictable from T1w in this cohort at all.  The forest R^2 is
+negative in absolute terms everywhere -- confound-only -0.1274, best basis
+-0.0361 -- so the large-looking ``d_vs_conf`` of +0.09 is a move from much worse
+than the training mean to slightly worse than it, not prediction.  Reporting
+that gain without the absolute number would be misleading.
+
+The one positive pattern, stated with its weakness: on the two sporadic targets
+under the forest, ``signed_consolidated`` is above PCA in 4 of 4 comparisons
+(mean +0.0152), and it is the only basis whose mean is positive there (signed
+-0.0002, data -0.0050, subspace -0.0051).  No comparison reaches significance
+(p = 0.11 to 0.38), the four are not independent (two targets x two designs),
+and a 4-of-4 sign test is p = 0.125 on its own.  This is a direction, not a
+result, and at n = 299 and n = 613 the study is not powered to settle it.
+
+So PPMI does not replicate the ADNI CDRSB finding (consolidated +0.098 R^2,
+t = 4.2).  Whether that is because the ADNI result is cohort-specific, because
+PD imaging-to-symptom signal is genuinely weaker, or because these targets are
+simply harder after adjustment, this experiment cannot distinguish.
 """
 import warnings
 
