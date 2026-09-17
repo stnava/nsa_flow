@@ -45,8 +45,38 @@ against itself.  The off-diagonal angle term already pushes every pair of lobes
 apart, including each component's own pair, so this is a refinement rather than a
 necessity; ``lobe=1.0`` drives the overlap to exactly zero.
 
-STATUS.  The implementation is mature: use ``consolidate=True`` and leave ``w``
-at its default.  The predictive case for it is not settled -- see Caveats.
+WHEN THE LIFTING IS INERT.  Read this before the interpretation above.  The
+negative lobes do not survive a nonzero ``w`` under the default ``init="relax"``.
+On ADNI cortical thickness (centred, ``k = 5``):
+
+    w      one-signed components   dead parts   reconstruction
+    0.00         0 of 5             0 of 10         0.2837
+    0.25         5 of 5             5 of 10         0.3080
+    0.50         5 of 5             5 of 10         0.3084
+
+At ``w = 0.25`` and above, ``V-`` is zero everywhere and ``V = V+``: the result is
+a non-negative basis, and "these regions minus those regions" does not describe
+it.  The same holds on raw (uncentred) thickness.
+
+The two solvers do not merely agree at that point, they are solving for the same
+kind of object: against ``nsa_flow_data`` at ``w = 0.5`` the matched column
+cosines are 0.9998 to 1.0000, the sparsity is identical to three decimals
+(0.618), the spanned subspaces coincide (mean principal cosine 1.0) and the
+largest entrywise difference is 0.0145.  They are distinct optimisation problems
+-- ``Coff`` on ``2k`` parts against ``C`` on ``k`` columns -- so small differences
+remain and the two can still separate slightly in a fold-by-fold evaluation, but
+any claim that the lifting contributes contrast at the default is not supported.
+
+Contrast capacity requires one of two settings, each with a cost.  ``w = 0``
+keeps all ten parts alive but applies no orthogonality at all.  ``init="split"``
+keeps them alive at ``w = 0.5`` (0 of 10 dead, effective rank 5.34) but roughly
+halves the sparsity, 0.427 against 0.618, and on raw data falls to 0.206.
+Consolidating a split solution kills the lobes again (3 of 10 dead centred, 5 of
+10 raw), so sparsity and contrast are not simultaneously available here.
+
+The distinction matters because a single empty lobe IS correct -- global atrophy
+is one-signed -- whereas all five components coming out one-signed means the
+construction is doing nothing.
 
 Capacity.  At ``w = 0`` the lifting reproduces signed PCA's reconstruction to the
 digit (0.5723 against 0.572269 on ADNI volumes), settling the question the
