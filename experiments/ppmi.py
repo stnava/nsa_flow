@@ -102,3 +102,56 @@ def load_ppmi(modality="T1Hier", task="PD vs CN", min_complete=0.9, max_p=None):
     if "commonSex" in df:
         meta["sex"] = df["commonSex"].astype(str)
     return F.to_numpy(float), y, meta, cols
+
+
+# ---------------------------------------------------------------------------
+# Continuous outcomes, for the same design used on ADNI cortical thickness.
+# This is a second cohort rather than a second analysis of the first: different
+# disease, different scanner protocol, different outcome scales.  T1w has p = 66,
+# the same feature count as the ADNI thickness table, which makes it a close
+# replication rather than a loose analogy.
+# ---------------------------------------------------------------------------
+# SAA status is the biomarker-defined label; UPDRS-I is non-motor
+# experiences of daily living, a continuous score.
+PPMI_OUTCOMES = ["AsynStatus", "updrs1_score"]
+PPMI_COVARS = ["age_BL", "educ"]        # sex is absent from this extract
+
+
+def load_ppmi_continuous(modality="T1w", min_complete=0.9, max_p=None):
+    """Return ``(X, df, cols)`` with the IDPs and the continuous clinical scores.
+
+    Unlike ``load_ppmi`` this does not select a binary contrast; it returns every
+    subject with complete imaging so that each outcome can define its own
+    complete-case sample, as in the ADNI analysis.
+    """
+    pref = MODALITIES[modality]
+    head = pd.read_csv(IDPS, nrows=0).columns.tolist()
+    cols = [c for c in head if c.startswith(pref)]
+    keep = [c for c in ["commonID", "age_BL", "yearsbl"] + cols if c in head]
+    idp = pd.read_csv(IDPS, usecols=keep, low_memory=False)
+    idp = (idp.sort_values("yearsbl").drop_duplicates("commonID")
+           if "yearsbl" in idp else idp.drop_duplicates("commonID"))
+
+    want = ["subjectID"] + PPMI_OUTCOMES + PPMI_COVARS
+    clin = pd.read_csv(CLIN, low_memory=False)
+    want = [c for c in want if c in clin.columns]
+    clin = clin[want].drop_duplicates("subjectID").rename(
+        columns={"subjectID": "commonID"})
+    # both tables carry age_BL; keep the clinical one and drop the imaging copy
+    # so the merge does not produce age_BL_x / age_BL_y
+    if "age_BL" in clin.columns and "age_BL" in idp.columns:
+        idp = idp.drop(columns=["age_BL"])
+    for t in (idp, clin):
+        t["commonID"] = t["commonID"].astype(str).str.strip()
+    df = idp.merge(clin, on="commonID", how="inner")
+
+    F = df[cols].apply(pd.to_numeric, errors="coerce")
+    ok = (F.notna().mean() >= min_complete) & (F.std(numeric_only=True) > 0)
+    cols = [c for c in cols if ok.get(c, False)]
+    F = F[cols]
+    row_ok = F.notna().all(axis=1)
+    F, df = F[row_ok], df[row_ok].reset_index(drop=True)
+    if max_p is not None and len(cols) > max_p:
+        cols = list(F.var().sort_values(ascending=False).index[:max_p])
+        F = F[cols]
+    return F.to_numpy(float), df, cols

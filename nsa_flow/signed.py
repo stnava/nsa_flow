@@ -84,10 +84,35 @@ spans what the data needs.  ``w = 0.5`` is also the best setting for sparsity
 (largest part 18, against 22 at ``w = 0.75``), so the two objectives do not
 conflict here and there is nothing to trade off.
 
-Caveats.  All of the predictive evidence is one cohort, one modality
+Replication.  A second-cohort attempt on PPMI is not usable and does not bear
+on the above in either direction: it was run with age and education as the only
+covariates, and PPMI's confounds dominate both targets.  SAA status in that
+extract is largely a proxy for cohort membership (cohort label alone predicts it
+at AUC 0.920), and for UPDRS-I neither medication dose nor disease duration was
+adjusted.  See ``experiments/exp20_ppmi_replication.py``, which records the
+attempt, its numbers and why they are uninterpretable.
+
+Replication on confound-light data splits, and it splits on ``p``.  Two UCI
+sets (``experiments/exp21_uci_replication.py``) were run instead, chosen because
+they are single-source with no acquisition covariates to adjust for.  On
+diabetes (``n = 442``, ``p = 10``, regression) the lifting beats PCA by
+``+0.013`` R^2 under a linear model and ``+0.044`` under a forest, both
+``p < 0.002``, and consolidation is neutral.  On Cleveland heart disease
+(``n = 297``, ``p = 13``, classification) PCA wins: the lifting loses ``0.007``
+to ``0.012`` AUC and consolidation loses ``0.017`` to ``0.018``, small but
+consistent across folds.  At ``p = 13`` with ``k = 3`` a disjoint partition
+leaves about four features per part, so the consolidated basis is close to a
+hard feature partition and pays for it.  The honest summary across all three
+datasets is that these bases are competitive-to-better on regression and pay a
+modest reproducible price on small-``p`` classification, and that consolidation
+is a sparsity control rather than an accuracy one.
+
+Caveats.  The biomedical-imaging evidence is one cohort, one modality
 (``p = 66``, ``n ~ 300``), and nine outcomes that share subjects and are therefore
-not nine independent tests.  ``w`` and ``k`` were not selected by nested
-cross-validation.
+not nine independent tests; the two UCI sets are independent of it but are
+tabular and small-``p``, so they check whether the result travels, not whether it
+holds on other imaging cohorts.  ``w`` and ``k`` were not selected by nested
+cross-validation anywhere.
 
 Gradient.  With ``F(V)`` the reconstruction term, ``dF/dV+ = dF/dV`` and
 ``dF/dV- = -dF/dV`` by the chain rule, so the data term costs one extra sign flip
