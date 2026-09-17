@@ -85,28 +85,14 @@ spans what the data needs.  ``w = 0.5`` is also the best setting for sparsity
 (largest part 18, against 22 at ``w = 0.75``), so the two objectives do not
 conflict here and there is nothing to trade off.
 
-Replication.  A second-cohort attempt on PPMI is not usable and does not bear
-on the above in either direction: it was run with age and education as the only
-covariates, and PPMI's confounds dominate both targets.  SAA status in that
-extract is largely a proxy for cohort membership (cohort label alone predicts it
-at AUC 0.920), and for UPDRS-I neither medication dose nor disease duration was
-adjusted.  See ``experiments/exp20_ppmi_replication.py``, which records the
-attempt, its numbers and why they are uninterpretable.
-
-Repaired, PPMI does not replicate the ADNI result.  ``exp22`` reruns the same
-cohort with the confounds modelled: SAA scored within the SPORADIC prodromal
-stratum, since genetic subtype almost determines the label inside the prodromal
-group (sporadic 63% positive, GBA 7.2%, LRRK2 7.0%); age, sex, education,
-imaging protocol and brain volume adjusted everywhere; genotype added where a
-stratum mixes subtypes; medication dose and disease duration added in PD.
-Across 80 basis-vs-PCA comparisons no basis significantly beats PCA anywhere and
-13 are significantly worse, so exp20's apparent UPDRS-I wins were
-confound-driven.  The only positive pattern is that on the two clean sporadic
-targets under a forest, consolidation is above PCA in 4 of 4 comparisons (mean
-+0.0152) and is the only basis with a positive mean there -- but no comparison
-reaches significance and the four are not independent.  That is a direction, not
-a replication.  UPDRS-I is not predictable from T1w in this cohort at all: the
-forest R^2 is negative in absolute terms for every basis including PCA.
+Replication.  PPMI was tried as a second cohort and is not evidence either way.
+It was picked for being on hand rather than for being a good test of anything
+here, and it does not have the signal to settle a basis comparison: with all 66
+features and every confound in the model, the ceiling over a confound-only model
+is +0.067 AUC for SAA and R^2 ~ 0 for UPDRS-I, against between-basis differences
+of about 0.015.  ``experiments/exp20`` (retracted, confounded) and
+``experiments/exp22`` (confounds modelled, null) hold the record; neither belongs
+in a claim about the method and neither is in the paper.
 
 Replication on confound-light data splits, and it splits on ``p``.  Two UCI
 sets (``experiments/exp21_uci_replication.py``) were run instead, chosen because
@@ -123,12 +109,10 @@ datasets is that these bases are competitive-to-better on regression and pay a
 modest reproducible price on small-``p`` classification, and that consolidation
 is a sparsity control rather than an accuracy one.
 
-Caveats.  The evidence is mixed and the reader should weight it accordingly.
-The positive imaging result is one cohort, one modality (``p = 66``,
+Caveats.  The positive imaging result is one cohort, one modality (``p = 66``,
 ``n ~ 300``), and nine outcomes that share subjects and are therefore not nine
-independent tests.  The one attempt at a second imaging cohort, on PPMI with
-confounds properly modelled, did not replicate it.  The two UCI sets go one each
-way.  What is solid is the sparsity behaviour, which is structural rather than
+independent tests.  The two UCI sets go one each way.  There is no second
+imaging cohort with enough signal to replicate or refute it.  What is solid is the sparsity behaviour, which is structural rather than
 statistical: consolidation gives exactly disjoint supports in both lobes at
 roughly 10% density with no component lost, on every dataset tried.  What is not
 established is that this buys predictive accuracy in general.  ``w`` and ``k``

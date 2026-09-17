@@ -35,7 +35,21 @@ The confound-only model is fit on the same folds and reported, so "imaging adds
 this much" is a number rather than an assumption.  Everything is compared
 against PCA on identical folds with a paired t-test.
 
-RESULT.  Modelling the confounds removes the effect.  Across 80 basis-vs-PCA
+RESULT.  The honest answer is that this cohort cannot decide the question, and
+the first version of this note overstated the result by calling it negative.
+
+Ceiling first, because it governs how to read everything else
+(``paper/results/e22_ceiling.csv``).  Using ALL 66 features with no reduction --
+the upper bound for any k = 5 basis -- buys +0.067 AUC over a confound-only model
+for SAA in sporadic prodromals (0.6445 to 0.7116) and, for UPDRS-I in sporadic
+PD, reaches R^2 = -0.0015: a full-feature model with every confound is still no
+better than predicting the training mean.  Under linear models the full-feature
+ceiling is NEGATIVE on all five tasks.  So the total imaging signal available
+here is at most a few hundredths, and the between-basis differences this
+experiment set out to resolve are about 0.015.  A null under those conditions is
+uninformative, not evidence against the method.
+
+With that established: across 80 basis-vs-PCA
 comparisons (5 tasks x 2 models x 2 designs x 4 non-PCA bases) there is not one
 in which any basis significantly beats PCA, and 13 in which one is
 significantly worse.  exp20's apparent UPDRS-I wins (+0.015 to +0.017, p < 0.04)
@@ -66,10 +80,12 @@ under the forest, ``signed_consolidated`` is above PCA in 4 of 4 comparisons
 and a 4-of-4 sign test is p = 0.125 on its own.  This is a direction, not a
 result, and at n = 299 and n = 613 the study is not powered to settle it.
 
-So PPMI does not replicate the ADNI CDRSB finding (consolidated +0.098 R^2,
-t = 4.2).  Whether that is because the ADNI result is cohort-specific, because
-PD imaging-to-symptom signal is genuinely weaker, or because these targets are
-simply harder after adjustment, this experiment cannot distinguish.
+PPMI therefore neither replicates nor refutes the ADNI CDRSB finding
+(consolidated +0.098 R^2, t = 4.2).  It was chosen because it was on hand, not
+because it was a principled test of the method, and a cohort whose total
+imaging signal is a few hundredths cannot discriminate between bases.  Read
+exp20 and exp22 as a record of a dead end, and keep both out of any claim about
+the method.  Neither appears in the paper.
 """
 import warnings
 
