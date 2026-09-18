@@ -39,6 +39,7 @@ from .signed import consolidate_supports, nsa_flow_signed, part_sparsity
 from .subspace import (SubspaceAnchor, negative_mass, subspace_fidelity,
                        grad_subspace_fidelity)
 from .layers import NSAFlowLinear, NSAFlowConv2d, NSAFlowLayer
+from .sklearn import NSAFlow
 
 __version__ = "2.10.0"
 
@@ -66,5 +67,7 @@ __all__ = [
     "nsa_flow_signed",
     # layers
     "NSAFlowLinear", "NSAFlowConv2d", "NSAFlowLayer",
+    # scikit-learn estimator
+    "NSAFlow",
     "__version__",
 ]
