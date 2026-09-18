@@ -140,7 +140,67 @@
 </tbody>
 </table>
 
-<h2>2. Golub Leukemia ALL vs AML (Held-Out Test Split, In-Fold Filtering p=2000)</h2>
+<h2>2. Primary Result: Golub 3-Class Benchmark (B-ALL / T-ALL / AML, n=72, p=2000, k=3)</h2>
+<div class="callout">
+    <b>Hard Multiclass Separation (B-ALL n=38, T-ALL n=9, AML n=25):</b> Evaluated with 5-fold stratified cross-validation on macro balanced accuracy. Signed PCA (<code>w=0.0</code>) achieves top forest accuracy (<b>0.7567</b>, beating Standard PCA by +0.0284). Consolidated signed variants deliver <b>66.67% exact disjoint sparsity</b> (zero feature overlap) while preserving strong linear accuracy.
+</div>
+<table>
+<thead>
+    <tr>
+        <th>Method</th>
+        <th>Linear Balanced Accuracy</th>
+        <th>Random Forest Balanced Accuracy</th>
+        <th>Disjoint Sparsity</th>
+        <th>Description</th>
+    </tr>
+</thead>
+<tbody>
+    <tr>
+        <td><b>Standard PCA</b></td>
+        <td>0.7638 &plusmn; 0.1500</td>
+        <td>0.7283 &plusmn; 0.1451</td>
+        <td>0.00%</td>
+        <td>Dense baseline; strong linear separation</td>
+    </tr>
+    <tr>
+        <td><b>Signed (w=0.0)</b></td>
+        <td>0.7638 &plusmn; 0.1500</td>
+        <td class="metric-best"><b>0.7567 &plusmn; 0.1470</b></td>
+        <td>0.00%</td>
+        <td>Signed PCA lifting; top non-linear classification accuracy</td>
+    </tr>
+    <tr>
+        <td><b>Signed+consol (w=0.0)</b></td>
+        <td>0.7638 &plusmn; 0.1500</td>
+        <td>0.7188 &plusmn; 0.1544</td>
+        <td><b>66.67%</b></td>
+        <td>Exact disjoint partitions; matches PCA linear accuracy</td>
+    </tr>
+    <tr>
+        <td><b>Signed+consol (w=0.5)</b></td>
+        <td>0.6721 &plusmn; 0.1125</td>
+        <td>0.6783 &plusmn; 0.0816</td>
+        <td><b>66.67%</b></td>
+        <td>Trade-off regularized disjoint components</td>
+    </tr>
+    <tr>
+        <td><b>Signed (w=0.5)</b></td>
+        <td>0.6721 &plusmn; 0.1125</td>
+        <td>0.6317 &plusmn; 0.0517</td>
+        <td>35.08%</td>
+        <td>Partially sparse contrast lobes</td>
+    </tr>
+    <tr>
+        <td><b>NSA-Flow data (w=0.5)</b></td>
+        <td>0.5838 &plusmn; 0.0658</td>
+        <td>0.6460 &plusmn; 0.0285</td>
+        <td>50.35%</td>
+        <td>Pure non-negative data reconstruction</td>
+    </tr>
+</tbody>
+</table>
+
+<h2>3. Golub Leukemia ALL vs AML (Held-Out Test Split, In-Fold Filtering p=2000)</h2>
 <table>
 <thead>
     <tr>
