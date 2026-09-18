@@ -269,8 +269,9 @@ def _split(W):
 
 
 def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Cg", lobe=1.0,
-                    max_iter=3000, tol=None, sigma=1e-4, dtype=None, device=None,
-                    verbose=False, keep_trace=False, consolidate=False):
+                    max_iter=8000, tol=None, sigma=1e-4, dtype=None, device=None,
+                    verbose=False, keep_trace=False, consolidate=False,
+                    optimizer="spg"):
     """Fit ``V = V+ - V-`` with ``[V+|V-] >= 0`` near-disjoint, reconstructing ``X``.
 
     Returns an ``NSAResult`` whose ``Y`` is the signed ``V`` of shape ``[p, k]``;
@@ -396,11 +397,20 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Cg", lobe=1.0,
     trace = [] if keep_trace else None
     t0 = time.time()
 
-    W, E, it, stop, gmap = _spg_loop(
-        W, project_nonneg, _energy, _grad_and_energy,
-        max_iter, tol, sigma, verbose=verbose,
-        trace=trace, caller="nsa_flow_signed", w=w,
-    )
+    if optimizer == "lbfgs":
+        from .solve import _lbfgs_b_loop
+        bounds = [(0.0, None)] * W.numel()
+        W, E, it, stop, gmap = _lbfgs_b_loop(
+            W, bounds, _energy, _grad_and_energy,
+            max_iter=max_iter, tol=tol, verbose=verbose,
+            trace=trace, caller="nsa_flow_signed", w=w,
+        )
+    else:
+        W, E, it, stop, gmap = _spg_loop(
+            W, project_nonneg, _energy, _grad_and_energy,
+            max_iter, tol, sigma, verbose=verbose,
+            trace=trace, caller="nsa_flow_signed", w=w,
+        )
 
     # For the result we need up-to-date F and D.
     E_final, F_final, D_final = parts_energy(W)
@@ -408,10 +418,8 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Cg", lobe=1.0,
 
     if consolidate:
         # Round to exactly disjoint supports, then keep optimising with the
-        # support fixed.  The projection onto {W >= 0, support subset of mask} is
-        # the clamp followed by the mask, so the same line search applies.
+        # support fixed.
         mask = (consolidate_supports(W) != 0)
-        proj_masked = lambda A: A.clamp_min(0.0) * mask
 
         def _c_energy(Wv):
             return parts_energy(Wv)[0]
@@ -421,11 +429,22 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Cg", lobe=1.0,
             _last_parts[0], _last_parts[1] = float(Fc), float(Dc)
             return Ec, parts_grad(Wv)
 
-        W, _E2, _it2, stop, gmap = _spg_loop(
-            W, proj_masked, _c_energy, _c_grad_and_energy,
-            max_iter, tol, sigma, verbose=False,
-            trace=None, caller="nsa_flow_signed (consolidate)",
-        )
+        if optimizer == "lbfgs":
+            from .solve import _lbfgs_b_loop
+            mask_flat = mask.cpu().numpy().flatten()
+            c_bounds = [(0.0, None) if m else (0.0, 0.0) for m in mask_flat]
+            W, _E2, _it2, stop, gmap = _lbfgs_b_loop(
+                W, c_bounds, _c_energy, _c_grad_and_energy,
+                max_iter=max_iter, tol=tol, verbose=False,
+                trace=None, caller="nsa_flow_signed (consolidate)",
+            )
+        else:
+            proj_masked = lambda A: A.clamp_min(0.0) * mask
+            W, _E2, _it2, stop, gmap = _spg_loop(
+                W, proj_masked, _c_energy, _c_grad_and_energy,
+                max_iter, tol, sigma, verbose=False,
+                trace=None, caller="nsa_flow_signed (consolidate)",
+            )
         E_final, F_final, D_final = parts_energy(W)
         E, F, D = float(E_final), float(F_final), float(D_final)
 

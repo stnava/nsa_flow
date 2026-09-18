@@ -51,7 +51,7 @@ from .project import project_nonneg
 from .subspace import (SubspaceAnchor, negative_mass, subspace_fidelity,
                        grad_subspace_fidelity)
 
-__all__ = ["nsa_flow", "NSAResult", "_spg_loop"]
+__all__ = ["nsa_flow", "NSAResult", "_spg_loop", "_lbfgs_b_loop", "_nsa_flow_anchored"]
 
 _T_MIN, _T_MAX = 1e-12, 1e12
 _COMPILED = None
@@ -232,11 +232,11 @@ def _spg_loop(Y, proj, energy_fn, grad_fn, max_iter, tol, sigma,
     patience : int
         Plateau window length.  If the energy has not changed by more than
         ``rtol`` (relative) over the last ``patience`` accepted steps, stop
-        with ``stop_reason="plateau"``.  Default 50.
+        with ``stop_reason="plateau"``.  Default 30.
     rtol : float
         Relative energy tolerance for plateau detection.
         ``(E_max - E_min) / (1 + |E_min|) < rtol`` triggers the stop.
-        Default 1e-7 (energy converged to ~7 significant figures).
+        Default 1e-5 (energy converged to ~5 significant figures).
     verbose : bool
     trace : list or None
         Append ``dict(iter, energy, grad_map, step)`` if not None.
@@ -262,16 +262,23 @@ def _spg_loop(Y, proj, energy_fn, grad_fn, max_iter, tol, sigma,
     E_window = []                               # for plateau detection
 
     for it in range(1, max_iter + 1):
-        if Y_prev is not None:                      # Barzilai-Borwein
+        if Y_prev is not None:                      # Barzilai-Borwein with ABB
             s_ = Y - Y_prev
             r_ = g - g_prev
             sr = float((s_ * r_).sum())
-            t = float((s_ * s_).sum()) / sr if sr > 0 else _T_MAX
+            if sr > 0:
+                if it % 2 == 0:
+                    t = float((s_ * s_).sum()) / sr
+                else:
+                    t = sr / max(float((r_ * r_).sum()), 1e-12)
+            else:
+                # Safeguard: when sr <= 0 (non-convex curvature), don't jump to 1e12
+                t = min(max(t, 1e-3), 10.0)
             t = min(max(t, _T_MIN), _T_MAX)
 
         accepted = False
         t_first, dn2_first = t, None
-        for _ in range(60):                         # Armijo backtracking
+        for _ in range(30):                         # Armijo backtracking
             Y_new = proj(Y - t * g)
             d_ = Y_new - Y
             dn2 = float((d_ * d_).sum())
@@ -333,10 +340,39 @@ def _spg_loop(Y, proj, energy_fn, grad_fn, max_iter, tol, sigma,
     return Y, E, it, stop, gmap
 
 
-def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
-             continuation=0, w_start=0.0, sigma=1e-4, dtype=None, device=None,
-             verbose=False, keep_trace=False, compile=False, align=False,
-             fidelity="auto", neg_mass_tol=0.01, orth="D"):
+def _lbfgs_b_loop(Y, bounds, energy_fn, grad_fn, max_iter=2000, tol=1e-5,
+                  verbose=False, trace=None, caller="", w=None):
+    """Quasi-Newton L-BFGS-B loop for box-constrained optimization."""
+    from scipy.optimize import minimize
+    import numpy as np
+    shape = Y.shape
+    device = Y.device
+    dtype = Y.dtype
+
+    def f_and_g(y_flat):
+        Y_t = torch.as_tensor(y_flat.reshape(shape), dtype=dtype, device=device)
+        E, g = grad_fn(Y_t)
+        return float(E), g.detach().cpu().numpy().astype(np.float64).flatten()
+
+    y0 = Y.detach().cpu().numpy().astype(np.float64).flatten()
+    res = minimize(
+        f_and_g, y0, method="L-BFGS-B", jac=True, bounds=bounds,
+        options=dict(maxiter=max_iter, ftol=1e-8, gtol=tol if tol is not None else 1e-5)
+    )
+    Y_opt = torch.as_tensor(res.x.reshape(shape), dtype=dtype, device=device)
+    E_opt = float(res.fun)
+    gmap = float(np.max(np.abs(res.jac)))
+    msg = str(res.message).upper()
+    stop = "grad_map" if res.success else ("plateau" if "CONVERGENCE" in msg else "max_iter")
+    if trace is not None:
+        trace.append(dict(iter=res.nit, energy=E_opt, grad_map=gmap, step=0.0))
+    return Y_opt, E_opt, res.nit, stop, gmap
+
+
+def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
+                      continuation=0, w_start=0.0, sigma=1e-4, dtype=None, device=None,
+                      verbose=False, keep_trace=False, compile=False, align=False,
+                      fidelity="auto", neg_mass_tol=0.01, orth="D"):
     """Fit a non-negative, near-orthogonal ``Y`` close to ``target``.
 
     Parameters
@@ -574,3 +610,85 @@ def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
         seconds=time.time() - t0,
         w_schedule=ws, trace=trace, nonneg=bool(nonneg),
     )
+
+
+def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=True,
+             consolidate=False, optimizer="spg", init=None, max_iter=None,
+             tol=None, **kwargs):
+    """Unified high-level entry point for NSA-Flow representation learning.
+
+    Automatically inspects input structure, data sign distribution, and task
+    parameters to select the appropriate specialized method:
+
+    1. **Data-reconstruction mode** (when data is non-negative, or ``mode='data'``):
+       Fits non-negative basis ``V >= 0`` reconstructing ``X ≈ X V V'``.
+    2. **Signed-lifting mode** (when data has negative entries, or ``mode='signed'``):
+       Lifts data into positive and negative lobes ``V = V+ - V-``, discovering
+       sparse contrast components.  Pass ``consolidate=True`` for strictly disjoint
+       supports (zero lobe overlap).
+    3. **Anchored mode** (when ``k`` is omitted on a target matrix, or ``mode='anchored'``):
+       Perturbs an existing target loading matrix (e.g. PCA loadings) toward
+       the non-negative Stiefel manifold.
+
+    Parameters
+    ----------
+    data_or_target : array-like or Tensor
+        Input 2D matrix: either data [n, p] or target [p, k].
+    k : int, optional
+        Number of components to extract. If omitted and mode='auto', treats input
+        as an anchored target matrix [p, k].
+    w : float, default 0.5
+        Trade-off parameter in [0, 1]. w=0 maximizes fidelity, w=1 maximizes orthogonality.
+    mode : {"auto", "data", "nonneg", "signed", "contrast", "anchored", "target"}
+        Execution mode. Default 'auto' detects from data signs and arguments.
+    consolidate : bool, default False
+        Guarantees exact disjoint supports per component in signed mode.
+    optimizer : {"spg", "lbfgs"}, default "spg"
+        Optimization algorithm: 'spg' (pure PyTorch) or 'lbfgs' (SciPy L-BFGS-B).
+    init : str or Tensor, optional
+        Initial point strategy or tensor.
+    max_iter : int, optional
+        Maximum iterations. Default adapted to method.
+    tol : float, optional
+        Stationarity tolerance.
+    **kwargs :
+        Additional arguments forwarded to the selected solver.
+
+    Returns
+    -------
+    NSAResult
+        Result dictionary-like object with `.Y`, `.energy`, `.fidelity`, `.defect`,
+        `.iters`, `.stop_reason`, `.converged`, and metadata.
+    """
+    X = torch.as_tensor(data_or_target)
+    if X.ndim != 2:
+        raise ValueError(f"Input must be 2-D [n, p] or [p, k]; got shape {tuple(X.shape)}")
+
+    if mode == "auto":
+        if k is not None:
+            min_val = float(X.min())
+            mode = "signed" if min_val < -1e-12 else "data"
+        else:
+            mode = "anchored"
+
+    if mode in ("data", "nonneg"):
+        from .reconstruct import nsa_flow_data
+        init_strat = init if init is not None else "clamp"
+        iter_cap = max_iter if max_iter is not None else 2000
+        return nsa_flow_data(X, k=k, w=w, init=init_strat, max_iter=iter_cap,
+                             tol=tol, optimizer=optimizer, **kwargs)
+
+    elif mode in ("signed", "contrast"):
+        from .signed import nsa_flow_signed
+        init_strat = init if init is not None else "relax"
+        iter_cap = max_iter if max_iter is not None else 8000
+        return nsa_flow_signed(X, k=k, w=w, init=init_strat, consolidate=consolidate,
+                               max_iter=iter_cap, tol=tol, optimizer=optimizer, **kwargs)
+
+    elif mode in ("anchored", "target"):
+        iter_cap = max_iter if max_iter is not None else 20000
+        return _nsa_flow_anchored(X, w=w, nonneg=nonneg, init=init,
+                                  max_iter=iter_cap, tol=tol, **kwargs)
+
+    else:
+        raise ValueError(f"Unknown mode {mode!r}; choose 'auto', 'data', 'signed', or 'anchored'")

@@ -180,11 +180,12 @@ def plot_sweep(ws, out, title, outpath):
     print(f"  Saved {outpath}")
 
 
-for ds_name, loader in DATASETS:
-    print(f"\n=== {ds_name} ===")
-    T, title = loader()
-    print(f"  Shape: {tuple(T.shape)}")
-    out = sweep(T, K, WS)
-    plot_sweep(WS, out, title, FIGS / f"fig4_wsweep_{ds_name}.png")
+if __name__ == "__main__":
+    for ds_name, loader in DATASETS:
+        print(f"\n=== {ds_name} ===")
+        T, title = loader()
+        print(f"  Shape: {tuple(T.shape)}")
+        out = sweep(T, K, WS)
+        plot_sweep(WS, out, title, FIGS / f"fig4_wsweep_{ds_name}.png")
 
-print("\nAll figures saved.")
+    print("\nAll figures saved.")

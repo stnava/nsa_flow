@@ -249,9 +249,9 @@ def _orth_terms(orth, k):
     raise ValueError(f"orth must be 'D', 'C' or 'Cg'; got {orth!r}")
 
 
-def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="C", max_iter=500,
+def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="C", max_iter=2000,
                   tol=None, sigma=1e-4, dtype=None, device=None, verbose=False,
-                  keep_trace=False, matrix_free=None):
+                  keep_trace=False, matrix_free=None, optimizer="spg"):
     """Fit a non-negative, near-orthonormal basis ``V`` reconstructing ``X``.
 
     Parameters
@@ -395,11 +395,20 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="C", max_iter=500,
     trace = [] if keep_trace else None
     t0 = time.time()
 
-    V, E, it, stop, gmap = _spg_loop(
-        V, project_nonneg, _energy, _grad_and_energy,
-        max_iter, tol, sigma, verbose=verbose,
-        trace=trace, caller="nsa_flow_data", w=w,
-    )
+    if optimizer == "lbfgs":
+        from .solve import _lbfgs_b_loop
+        bounds = [(0.0, None)] * V.numel()
+        V, E, it, stop, gmap = _lbfgs_b_loop(
+            V, bounds, _energy, _grad_and_energy,
+            max_iter=max_iter, tol=tol, verbose=verbose,
+            trace=trace, caller="nsa_flow_data", w=w,
+        )
+    else:
+        V, E, it, stop, gmap = _spg_loop(
+            V, project_nonneg, _energy, _grad_and_energy,
+            max_iter, tol, sigma, verbose=verbose,
+            trace=trace, caller="nsa_flow_data", w=w,
+        )
 
     # Re-evaluate to get fresh F and D at the final iterate.
     E_final, F_final, D_final = energy_of(V)
