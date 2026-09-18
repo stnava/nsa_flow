@@ -29,7 +29,8 @@ from .energy import (
     procrustes_rotation,
     aligned_target,
 )
-from .angle import angle_defect, cosine_matrix, grad_angle_defect
+from .angle import (angle_defect, cosine_matrix, grad_angle_defect,
+                    gram_offdiag_defect, grad_gram_offdiag_defect)
 from .project import project_nonneg, project_scaled_stiefel, polar_factor
 from .solve import nsa_flow, NSAResult
 from .reconstruct import (GramOperator, nsa_flow_data, reconstruction_fidelity,
@@ -49,6 +50,7 @@ __all__ = [
     "procrustes_rotation", "aligned_target",
     # orthogonality (as against orthonormality)
     "angle_defect", "cosine_matrix", "grad_angle_defect",
+    "gram_offdiag_defect", "grad_gram_offdiag_defect",
     # projections
     "project_nonneg", "project_scaled_stiefel", "polar_factor",
     # solver

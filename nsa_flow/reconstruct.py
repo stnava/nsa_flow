@@ -233,7 +233,10 @@ def _orth_terms(orth, k):
                 lambda V: inv * grad_stiefel_defect(V))
     if orth == "C":                      # orthogonality only: mean cos^2
         return angle_defect, grad_angle_defect
-    raise ValueError(f"orth must be 'D' or 'C'; got {orth!r}")
+    if orth == "Cg":                     # smooth orthogonality; see nsa_flow.angle
+        from .angle import gram_offdiag_defect, grad_gram_offdiag_defect
+        return gram_offdiag_defect, grad_gram_offdiag_defect
+    raise ValueError(f"orth must be 'D', 'C' or 'Cg'; got {orth!r}")
 
 
 def nsa_flow_data(X, k=None, w=0.5, *, init="relax", orth="C", max_iter=5000,

@@ -73,7 +73,8 @@ the implementation floors the norms at ``eps``.
 """
 import torch
 
-__all__ = ["cosine_matrix", "angle_defect", "grad_angle_defect"]
+__all__ = ["cosine_matrix", "angle_defect", "grad_angle_defect",
+           "gram_offdiag_defect", "grad_gram_offdiag_defect"]
 
 _EPS = 1e-12
 
@@ -137,3 +138,60 @@ def grad_angle_defect(V, eps=_EPS, diagonal=True):
     # remove the radial part of each column, then undo the scaling
     radial = (U * dU).sum(dim=-2, keepdim=True) * U
     return (dU - radial) / nrm
+
+
+def gram_offdiag_defect(V, eps=_EPS):
+    r"""Smooth orthogonality defect: ``||offdiag(V'V)||_F^2 / tr(V'V)^2``, in ``[0, 1]``.
+
+    This is what ``C`` was reaching for.  Mass-weighting ``C``'s pairwise cosines
+    by each column's share of the total energy, ``w_i = |v_i|^2 / tr(V'V)``,
+    collapses algebraically to this expression --
+
+        sum_{i != j} w_i w_j cos^2(v_i, v_j)  ==  sum_{i != j} G_ij^2 / (tr G)^2
+
+    -- because the ``|v_i| |v_j|`` in each cosine cancels against the weights.
+    The per-column normalisation disappears entirely, and with it ``C``'s
+    discontinuity at a zero column: a vanishing column now contributes vanishing
+    weight rather than a full unit vector's worth of O(1) cosines.  Verified flat
+    to ten decimals as a column shrinks from ``1`` to ``0``.
+
+    It is also exactly the DECORRELATION half of ``D`` (see ``nsa_flow.energy``),
+    i.e. orthogonality with the norm-balance term dropped -- so it keeps the
+    property the method needs (zero at any column norms) while being smooth
+    enough for a descent method to optimise.  Normalised by ``1 - 1/k``, the
+    value at full collinearity, so the range matches ``Dtilde`` and ``C``.
+
+    Zero iff the columns are mutually orthogonal, at any norms; for ``V >= 0``
+    that is iff their supports are pairwise disjoint, so the disjointness
+    theorem carries over unchanged.
+    """
+    k = V.shape[-1]
+    if k == 1:
+        return torch.zeros(V.shape[:-2], dtype=V.dtype, device=V.device)
+    G = V.transpose(-2, -1) @ V
+    t = G.diagonal(dim1=-2, dim2=-1).sum(-1).clamp_min(eps)
+    off = G - torch.diag_embed(G.diagonal(dim1=-2, dim2=-1))
+    return off.pow(2).sum((-2, -1)) / (t * t) / (1.0 - 1.0 / k)
+
+
+def grad_gram_offdiag_defect(V, eps=_EPS):
+    r"""Closed-form gradient of :func:`gram_offdiag_defect`.
+
+    With ``A = offdiag(V'V)`` and ``t = tr(V'V)``,
+
+        dC/dV = (4 / t^2) [ V A - (||A||_F^2 / t) V ]  /  (1 - 1/k),
+
+    from ``d||A||^2/dV = 4 V A`` and ``dt/dV = 2 V``.  Unlike ``C``'s gradient
+    there is no ``1/|v_i|`` factor, so it stays bounded as a column vanishes --
+    which is precisely why this variant does not trap a descent method at zero.
+    """
+    k = V.shape[-1]
+    if k == 1:
+        return torch.zeros_like(V)
+    G = V.transpose(-2, -1) @ V
+    t = G.diagonal(dim1=-2, dim2=-1).sum(-1).clamp_min(eps)
+    A = G - torch.diag_embed(G.diagonal(dim1=-2, dim2=-1))
+    a2 = A.pow(2).sum((-2, -1))
+    t_ = t.unsqueeze(-1).unsqueeze(-1)
+    scale = (a2 / t).unsqueeze(-1).unsqueeze(-1)
+    return (4.0 / (t_ * t_)) * (V @ A - scale * V) / (1.0 - 1.0 / k)

@@ -161,3 +161,71 @@ def test_documented_formula_reproduces_the_implementation():
     cases.append(Z2)
     for V in cases:
         assert abs(float(angle_defect(V)) - documented(V)) < 1e-12
+
+
+# ------------------------------------------- the smooth orthogonality defect
+def test_gram_offdiag_equals_the_mass_weighted_angle_defect():
+    """The identity the smooth variant rests on.
+
+    Weighting C's pairwise cosines by each column's energy share cancels the
+    |v_i||v_j| in the cosine, leaving the off-diagonal Gram energy over the
+    squared trace -- no per-column normalisation, hence no discontinuity.
+    """
+    from nsa_flow import gram_offdiag_defect
+    torch.manual_seed(0)
+    for shrink in (1.0, 1e-8, 1e-20):
+        V = torch.rand(20, 4, dtype=F64)
+        V[:, 3] *= shrink
+        n2 = V.pow(2).sum(0)
+        wt = n2 / n2.sum()
+        U = V / n2.clamp_min(1e-300).sqrt()
+        M = U.T @ U
+        off = (M - torch.diag(torch.diagonal(M))) ** 2
+        weighted = float(((wt[:, None] * wt[None, :]) * off).sum()) / (1 - 1 / 4)
+        assert abs(float(gram_offdiag_defect(V)) - weighted) < 1e-12
+
+
+def test_gram_offdiag_is_continuous_as_a_column_vanishes():
+    """C jumps at a zero column; this must not.  That jump trapped the solver."""
+    from nsa_flow import gram_offdiag_defect
+    torch.manual_seed(0)
+    V = torch.zeros(20, 4, dtype=F64)
+    V[:, :2] = torch.rand(20, 2, dtype=F64)
+    base = float(gram_offdiag_defect(V))
+    for e in (1e-30, 1e-12, 1e-8, 1e-6):
+        W = V.clone()
+        W[:, 2] = e * torch.rand(20, dtype=F64)
+        assert abs(float(gram_offdiag_defect(W)) - base) < 1e-8, e
+    # and C, for contrast, moves by a large finite amount over the same range
+    lo = float(angle_defect(V, diagonal=False))
+    W = V.clone(); W[:, 2] = 1e-12 * torch.rand(20, dtype=F64)
+    assert abs(float(angle_defect(W, diagonal=False)) - lo) > 0.05
+
+
+def test_gram_offdiag_gradient_matches_autograd():
+    from nsa_flow import gram_offdiag_defect, grad_gram_offdiag_defect
+    torch.manual_seed(0)
+    for shrink in (1.0, 1e-6, 1e-18):
+        V = torch.rand(25, 5, dtype=F64)
+        V[:, 4] *= shrink
+        Vg = V.clone().requires_grad_(True)
+        gram_offdiag_defect(Vg).backward()
+        assert (Vg.grad - grad_gram_offdiag_defect(V)).abs().max() < 1e-14
+
+
+def test_gram_offdiag_properties():
+    """Zero at orthogonality for any norms; one at collinearity; gauge free."""
+    from nsa_flow import gram_offdiag_defect as C
+    torch.manual_seed(0)
+    Q = torch.linalg.qr(torch.randn(20, 5, dtype=F64))[0]
+    assert float(C(Q)) < 1e-24
+    s = torch.rand(5, dtype=F64) * 10 + 1
+    assert abs(float(C(Q * s)) - float(C(Q))) < 1e-24      # per-column rescale
+    O = torch.linalg.qr(torch.randn(20, 20, dtype=F64))[0]
+    assert abs(float(C(O @ Q)) - float(C(Q))) < 1e-20      # left-orthogonal
+    D = torch.zeros(20, 5, dtype=F64)                      # disjoint non-negative
+    for j, idx in enumerate(torch.chunk(torch.randperm(20), 5)):
+        D[idx, j] = torch.rand(len(idx), dtype=F64) + 0.5
+    assert float(C(D)) < 1e-24
+    collinear = torch.rand(20, 1, dtype=F64).repeat(1, 5)
+    assert abs(float(C(collinear)) - 1.0) < 1e-12          # the upper bound

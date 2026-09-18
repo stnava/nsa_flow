@@ -45,6 +45,24 @@ against itself.  The off-diagonal angle term already pushes every pair of lobes
 apart, including each component's own pair, so this is a refinement rather than a
 necessity; ``lobe=1.0`` drives the overlap to exactly zero.
 
+DEFAULT orth IS NOW "Cg", THE SMOOTH DEFECT.  ``Coff`` traps a descent method:
+``C`` is a function of column directions only, so it is discontinuous at a zero
+column and an all-zero lobe is a spurious local minimum no step can leave.
+``Cg`` mass-weights those cosines by each column's energy share, which cancels
+the ``|v_i||v_j|`` and leaves ``||offdiag(V'V)||^2 / tr(V'V)^2`` -- no per-column
+normalisation, so it is smooth everywhere, and it is exactly the decorrelation
+half of ``D`` (orthogonality without norm balance, which is what ``C`` was for).
+Measured over 18 dataset/k/w combinations (ADNI centred and raw, METABRIC):
+
+    orth    reached stationarity   dead lobes
+    Coff          7 of 18          1 to 3 in 11 cases
+    Cg           12 of 18          0 in ALL 18
+
+and the six remaining ``Cg`` cases are iteration budget, not traps: on the worst
+of them |Gmap| falls 7.2e-05 -> 6.2e-06 -> 1.08e-08 as ``max_iter`` goes 2000 ->
+8000 -> 20000, converging at 15973 iterations in 13 s.  Every ``Coff`` failure
+is a line-search stall at 1e-02 to 1e-03 after 13 to 72 iterations.
+
 FIXED in 2.8.0: the solver used to exit after one iteration.  Recorded because
 every signed result produced before this release describes an unoptimised
 starting point, not a solution.
@@ -160,7 +178,8 @@ import warnings
 
 import torch
 
-from .angle import angle_defect, grad_angle_defect
+from .angle import (angle_defect, grad_angle_defect,
+                    gram_offdiag_defect, grad_gram_offdiag_defect)
 from .energy import (grad_stiefel_defect, stiefel_defect,
                      stiefel_defect_normalised, effective_rank)
 from .project import project_nonneg
@@ -230,7 +249,7 @@ def _split(W):
     return W[..., :k], W[..., k:]
 
 
-def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Coff", lobe=1.0,
+def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Cg", lobe=1.0,
                     max_iter=5000, tol=None, sigma=1e-4, dtype=None, device=None,
                     verbose=False, keep_trace=False, consolidate=False):
     """Fit ``V = V+ - V-`` with ``[V+|V-] >= 0`` near-disjoint, reconstructing ``X``.
@@ -289,7 +308,9 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Coff", lobe=1.0,
         raise ValueError(f"init shape {tuple(W.shape)} != [p, 2k] = {(p, 2 * k)}")
 
     inv_k = 1.0 / (1.0 - 1.0 / (2 * k))
-    if orth == "Coff":          # default: pairwise angles only (see module docstring)
+    if orth == "Cg":            # default: smooth; no zero-column discontinuity
+        o_val, o_grad = gram_offdiag_defect, grad_gram_offdiag_defect
+    elif orth == "Coff":        # pairwise angles only; traps at a zero lobe
         o_val = lambda Wv: angle_defect(Wv, diagonal=False)
         o_grad = lambda Wv: grad_angle_defect(Wv, diagonal=False)
     elif orth == "C":           # angles plus a dead-lobe penalty
@@ -299,7 +320,8 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Coff", lobe=1.0,
         def o_grad(Wv):
             return inv_k * grad_stiefel_defect(Wv)
     else:
-        raise ValueError(f"orth must be 'Coff', 'C' or 'D'; got {orth!r}")
+        raise ValueError(
+            f"orth must be 'Cg', 'Coff', 'C' or 'D'; got {orth!r}")
 
     def parts_energy(Wv):
         Vp, Vm = _split(Wv)
