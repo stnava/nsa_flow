@@ -1,4 +1,4 @@
-.PHONY: help install test theory experiments tables paper clean
+.PHONY: help install test theory experiments tables paper rmd-paper dist release clean
 
 help:
 	@echo "install      - editable install with experiment + test extras"
@@ -8,6 +8,9 @@ help:
 	@echo "tables       - rebuild paper/results/*.tex from the saved CSVs (cheap)"
 	@echo "new-benchmarks - run Tecator, Sonar & Prostate benchmarks + sweeps + tables"
 	@echo "paper        - build paper/nsaflow.pdf from existing results"
+	@echo "rmd-paper    - build paper/nsa_flow.pdf from Rmd"
+	@echo "dist         - build and check distribution wheels & sdist"
+	@echo "release      - upload dist/* to PyPI"
 	@echo "all          - experiments + paper, from scratch"
 	@echo "clean        - remove build artefacts and caches"
 	@echo ""
@@ -40,6 +43,14 @@ paper:
 
 rmd-paper:
 	Rscript -e 'rmarkdown::render("paper/nsa_flow.Rmd")'
+
+dist:
+	rm -rf dist/ build/ *.egg-info
+	python -m build
+	twine check dist/*
+
+release: dist
+	twine upload dist/*
 
 all: experiments paper
 
