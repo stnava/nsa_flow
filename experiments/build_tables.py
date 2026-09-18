@@ -197,6 +197,13 @@ def build():
             "where the problem becomes combinatorial.",
             "tab:uniqueness", floatfmt="%.3g")
 
+    # Rebuild new public benchmarks table if JSON results are present
+    try:
+        from experiments.build_new_public_tables import build_latex_table
+        build_latex_table()
+    except Exception as e:
+        print(f"Warning: could not rebuild new public benchmarks table: {e}")
+
 
 if __name__ == "__main__":
     print(f"rebuilding tables in {RES}")

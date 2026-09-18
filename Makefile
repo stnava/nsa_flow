@@ -6,6 +6,7 @@ help:
 	@echo "theory       - run only the theory property battery"
 	@echo "experiments  - run all paper experiments -> paper/results, paper/figs"
 	@echo "tables       - rebuild paper/results/*.tex from the saved CSVs (cheap)"
+	@echo "new-benchmarks - run Tecator, Sonar & Prostate benchmarks + sweeps + tables"
 	@echo "paper        - build paper/nsaflow.pdf from existing results"
 	@echo "all          - experiments + paper, from scratch"
 	@echo "clean        - remove build artefacts and caches"
@@ -27,6 +28,12 @@ experiments:
 
 tables:
 	PYTHONPATH=. python experiments/build_tables.py
+
+new-benchmarks:
+	PYTHONPATH=. python experiments/benchmark_new_public_data.py
+	PYTHONPATH=. python experiments/sweep_new_public_data.py
+	PYTHONPATH=. python experiments/plot_new_public_benchmarks.py
+	PYTHONPATH=. python experiments/build_new_public_tables.py
 
 paper:
 	cd paper && latexmk -pdf -quiet nsaflow.tex
