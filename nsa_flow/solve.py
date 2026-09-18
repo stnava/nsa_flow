@@ -2,13 +2,15 @@
 
 The problem solved is
 
-    minimise   E_w(Y) = (1 - w) ||Y - X0||_F^2 / ||X0||_F^2  +  w Dtilde(Y)
+    minimise   E_w(Y) = (1 - w) ||Y - X0||_F^2 / ||X0||_F^2  +  w Orth(Y)
     subject to Y >= 0                                        (when ``nonneg``)
 
-with ``Dtilde = D / (1 - 1/k)`` and ``D(Y) = ||G - I/k||_F^2`` for the
-trace-normalised Gram matrix ``G = Y'Y / tr(Y'Y)``.  With ``align`` the fidelity
-numerator becomes ``min_{Q in O(k)} ||Y - X0 Q||_F^2``, a distance to ``X0``'s
-right-``O(k)`` orbit rather than to the point ``X0``.
+where ``Orth`` is one of three orthogonality functionals selected by ``orth``:
+
+* ``"D"`` (default):  ``Dtilde = ||G - I/k||_F^2 / (1 - 1/k)`` for
+  the trace-normalised Gram ``G = Y'Y / tr(Y'Y)``.
+* ``"Cg"``:  ``||offdiag(V'V)||_F^2 / tr(V'V)^2``, smooth everywhere.
+* ``"C"``:  mean squared cosine between column pairs, per-column normalised.
 
 The method is Spectral Projected Gradient (Birgin, Martinez & Raydan 2000):
 Barzilai-Borwein step lengths safeguarded by an Armijo backtracking line search
@@ -18,8 +20,8 @@ gradient-mapping norm ``||Y+ - Y|| / t`` is a computable stationarity
 certificate.
 
 Cost per iteration is two ``[p,k] x [k,k]`` products plus one Gram: ``O(p k^2)``.
-No SVD, eigendecomposition or QR appears in the loop -- except under ``align``,
-which adds one ``k x k`` SVD per evaluation for the Procrustes rotation.
+No SVD, eigendecomposition or QR appears in the loop -- except under ``align``
+(deprecated), which adds one ``k x k`` SVD per evaluation.
 """
 import time
 import warnings
@@ -29,13 +31,16 @@ import warnings
 
 import torch
 
+from .angle import (angle_defect, grad_angle_defect,
+                     gram_offdiag_defect, grad_gram_offdiag_defect)
 from .energy import (energy, stiefel_defect, stiefel_defect_normalised,
-                     grad_stiefel_defect, effective_rank, value_and_grad)
+                     grad_stiefel_defect, effective_rank, value_and_grad,
+                     aligned_target)
 from .project import project_nonneg
 from .subspace import (SubspaceAnchor, negative_mass, subspace_fidelity,
                        grad_subspace_fidelity)
 
-__all__ = ["nsa_flow", "NSAResult"]
+__all__ = ["nsa_flow", "NSAResult", "_spg_loop"]
 
 _T_MIN, _T_MAX = 1e-12, 1e12
 _COMPILED = None
@@ -74,6 +79,41 @@ def _subspace_vg(anchor, inv_k):
         g = (1.0 - w) * grad_subspace_fidelity(Y, anchor)
         if k > 1 and w != 0.0:
             g = g + (w * inv_k) * grad_stiefel_defect(Y)
+        return E, F, Dn, g
+    return vg
+
+
+def _orth_terms_anchor(orth):
+    """Return (orth_val, orth_grad, inv_k_fn) for the chosen orthogonality term.
+
+    ``inv_k_fn(k)`` returns the normalisation constant such that the defect
+    equals 1.0 at full collinearity -- the same convention as Dtilde.
+    """
+    if orth == "D":
+        # Default: orthoNORMality, same normalisation as _solve_fixed_w
+        return (stiefel_defect_normalised,
+                lambda Y: (1.0 / (1.0 - 1.0 / max(Y.shape[-1], 2)))
+                           * grad_stiefel_defect(Y),
+                lambda k: 1.0 / (1.0 - 1.0 / k) if k > 1 else 0.0)
+    if orth == "Cg":
+        return (gram_offdiag_defect, grad_gram_offdiag_defect, lambda k: None)
+    if orth == "C":
+        return (angle_defect, grad_angle_defect, lambda k: None)
+    raise ValueError(f"orth must be 'D', 'Cg' or 'C' for nsa_flow; got {orth!r}")
+
+
+def _custom_orth_vg(orth_val, orth_grad):
+    """value_and_grad with a custom orthogonality term replacing Dtilde."""
+    def vg(Y, X0, w, denom, inv_k_, eye_k, align):
+        k = Y.shape[-1]
+        d_ = float(denom)
+        R = Y - (aligned_target(X0, Y) if align else X0)
+        F = R.pow(2).sum() / d_
+        Dn = orth_val(Y) if k > 1 else torch.zeros([], dtype=Y.dtype, device=Y.device)
+        E = (1.0 - w) * F + w * Dn
+        g = (1.0 - w) * (2.0 * R / d_)
+        if k > 1 and w != 0.0:
+            g = g + w * orth_grad(Y)
         return E, F, Dn, g
     return vg
 
@@ -154,10 +194,108 @@ def _solve_fixed_w(Y, X0, w, denom, nonneg, max_iter, tol, sigma, verbose, trace
     return Y, E, it, stop, gmap
 
 
+def _spg_loop(Y, proj, energy_fn, grad_fn, max_iter, tol, sigma,
+              verbose=False, trace=None, caller="", w=None):
+    """Monotone spectral projected gradient loop (shared by signed and data solvers).
+
+    Parameters
+    ----------
+    Y : Tensor
+        Starting point; projected onto the feasible set before the first step.
+    proj : callable ``Tensor -> Tensor``
+        Feasible-set projection (e.g. ``project_nonneg`` or a masked clamp).
+    energy_fn : callable ``Tensor -> float``
+        Objective value; called only inside the Armijo backtracking.
+    grad_fn : callable ``Tensor -> (E, Tensor)``
+        Returns ``(energy, gradient)`` together so the iterate's energy and
+        gradient are computed in one call after each accepted step.
+    max_iter : int
+    tol : float
+        Stop when the projected-gradient mapping norm falls below this.
+    sigma : float
+        Armijo sufficient-decrease constant.
+    verbose : bool
+    trace : list or None
+        Append ``dict(iter, energy, grad_map, step)`` if not None.
+    caller : str
+        Name used in the stall warning (e.g. ``"nsa_flow_signed"``).
+    w : float or None
+        Logged into ``trace`` if provided.
+
+    Returns
+    -------
+    Y : Tensor
+    E : float
+    it : int
+    stop : str   ``"grad_map"`` | ``"line_search"`` | ``"max_iter"``
+    gmap : float
+    """
+    Y = proj(Y)
+    E, g = grad_fn(Y)
+    E = float(E)
+    t = 1.0 / max(float(g.norm()), 1e-12)
+    Y_prev = g_prev = None
+    gmap, stop, it = float("inf"), "max_iter", 0
+
+    for it in range(1, max_iter + 1):
+        if Y_prev is not None:                      # Barzilai-Borwein
+            s_ = Y - Y_prev
+            r_ = g - g_prev
+            sr = float((s_ * r_).sum())
+            t = float((s_ * s_).sum()) / sr if sr > 0 else _T_MAX
+            t = min(max(t, _T_MIN), _T_MAX)
+
+        accepted = False
+        t_first, dn2_first = t, None
+        for _ in range(60):                         # Armijo backtracking
+            Y_new = proj(Y - t * g)
+            d_ = Y_new - Y
+            dn2 = float((d_ * d_).sum())
+            if dn2_first is None:
+                dn2_first = dn2
+            if float(energy_fn(Y_new)) <= E - sigma * dn2 / t:
+                accepted = True
+                break
+            t *= 0.5
+
+        if not accepted:
+            stop = "line_search"
+            if not math.isfinite(gmap):
+                gmap = (dn2_first ** 0.5) / t_first
+            if gmap > max(tol, 0.0) * 1e3:
+                warnings.warn(
+                    f"{caller}: line search stalled after "
+                    f"{it} iteration(s) with |Gmap|={gmap:.2e} against "
+                    f"tol={tol:.1e}; the returned point is not stationary. "
+                    "Inspect stop_reason and grad_map.",
+                    RuntimeWarning, stacklevel=3)
+            break
+
+        gmap = (dn2 ** 0.5) / t
+        Y_prev, g_prev = Y, g
+        Y = Y_new
+        E, g = grad_fn(Y)
+        E = float(E)
+
+        if trace is not None:
+            row = dict(iter=len(trace) + 1, energy=E, grad_map=gmap, step=t)
+            if w is not None:
+                row["w"] = float(w)
+            trace.append(row)
+        if verbose and (it % max(1, max_iter // 10) == 0 or it == 1):
+            w_tag = f" w={w:.3f}" if w is not None else ""
+            print(f"    [{w_tag}it={it:5d}] E={E:.8e} |Gmap|={gmap:.3e} t={t:.3e}")
+        if gmap <= tol:
+            stop = "grad_map"
+            break
+
+    return Y, E, it, stop, gmap
+
+
 def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
              continuation=0, w_start=0.0, sigma=1e-4, dtype=None, device=None,
              verbose=False, keep_trace=False, compile=False, align=False,
-             fidelity="auto", neg_mass_tol=0.01):
+             fidelity="auto", neg_mass_tol=0.01, orth="D"):
     """Fit a non-negative, near-orthogonal ``Y`` close to ``target``.
 
     Parameters
@@ -212,14 +350,34 @@ def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
     neg_mass_tol : float
         Threshold on the target's negative mass for ``fidelity="auto"``.
     align : bool
-        Anchor to ``X0``'s right-``O(k)`` orbit rather than to ``X0`` itself, by
-        replacing ``||Y - X0||_F^2`` with ``min_{Q in O(k)} ||Y - X0 Q||_F^2``
-        (orthogonal Procrustes, closed form).  Appropriate when only the *span*
-        of ``X0`` is trustworthy: ``D`` is exactly right-``O(k)`` invariant, so
-        the anchored form pays to preserve a rotation the orthogonality term
-        cannot see.  Costs one ``k x k`` SVD per iteration.  Note the energy is
-        then a difference of convex functions and is nonsmooth where ``X0'Y``
-        drops rank, so the SPG theory applies on the full-rank set only.
+        **Deprecated.** Anchor to ``X0``'s right-``O(k)`` orbit instead of
+        ``X0`` itself by replacing ``||Y - X0||_F^2`` with
+        ``min_{Q in O(k)} ||Y - X0 Q||_F^2`` (orthogonal Procrustes).  The
+        original justification was that ``D`` is right-``O(k)`` invariant, so
+        the anchored form over-constrains the problem by paying to preserve a
+        rotation the defect cannot see.  That argument does *not* carry over to
+        the ``C`` or ``Cg`` defect, which is *not* right-``O(k)`` invariant --
+        mixing columns destroys orthogonality.  Setting ``align=True`` raises a
+        ``DeprecationWarning`` and will be removed in a future release.
+    orth : {\"D\", \"Cg\", \"C\"}
+        Which orthogonality functional to minimise.
+
+        ``\"D\"`` (default) is the full Stiefel defect ``||G - I/k||_F^2``, which
+        penalises both off-diagonal correlations *and* unequal column norms.  It
+        is the right choice when the target is non-negative and column norms
+        carry interpretable information.
+
+        ``\"Cg\"`` (smooth orthogonality) is ``||offdiag(V'V)||_F^2 / tr(V'V)^2``
+        -- smooth everywhere including at zero columns, zero iff columns are
+        mutually orthogonal.  The default for ``nsa_flow_signed``; also
+        appropriate here on signed input where column-norm equality is
+        undesirable.
+
+        ``\"C\"`` (angle defect) is the mean squared cosine between column pairs,
+        normalised per column.  Carries a dead-column penalty (``diagonal=True``).
+
+        Only ``\"D\"`` is compatible with ``compile=True``; the other two call
+        angle.py functions that are not yet compiled.
     compile : bool
         Compile the fused value-and-gradient kernel with ``torch.compile``.
         Worth 3-4x at moderate sizes; costs a few seconds on first call.
@@ -254,6 +412,14 @@ def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
         raise ValueError(f"target must be 2-D [p, k]; got shape {tuple(X0.shape)}")
     if not (0.0 <= float(w) <= 1.0):
         raise ValueError(f"w must lie in [0, 1]; got {w}")
+    if align:
+        warnings.warn(
+            "nsa_flow: align=True is deprecated and will be removed in a future "
+            "release.  Its justification was D's right-O(k) invariance, which "
+            "does not carry over to the C/Cg orthogonality defect; see the "
+            "nsa_flow.angle module docstring.  The parameter remains functional "
+            "for now so existing experiments continue to run.",
+            DeprecationWarning, stacklevel=2)
     if float(w) == 1.0:
         warnings.warn(
             "w=1 drops the fidelity term, and D is scale-invariant, so the scale "
@@ -264,6 +430,7 @@ def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
             RuntimeWarning, stacklevel=2)
     if not torch.isfinite(X0).all():
         raise ValueError("target contains non-finite values")
+
 
     if tol is None:
         tol = 1e-9 if X0.dtype == torch.float64 else 1e-6
@@ -325,7 +492,11 @@ def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
         inv_k0 = 1.0 / (1.0 - 1.0 / k) if k > 1 else 0.0
         vg = _subspace_vg(anchor, inv_k0)
     else:
-        vg = _fused(compile)
+        if orth == "D":
+            vg = _fused(compile)
+        else:
+            ov, og, _ = _orth_terms_anchor(orth)
+            vg = _custom_orth_vg(ov, og)
     trace = [] if keep_trace else None
     t0 = time.time()
     total_iters, stop, gmap = 0, "max_iter", float("inf")

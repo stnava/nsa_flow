@@ -386,7 +386,7 @@ def _basis(Xc, k, w, mode):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             return nsa_flow_signed(
-                T, k=k, w=w, init="split",
+                T, k=k, w=w, init="relax",
                 consolidate=(mode == "signed_consolidated")).Y.numpy()
     L = PCA(k, random_state=0).fit(Xc).components_.T
     L = L / np.linalg.norm(L, axis=0, keepdims=True)

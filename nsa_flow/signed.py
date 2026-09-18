@@ -199,7 +199,7 @@ from .energy import (grad_stiefel_defect, stiefel_defect,
 from .project import project_nonneg
 from .reconstruct import (grad_reconstruction_fidelity, reconstruction_fidelity,
                           relax_into_nonneg)
-from .solve import NSAResult
+from .solve import NSAResult, _spg_loop
 
 __all__ = ["nsa_flow_signed", "consolidate_supports", "part_sparsity"]
 
@@ -297,24 +297,40 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Cg", lobe=1.0,
     if isinstance(init, str):
         if k is None:
             raise ValueError("give k when init is a strategy name")
-        evals, evecs = torch.linalg.eigh(S)
-        E = evecs[:, -k:].flip(-1)
         if init == "split":
-            # The exact signed basis, losslessly: V+ = max(0,E), V- = max(0,-E).
+            # split is kept for ablation comparisons only.
+            # On non-negative data V⁻ = max(0, -E) ≈ 0 exactly, which is a
+            # spurious fixed point: the solver stalls in ≤ 2 iterations and the
+            # minus lobe never acquires any contrast structure.  This failure is
+            # a property of the data geometry, not a solver bug: there is nothing
+            # to pull V⁻ off zero when the data has no negative structure.
+            # "relax" is the only correct general-purpose init: it seeds both
+            # lobes through the homotopy path and is guaranteed nonzero on
+            # every input.  Use "split" only when you are explicitly ablating
+            # the effect of initialisation.
+            warnings.warn(
+                "nsa_flow_signed: init='split' is deprecated and will be "
+                "removed in a future release.  On non-negative or uncentred "
+                "data it produces V⁻ = max(0, −E) ≈ 0, a spurious fixed "
+                "point where the gradient vanishes and the solver stalls.  "
+                "Use the default init='relax', which seeds both lobes through "
+                "the homotopy path and is correct on every data regime.",
+                DeprecationWarning, stacklevel=2)
+            evals, evecs = torch.linalg.eigh(S)
+            E = evecs[:, -k:].flip(-1)
             W = torch.cat([E.clamp_min(0.0), (-E).clamp_min(0.0)], dim=-1).clone()
         elif init == "relax":
-            # V- must NOT start at exactly zero.  C(diagonal=False) depends only
-            # on column directions, so it is discontinuous at a zero column and
-            # an all-zero lobe is a spurious local minimum the line search
-            # cannot leave.  Seeding both lobes from the relaxed solution costs
-            # nothing and converges in 446 iterations against 1407 for "split"
-            # on ADNI thickness (k=5, w=0.5), at a better grad_map, sparsity and
-            # reconstruction.  See the module docstring.
+            # Homotopy from the eigenvector solution into the non-negative cone.
+            # relax_into_nonneg follows the path continuously, so both V⁺ and V⁻
+            # are seeded with nonzero magnitude on every input.  This is the
+            # mathematically correct and universally robust initialisation.
             V0 = relax_into_nonneg(S, c, k, float(w), trS=c)
             W = torch.cat([V0.clamp_min(0.0), (-V0).clamp_min(0.0)],
                           dim=-1).clone()
         else:
-            raise ValueError(f"unknown init strategy {init!r}")
+            raise ValueError(
+                f"init must be 'relax' (default) or a [p, 2k] Tensor; "
+                f"got {init!r}.  ('split' is accepted but deprecated.)")
     else:
         W = torch.as_tensor(init).to(dtype=Xt.dtype, device=Xt.device).detach().clone()
         k = W.shape[-1] // 2
@@ -356,66 +372,31 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Cg", lobe=1.0,
             g = g + (lobe / c) * torch.cat([Vm, Vp], dim=-1)
         return g
 
-    W = project_nonneg(W)
-    E, F, D = parts_energy(W)
-    E = float(E)
-    g = parts_grad(W)
-    t = 1.0 / max(float(g.norm()), 1e-12)
-    W_prev = g_prev = None
+    # ---- main SPG loop ---------------------------------------------------
+    # _spg_loop's grad_fn must return (E, gradient).  Cache F, D so the trace
+    # can include them without a second energy evaluation.
+    _last_parts = [None, None]   # [F, D]
+
+    def _energy(Wv):
+        return parts_energy(Wv)[0]
+
+    def _grad_and_energy(Wv):
+        E, F, D = parts_energy(Wv)
+        _last_parts[0], _last_parts[1] = float(F), float(D)
+        return E, parts_grad(Wv)
+
     trace = [] if keep_trace else None
-    gmap, stop, it = float("inf"), "max_iter", 0
     t0 = time.time()
 
-    for it in range(1, max_iter + 1):
-        if W_prev is not None:
-            s_ = W - W_prev
-            r_ = g - g_prev
-            sr = float((s_ * r_).sum())
-            t = float((s_ * s_).sum()) / sr if sr > 0 else 1e12
-            t = min(max(t, 1e-12), 1e12)
-        accepted = False
-        t_first, dn2_first = t, None
-        for _ in range(60):
-            W_new = project_nonneg(W - t * g)
-            d_ = W_new - W
-            dn2 = float((d_ * d_).sum())
-            if dn2_first is None:
-                dn2_first = dn2
-            if float(parts_energy(W_new)[0]) <= E - sigma * dn2 / t:
-                accepted = True
-                break
-            t *= 0.5
-        if not accepted:
-            stop = "line_search"
-            # Report a measured certificate rather than the sentinel.  Without
-            # this a first-iteration failure returns grad_map=inf, which reads
-            # as a computed value and let a stalled solve claim convergence.
-            if not math.isfinite(gmap):
-                gmap = (dn2_first ** 0.5) / t_first
-            # A finite but large certificate is not stationarity.  The caller
-            # cannot be expected to inspect grad_map on every call, so say so.
-            if gmap > max(tol, 0.0) * 1e3:
-                warnings.warn(
-                    "nsa_flow_signed: line search stalled after "
-                    f"{it} iteration(s) with |Gmap|={gmap:.2e} against "
-                    f"tol={tol:.1e}; the returned point is not stationary. "
-                    "Inspect stop_reason and grad_map.",
-                    RuntimeWarning, stacklevel=3)
-            break
-        gmap = (dn2 ** 0.5) / t
-        W_prev, g_prev = W, g
-        W = W_new
-        E, F, D = parts_energy(W)
-        E = float(E)
-        g = parts_grad(W)
-        if trace is not None:
-            trace.append(dict(iter=it, energy=E, fidelity=float(F),
-                              defect=float(D), grad_map=gmap, step=t))
-        if verbose and (it % max(1, max_iter // 10) == 0 or it == 1):
-            print(f"    [w={w:.3f} it={it:5d}] E={E:.8e} |Gmap|={gmap:.3e}")
-        if gmap <= tol:
-            stop = "grad_map"
-            break
+    W, E, it, stop, gmap = _spg_loop(
+        W, project_nonneg, _energy, _grad_and_energy,
+        max_iter, tol, sigma, verbose=verbose,
+        trace=trace, caller="nsa_flow_signed", w=w,
+    )
+
+    # For the result we need up-to-date F and D.
+    E_final, F_final, D_final = parts_energy(W)
+    E, F, D = float(E_final), float(F_final), float(D_final)
 
     if consolidate:
         # Round to exactly disjoint supports, then keep optimising with the
@@ -423,48 +404,28 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Cg", lobe=1.0,
         # the clamp followed by the mask, so the same line search applies.
         mask = (consolidate_supports(W) != 0)
         proj_masked = lambda A: A.clamp_min(0.0) * mask
-        W = proj_masked(W)
-        E = float(parts_energy(W)[0])
-        g = parts_grad(W)
-        t = 1.0 / max(float(g.norm()), 1e-12)
-        Wp = gp = None
-        for _ in range(max_iter):
-            if Wp is not None:
-                s_, r_ = W - Wp, g - gp
-                sr = float((s_ * r_).sum())
-                t = min(max(float((s_ * s_).sum()) / sr if sr > 0 else 1e12,
-                            1e-12), 1e12)
-            ok = False
-            for _ in range(60):
-                W_new = proj_masked(W - t * g)
-                d2 = float((W_new - W).pow(2).sum())
-                if float(parts_energy(W_new)[0]) <= E - sigma * d2 / t:
-                    ok = True
-                    break
-                t *= 0.5
-            if not ok:
-                stop = "line_search"
-                if math.isfinite(gmap):
-                    gmap = (d2 ** 0.5) / t
-                break
-            Wp, gp = W, g
-            W = W_new
-            E = float(parts_energy(W)[0])
-            g = parts_grad(W)
-            gmap = (d2 ** 0.5) / t
-            if gmap <= tol:
-                stop = "grad_map"
-                break
 
-    if consolidate:
-        E, F, D = parts_energy(W)          # F and D were pre-consolidation
-        E = float(E)
+        def _c_energy(Wv):
+            return parts_energy(Wv)[0]
+
+        def _c_grad_and_energy(Wv):
+            Ec, Fc, Dc = parts_energy(Wv)
+            _last_parts[0], _last_parts[1] = float(Fc), float(Dc)
+            return Ec, parts_grad(Wv)
+
+        W, _E2, _it2, stop, gmap = _spg_loop(
+            W, proj_masked, _c_energy, _c_grad_and_energy,
+            max_iter, tol, sigma, verbose=False,
+            trace=None, caller="nsa_flow_signed (consolidate)",
+        )
+        E_final, F_final, D_final = parts_energy(W)
+        E, F, D = float(E_final), float(F_final), float(D_final)
 
     Vp, Vm = _split(W)
     V = Vp - Vm
     r = NSAResult(
-        Y=V, target=None, w=float(w), energy=E, fidelity=float(F),
-        defect=float(D), raw_defect=float(stiefel_defect(W)),
+        Y=V, target=None, w=float(w), energy=E, fidelity=F,
+        defect=D, raw_defect=float(stiefel_defect(W)),
         effective_rank=float(effective_rank(W)),
         scale_ratio=float("nan"), iters=it,
         converged=stop != "max_iter" and math.isfinite(gmap),

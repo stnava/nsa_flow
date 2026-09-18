@@ -351,6 +351,10 @@ def test_solver_gives_the_same_answer_by_either_route():
     ``||X - X V V'||_F`` and the orthogonality defect are permutation invariant,
     so the two routes can order the columns differently while agreeing on every
     scalar the solver reports.
+
+    ``GramOperator.leading()`` uses a canonical sign convention (largest-abs
+    entry positive) so that ``init="clamp"`` produces the same starting point
+    regardless of whether the SVD or eigh path is taken.
     """
     from scipy.optimize import linear_sum_assignment
     torch.manual_seed(0)

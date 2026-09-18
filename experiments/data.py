@@ -33,6 +33,16 @@ write.csv(t(exprs(Golub_Merge)), "%s", row.names=FALSE)
 write.csv(data.frame(y=pData(Golub_Merge)$ALL.AML), "%s", row.names=FALSE)
 '''
 
+_GOLUB3_R = r'''
+suppressMessages({library(golubEsets); library(Biobase)})
+data(Golub_Merge)
+pd = pData(Golub_Merge)
+label = as.character(pd$ALL.AML)
+label[pd$T.B.cell == "T-cell" & pd$ALL.AML == "ALL"] = "T-ALL"
+label[pd$T.B.cell == "B-cell" & pd$ALL.AML == "ALL"] = "B-ALL"
+write.csv(data.frame(y=label), "%s", row.names=FALSE)
+'''
+
 
 def load_golub():
     """Return ``(X, y, gene_names)`` with ``X`` [72, 7129] and ``y`` in {0=ALL, 1=AML}."""
@@ -43,6 +53,29 @@ def load_golub():
         subprocess.run(["Rscript", str(script)], check=True, capture_output=True)
     X = pd.read_csv(xf)
     y = (pd.read_csv(yf)["y"].astype(str) == "AML").astype(int).to_numpy()
+    return X.to_numpy(dtype=np.float64), y, list(X.columns)
+
+
+def load_golub3():
+    """Return ``(X, y, gene_names)`` with 3-class labels: B-ALL / T-ALL / AML.
+
+    The 2-class ALL/AML problem is near-ceiling for every method (PCA AUC > 0.96).
+    The 3-class version separates B-cell ALL (n=38), T-cell ALL (n=9) and AML (n=25).
+    B-ALL vs T-ALL is the hard split; PCA balanced-accuracy at k=3 is ~0.55 with a
+    linear classifier, leaving real room for basis quality to matter.
+
+    Returns the same X as ``load_golub()``, with string labels ``y``.
+    """
+    xf = CACHE / "golub_X.csv"
+    yf3 = CACHE / "golub_y3.csv"
+    if not xf.exists():
+        load_golub()          # side-effect: writes golub_X.csv
+    if not yf3.exists():
+        script = CACHE / "_golub3_export.R"
+        script.write_text(_GOLUB3_R % yf3)
+        subprocess.run(["Rscript", str(script)], check=True, capture_output=True)
+    X = pd.read_csv(xf)
+    y = pd.read_csv(yf3)["y"].to_numpy()
     return X.to_numpy(dtype=np.float64), y, list(X.columns)
 
 

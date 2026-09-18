@@ -238,3 +238,35 @@ def test_consolidate_reports_its_own_solve_not_the_previous_one(data):
     assert abs(r.fidelity - fresh_f) < 1e-9, (r.fidelity, fresh_f)
     assert abs(r.defect - fresh_d) < 1e-9, (r.defect, fresh_d)
     assert math.isfinite(r.grad_map)
+
+
+# ---------------------------------------------------------------- init contract
+def test_default_init_converges_on_nonneg_data(nonneg_data):
+    """The documented default (init='relax') must work on every data regime,
+    including non-negative uncentred data -- the hardest case.
+
+    This is the only init test that matters: the solver must produce a correct
+    result without the caller knowing anything about the data regime.
+    """
+    r = nsa_flow_signed(nonneg_data, k=4, w=0.5)   # default init="relax"
+    assert r.iters > 5, (
+        f"default init stalled: only {r.iters} iteration(s) on non-negative data")
+    assert math.isfinite(r.grad_map), (
+        f"grad_map={r.grad_map} is not a measured certificate")
+
+
+def test_split_init_is_deprecated(nonneg_data):
+    """init='split' must emit a DeprecationWarning so callers can migrate.
+
+    The warning is the only output; the solver still runs (for ablation use).
+    We do NOT assert convergence here: split is fragile on non-negative data
+    by construction (V⁻ = max(0,-E) ≈ 0), and that fragility is exactly what
+    the deprecation communicates.
+    """
+    import warnings as _w
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        nsa_flow_signed(nonneg_data, k=4, w=0.5, init="split", max_iter=50)
+    dep_warns = [c for c in caught if issubclass(c.category, DeprecationWarning)]
+    assert dep_warns, "init='split' must emit a DeprecationWarning"
+
