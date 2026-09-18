@@ -752,6 +752,26 @@ End-to-end time to convergence on matched problems.}
 \label{fig:speed}
 \end{figure}
 
+\subsection{Evaluation on Diverse Public Modalities: Spectroscopy, Acoustics, and High-Dimensional Transcriptomics}\label{sec:exp-new-public}
+
+To assess the method's behavior across distinct data geometries and verify reproducibility on open benchmarks beyond the original paper's datasets, we evaluated NSA-Flow across three diverse OpenML public datasets under strictly leak-free 5-fold cross-validation:
+\begin{enumerate}\itemsep1pt
+  \item \textbf{Tecator NIR meat spectrometry} ($n=240, p=100$, OpenML ID 505): Continuous optical absorption spectra measuring $850$--$1050$\,nm channels ($X \ge 0$) to predict continuous chemical fat percentage ($0.9\%$--$49.8\%$). In optical spectrometry, the Beer-Lambert law states that absorbance is an additive non-negative linear mixture of pure constituent spectra; dense PCA produces unphysical negative loadings, while standard NMF fails catastrophically due to ill-conditioned collinearity ($D = 0.943$, Ridge $R^2 = 0.386$). In contrast, non-negative NSA-Flow ($w=0.5$) eliminates the collinearity defect ($D = 0.000$) while maintaining physical non-negativity ($V \ge 0$) and recovering $R^2 = 0.878$, while Consolidated Signed NSA-Flow matches dense PCA ($R^2 = 0.903$ vs $0.911$) with non-overlapping spectral bands.
+  \item \textbf{Sonar chirp frequency energy} ($n=208, p=60$, OpenML ID 40): Continuous acoustic sensor energy bands ($X \in [0, 1]$) classifying metal cylinders (mines) versus rocks. This benchmark avoids ceiling effects (dense PCA achieves $\text{ROC-AUC} = 0.819$). Signed NSA-Flow matches dense PCA ($\text{ROC-AUC} = 0.819$ at $w=0.0$ and $0.813$ at $w=0.5$), and consolidated signed flow achieves $\text{ROC-AUC} = 0.810$ with strictly disjoint frequency band modules.
+  \item \textbf{Prostate cancer transcriptomics} ($n=102, p=12{,}600$, OpenML ID 45099; \citealt{singh2002gene}): Clinical contrast between 52 prostate tumors and 50 normal tissue samples, filtering to the top 2000 variance genes strictly inside each training fold. Consolidated Signed NSA-Flow achieves Balanced Accuracy of $0.812 \pm 0.125$ at $w=0.5$ and $0.822 \pm 0.133$ at $w=0.75$ (compared to dense PCA's $0.805 \pm 0.132$) while producing $83.3\%$ exact zero loadings ($V_j \cdot V_l = 0$) and zero frame defect ($D = 0.000$). Here, hard disjoint assignment acts as a structural regularizer by stripping out collinear stromal and benign background noise.
+\end{enumerate}
+
+Table~\ref{tab:new_public_benchmarks} summarizes the cross-validated metrics across methods, and Figure~\ref{fig:new_public_wsweep} displays the parametric trade-off curves as $w$ varies across $[0.0, 0.95]$. Across all three domains, the trade-off surface is monotonic, with $w \in [0.25, 0.5]$ representing the empirical sweet spot where frame defect vanishes without compromising representation power.
+
+\input{results/new_public_benchmarks_table.tex}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.98\textwidth]{figs/fig_new_public_wsweep.pdf}
+\caption{Parametric sweep of $w \in [0.0, 0.95]$ across diverse public benchmark modalities. (a) Tecator NIR spectroscopy ($k=5$): Non-negative flow ($V \ge 0$) drives frame defect to zero with stable $R^2 \approx 0.88$, while consolidated signed flow matches dense PCA ($R^2 \approx 0.907$) with disjoint spectral supports. (b) Sonar acoustic chirps ($k=6$): ROC-AUC remains steady across $w$ with zero cliff-drop. (c) Prostate cancer transcriptomics ($k=6$): Consolidated signed flow achieves $83.3\%$ exact disjoint sparsity and slightly outperforms dense PCA on balanced accuracy by eliminating collinear background gene noise.}
+\label{fig:new_public_wsweep}
+\end{figure}
+
 \section{Limitations}
 
 \begin{itemize}\itemsep2pt

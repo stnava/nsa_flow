@@ -72,6 +72,17 @@ class NSAResult(dict):
 
     __getattr__ = dict.__getitem__
 
+    @property
+    def V(self):
+        """Loading matrix [p, k]."""
+        return self.get("Y")
+
+    @property
+    def components(self):
+        """Components matrix [k, p] following scikit-learn convention."""
+        y = self.get("Y")
+        return y.T if y is not None else None
+
     def __repr__(self):
         return (f"NSAResult(w={self['w']}, iters={self['iters']}, "
                 f"energy={self['energy']:.6e}, fidelity={self['fidelity']:.6e}, "
@@ -762,6 +773,13 @@ def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=True,
     X = torch.as_tensor(data_or_target)
     if X.ndim != 2:
         raise ValueError(f"Input must be 2-D [n, p] or [p, k]; got shape {tuple(X.shape)}")
+
+    if "signed" in kwargs:
+        if kwargs.pop("signed"):
+            mode = "signed"
+    if "nonneg" in kwargs:
+        if kwargs.pop("nonneg"):
+            mode = "data"
 
     if mode == "auto":
         if k is not None:

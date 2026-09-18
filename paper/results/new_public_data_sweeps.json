@@ -1,0 +1,550 @@
+{
+  "timestamp": "2026-09-18 15:44:35",
+  "total_time": 853.2533853054047,
+  "tecator_sweep": [
+    {
+      "dataset": "tecator",
+      "w": 0.0,
+      "variant": "Non-negative (V >= 0)",
+      "r2_mean": 0.8755584609878719,
+      "r2_std": 0.04850751102648455,
+      "defect_mean": 0.009207901202468585,
+      "fidelity_mean": 5.1217987956530666e-05,
+      "time_mean": 0.15446391105651855
+    },
+    {
+      "dataset": "tecator",
+      "w": 0.0,
+      "variant": "Signed Relaxed",
+      "r2_mean": 0.9061454712846523,
+      "r2_std": 0.03663773668404371,
+      "defect_mean": 0.0061182336971612045,
+      "fidelity_mean": 0.00019205401200997585,
+      "time_mean": 0.8147684574127197
+    },
+    {
+      "dataset": "tecator",
+      "w": 0.0,
+      "variant": "Signed Consolidated",
+      "r2_mean": 0.9057564672193248,
+      "r2_std": 0.036988070829690106,
+      "defect_mean": 0.0,
+      "fidelity_mean": 0.001442299095292128,
+      "time_mean": 0.8095524787902832
+    },
+    {
+      "dataset": "tecator",
+      "w": 0.1,
+      "variant": "Non-negative (V >= 0)",
+      "r2_mean": 0.8785411797199411,
+      "r2_std": 0.04991307039026585,
+      "defect_mean": 3.067795928940775e-05,
+      "fidelity_mean": 0.00013817783668516786,
+      "time_mean": 0.060146665573120116
+    },
+    {
+      "dataset": "tecator",
+      "w": 0.1,
+      "variant": "Signed Relaxed",
+      "r2_mean": 0.9060879338163559,
+      "r2_std": 0.03707614029348448,
+      "defect_mean": 0.001762386648538373,
+      "fidelity_mean": 0.0004945489009308706,
+      "time_mean": 1.257066249847412
+    },
+    {
+      "dataset": "tecator",
+      "w": 0.1,
+      "variant": "Signed Consolidated",
+      "r2_mean": 0.9055841999819455,
+      "r2_std": 0.03718972373443451,
+      "defect_mean": 0.0,
+      "fidelity_mean": 0.0016832730795357897,
+      "time_mean": 1.2766472816467285
+    },
+    {
+      "dataset": "tecator",
+      "w": 0.25,
+      "variant": "Non-negative (V >= 0)",
+      "r2_mean": 0.8771150327778194,
+      "r2_std": 0.051381647361160035,
+      "defect_mean": 9.911409898681787e-06,
+      "fidelity_mean": 0.0001550106418899753,
+      "time_mean": 0.0623812198638916
+    },
+    {
+      "dataset": "tecator",
+      "w": 0.25,
+      "variant": "Signed Relaxed",
+      "r2_mean": 0.9065864096144252,
+      "r2_std": 0.035701636934877705,
+      "defect_mean": 0.00078310214755985,
+      "fidelity_mean": 0.0006407137477235286,
+      "time_mean": 1.305425500869751
+    },
+    {
+      "dataset": "tecator",
+      "w": 0.25,
+      "variant": "Signed Consolidated",
+      "r2_mean": 0.9051321580238241,
+      "r2_std": 0.036860056536894927,
+      "defect_mean": 0.0,
+      "fidelity_mean": 0.00169792424557708,
+      "time_mean": 1.3035455703735352
+    },
+    {
+      "dataset": "tecator",
+      "w": 0.5,
+      "variant": "Non-negative (V >= 0)",
+      "r2_mean": 0.8779911977081507,
+      "r2_std": 0.050393704061524984,
+      "defect_mean": 1.4266328740182157e-06,
+      "fidelity_mean": 0.0001602804046308188,
+      "time_mean": 0.051719951629638675
+    },
+    {
+      "dataset": "tecator",
+      "w": 0.5,
+      "variant": "Signed Relaxed",
+      "r2_mean": 0.9057503325330953,
+      "r2_std": 0.03639651477317207,
+      "defect_mean": 0.00015402834735551112,
+      "fidelity_mean": 0.0011781865870378852,
+      "time_mean": 1.2411550998687744
+    },
+    {
+      "dataset": "tecator",
+      "w": 0.5,
+      "variant": "Signed Consolidated",
+      "r2_mean": 0.9034153910032261,
+      "r2_std": 0.038077872816285836,
+      "defect_mean": 0.0,
+      "fidelity_mean": 0.0016645060763065655,
+      "time_mean": 1.2460247039794923
+    },
+    {
+      "dataset": "tecator",
+      "w": 0.75,
+      "variant": "Non-negative (V >= 0)",
+      "r2_mean": 0.8769276243034572,
+      "r2_std": 0.049630122494058224,
+      "defect_mean": 1.3846806246487376e-07,
+      "fidelity_mean": 0.00015839714242976658,
+      "time_mean": 0.041191816329956055
+    },
+    {
+      "dataset": "tecator",
+      "w": 0.75,
+      "variant": "Signed Relaxed",
+      "r2_mean": 0.9046639670838973,
+      "r2_std": 0.03737047112047436,
+      "defect_mean": 4.0863017378152836e-05,
+      "fidelity_mean": 0.001367690024419744,
+      "time_mean": 1.2494548320770265
+    },
+    {
+      "dataset": "tecator",
+      "w": 0.75,
+      "variant": "Signed Consolidated",
+      "r2_mean": 0.903670924642569,
+      "r2_std": 0.03822298692455109,
+      "defect_mean": 0.0,
+      "fidelity_mean": 0.001667464557863051,
+      "time_mean": 1.2428861141204834
+    },
+    {
+      "dataset": "tecator",
+      "w": 0.9,
+      "variant": "Non-negative (V >= 0)",
+      "r2_mean": 0.8767477883613575,
+      "r2_std": 0.04960027416053842,
+      "defect_mean": 4.03608427941514e-08,
+      "fidelity_mean": 0.00015546494144554746,
+      "time_mean": 0.031641817092895506
+    },
+    {
+      "dataset": "tecator",
+      "w": 0.9,
+      "variant": "Signed Relaxed",
+      "r2_mean": 0.9057619839372162,
+      "r2_std": 0.0364435893152264,
+      "defect_mean": 8.23878589334642e-06,
+      "fidelity_mean": 0.0015363872302546421,
+      "time_mean": 1.237180471420288
+    },
+    {
+      "dataset": "tecator",
+      "w": 0.9,
+      "variant": "Signed Consolidated",
+      "r2_mean": 0.9049237963200344,
+      "r2_std": 0.03737565463437348,
+      "defect_mean": 0.0,
+      "fidelity_mean": 0.0016848462797402514,
+      "time_mean": 1.2485389709472656
+    },
+    {
+      "dataset": "tecator",
+      "w": 0.95,
+      "variant": "Non-negative (V >= 0)",
+      "r2_mean": 0.87685898460627,
+      "r2_std": 0.04889259497476849,
+      "defect_mean": 2.5814918957205924e-08,
+      "fidelity_mean": 0.00014926302631333217,
+      "time_mean": 0.020710325241088866
+    },
+    {
+      "dataset": "tecator",
+      "w": 0.95,
+      "variant": "Signed Relaxed",
+      "r2_mean": 0.9065171002794303,
+      "r2_std": 0.03631755807502873,
+      "defect_mean": 3.2094765625592135e-06,
+      "fidelity_mean": 0.0016278133973821318,
+      "time_mean": 1.572519016265869
+    },
+    {
+      "dataset": "tecator",
+      "w": 0.95,
+      "variant": "Signed Consolidated",
+      "r2_mean": 0.9070314554041754,
+      "r2_std": 0.03567075278250384,
+      "defect_mean": 0.0,
+      "fidelity_mean": 0.0017359046884825678,
+      "time_mean": 1.5613094329833985
+    }
+  ],
+  "sonar_sweep": [
+    {
+      "dataset": "sonar",
+      "w": 0.0,
+      "variant": "Signed Relaxed",
+      "auc_mean": 0.8190316205533597,
+      "auc_std": 0.06552440977813052,
+      "bacc_mean": 0.7647212398585397,
+      "bacc_std": 0.04540756419618187,
+      "defect_mean": 0.03857250109171683,
+      "time_mean": 0.9738702774047852
+    },
+    {
+      "dataset": "sonar",
+      "w": 0.0,
+      "variant": "Signed Consolidated",
+      "auc_mean": 0.8164676513417932,
+      "auc_std": 0.056698858891383416,
+      "bacc_mean": 0.7549126274183482,
+      "bacc_std": 0.0505894681627639,
+      "defect_mean": 0.0,
+      "time_mean": 0.964591646194458
+    },
+    {
+      "dataset": "sonar",
+      "w": 0.1,
+      "variant": "Signed Relaxed",
+      "auc_mean": 0.8185021843145414,
+      "auc_std": 0.06361006080660107,
+      "bacc_mean": 0.7594580819638027,
+      "bacc_std": 0.054128106182918787,
+      "defect_mean": 0.02774694697646989,
+      "time_mean": 2.102890205383301
+    },
+    {
+      "dataset": "sonar",
+      "w": 0.1,
+      "variant": "Signed Consolidated",
+      "auc_mean": 0.8161379238610358,
+      "auc_std": 0.06148544259764259,
+      "bacc_mean": 0.7496494695236113,
+      "bacc_std": 0.06360557227580049,
+      "defect_mean": 0.0,
+      "time_mean": 2.116585302352905
+    },
+    {
+      "dataset": "sonar",
+      "w": 0.25,
+      "variant": "Signed Relaxed",
+      "auc_mean": 0.8167224880382775,
+      "auc_std": 0.06776547101800837,
+      "bacc_mean": 0.7594580819638028,
+      "bacc_std": 0.0570426900618682,
+      "defect_mean": 0.018044480694398447,
+      "time_mean": 1.8485283374786377
+    },
+    {
+      "dataset": "sonar",
+      "w": 0.25,
+      "variant": "Signed Consolidated",
+      "auc_mean": 0.8088953609319741,
+      "auc_std": 0.05903462087111026,
+      "bacc_mean": 0.7599126274183482,
+      "bacc_std": 0.06020129444620221,
+      "defect_mean": 0.0,
+      "time_mean": 1.7992494106292725
+    },
+    {
+      "dataset": "sonar",
+      "w": 0.5,
+      "variant": "Signed Relaxed",
+      "auc_mean": 0.8124724360307886,
+      "auc_std": 0.06518351861525984,
+      "bacc_mean": 0.7644580819638027,
+      "bacc_std": 0.057684222175896124,
+      "defect_mean": 0.009286242625703281,
+      "time_mean": 1.4849849224090577
+    },
+    {
+      "dataset": "sonar",
+      "w": 0.5,
+      "variant": "Signed Consolidated",
+      "auc_mean": 0.8098044518410651,
+      "auc_std": 0.06122415612311872,
+      "bacc_mean": 0.749194924069066,
+      "bacc_std": 0.07017318419665267,
+      "defect_mean": 0.0,
+      "time_mean": 1.5065781116485595
+    },
+    {
+      "dataset": "sonar",
+      "w": 0.75,
+      "variant": "Signed Relaxed",
+      "auc_mean": 0.8149126274183484,
+      "auc_std": 0.06571885521522385,
+      "bacc_mean": 0.7644580819638027,
+      "bacc_std": 0.057684222175896124,
+      "defect_mean": 0.0035725343747242248,
+      "time_mean": 1.482720422744751
+    },
+    {
+      "dataset": "sonar",
+      "w": 0.75,
+      "variant": "Signed Consolidated",
+      "auc_mean": 0.8111680882047014,
+      "auc_std": 0.06004272606449664,
+      "bacc_mean": 0.749194924069066,
+      "bacc_std": 0.07017318419665267,
+      "defect_mean": 0.0,
+      "time_mean": 1.4495545864105224
+    },
+    {
+      "dataset": "sonar",
+      "w": 0.9,
+      "variant": "Signed Relaxed",
+      "auc_mean": 0.8085968379446639,
+      "auc_std": 0.06243764857415646,
+      "bacc_mean": 0.7499126274183483,
+      "bacc_std": 0.06000456295082086,
+      "defect_mean": 0.001159312277995333,
+      "time_mean": 1.270289134979248
+    },
+    {
+      "dataset": "sonar",
+      "w": 0.9,
+      "variant": "Signed Consolidated",
+      "auc_mean": 0.8033690451425006,
+      "auc_std": 0.05674518161616464,
+      "bacc_mean": 0.7396494695236113,
+      "bacc_std": 0.06830761994299782,
+      "defect_mean": 0.0,
+      "time_mean": 1.2848015785217286
+    },
+    {
+      "dataset": "sonar",
+      "w": 0.95,
+      "variant": "Signed Relaxed",
+      "auc_mean": 0.8091200332847931,
+      "auc_std": 0.061702241376487874,
+      "bacc_mean": 0.7542604535053047,
+      "bacc_std": 0.04963238816177206,
+      "defect_mean": 0.000477262198915459,
+      "time_mean": 1.3133464336395264
+    },
+    {
+      "dataset": "sonar",
+      "w": 0.95,
+      "variant": "Signed Consolidated",
+      "auc_mean": 0.8110037445392135,
+      "auc_std": 0.050730360239234114,
+      "bacc_mean": 0.7439972956105679,
+      "bacc_std": 0.060149831032658786,
+      "defect_mean": 0.0,
+      "time_mean": 1.3529932498931885
+    }
+  ],
+  "prostate_sweep": [
+    {
+      "dataset": "prostate",
+      "w": 0.0,
+      "variant": "Signed Relaxed",
+      "auc_mean": 0.8696363636363638,
+      "auc_std": 0.12752001949459082,
+      "bacc_mean": 0.7936363636363637,
+      "bacc_std": 0.10888617151460254,
+      "sparsity_mean": 0.0,
+      "defect_mean": 0.5020954782595533,
+      "time_mean": 11.705721855163574
+    },
+    {
+      "dataset": "prostate",
+      "w": 0.0,
+      "variant": "Signed Consolidated",
+      "auc_mean": 0.8723636363636362,
+      "auc_std": 0.1105696743802838,
+      "bacc_mean": 0.7927272727272727,
+      "bacc_std": 0.13353428383257118,
+      "sparsity_mean": 0.8333333333333334,
+      "defect_mean": 0.0,
+      "time_mean": 11.269951486587525
+    },
+    {
+      "dataset": "prostate",
+      "w": 0.25,
+      "variant": "Signed Relaxed",
+      "auc_mean": 0.8874545454545455,
+      "auc_std": 0.10775607593461468,
+      "bacc_mean": 0.8118181818181819,
+      "bacc_std": 0.15348836335680438,
+      "sparsity_mean": 0.0,
+      "defect_mean": 0.018565774902482436,
+      "time_mean": 12.354662799835205
+    },
+    {
+      "dataset": "prostate",
+      "w": 0.25,
+      "variant": "Signed Consolidated",
+      "auc_mean": 0.8796363636363637,
+      "auc_std": 0.11086675794181466,
+      "bacc_mean": 0.8118181818181819,
+      "bacc_std": 0.15348836335680438,
+      "sparsity_mean": 0.8333333333333334,
+      "defect_mean": 0.0,
+      "time_mean": 12.655662870407104
+    },
+    {
+      "dataset": "prostate",
+      "w": 0.5,
+      "variant": "Signed Relaxed",
+      "auc_mean": 0.8776363636363638,
+      "auc_std": 0.11154156472435295,
+      "bacc_mean": 0.8027272727272727,
+      "bacc_std": 0.11565837412021766,
+      "sparsity_mean": 0.0,
+      "defect_mean": 0.007924626518899943,
+      "time_mean": 12.789861011505128
+    },
+    {
+      "dataset": "prostate",
+      "w": 0.5,
+      "variant": "Signed Consolidated",
+      "auc_mean": 0.8818181818181818,
+      "auc_std": 0.10865519045689047,
+      "bacc_mean": 0.8118181818181818,
+      "bacc_std": 0.12473442863119394,
+      "sparsity_mean": 0.8333333333333334,
+      "defect_mean": 0.0,
+      "time_mean": 13.046775627136231
+    },
+    {
+      "dataset": "prostate",
+      "w": 0.75,
+      "variant": "Signed Relaxed",
+      "auc_mean": 0.8721818181818183,
+      "auc_std": 0.10830565868171124,
+      "bacc_mean": 0.8036363636363635,
+      "bacc_std": 0.1199311097021126,
+      "sparsity_mean": 0.0,
+      "defect_mean": 0.0027914617764953657,
+      "time_mean": 16.103675031661986
+    },
+    {
+      "dataset": "prostate",
+      "w": 0.75,
+      "variant": "Signed Consolidated",
+      "auc_mean": 0.8847272727272728,
+      "auc_std": 0.08658326141365194,
+      "bacc_mean": 0.8218181818181817,
+      "bacc_std": 0.13312518187625802,
+      "sparsity_mean": 0.8333333333333334,
+      "defect_mean": 0.0,
+      "time_mean": 15.732245588302613
+    },
+    {
+      "dataset": "prostate",
+      "w": 0.9,
+      "variant": "Signed Relaxed",
+      "auc_mean": 0.8721818181818183,
+      "auc_std": 0.10830565868171128,
+      "bacc_mean": 0.8118181818181818,
+      "bacc_std": 0.15019546493137004,
+      "sparsity_mean": 0.0,
+      "defect_mean": 0.000809680793616919,
+      "time_mean": 13.118924427032471
+    },
+    {
+      "dataset": "prostate",
+      "w": 0.9,
+      "variant": "Signed Consolidated",
+      "auc_mean": 0.8723636363636362,
+      "auc_std": 0.10368515597831705,
+      "bacc_mean": 0.8118181818181818,
+      "bacc_std": 0.12473442863119394,
+      "sparsity_mean": 0.8333333333333334,
+      "defect_mean": 0.0,
+      "time_mean": 12.606353425979615
+    }
+  ],
+  "optimizer_shootout": [
+    {
+      "optimizer": "torch_lbfgs",
+      "w": 0.1,
+      "energy": 6.691590775117604e-05,
+      "defect": 1.5670704764398632e-05,
+      "iters": 968,
+      "stop_reason": "plateau",
+      "seconds": 0.24950003623962402
+    },
+    {
+      "optimizer": "torch_lbfgs",
+      "w": 0.5,
+      "energy": 8.350656653999028e-05,
+      "defect": 5.495407776619126e-06,
+      "iters": 223,
+      "stop_reason": "plateau",
+      "seconds": 0.05826711654663086
+    },
+    {
+      "optimizer": "torch_lbfgs",
+      "w": 0.9,
+      "energy": 1.4388005349497992e-05,
+      "defect": 8.950858261862509e-08,
+      "iters": 110,
+      "stop_reason": "plateau",
+      "seconds": 0.029698848724365234
+    },
+    {
+      "optimizer": "spg",
+      "w": 0.1,
+      "energy": 0.000169779868382045,
+      "defect": 0.0006510890828472976,
+      "iters": 1000,
+      "stop_reason": "max_iter",
+      "seconds": 0.16690468788146973
+    },
+    {
+      "optimizer": "spg",
+      "w": 0.5,
+      "energy": 7.667547084034308e-05,
+      "defect": 1.1021318162458647e-05,
+      "iters": 809,
+      "stop_reason": "plateau",
+      "seconds": 0.13721013069152832
+    },
+    {
+      "optimizer": "spg",
+      "w": 0.9,
+      "energy": 1.850342219487964e-05,
+      "defect": 3.942517608962557e-06,
+      "iters": 433,
+      "stop_reason": "plateau",
+      "seconds": 0.07308697700500488
+    }
+  ]
+}
