@@ -38,6 +38,9 @@ new-benchmarks:
 paper:
 	cd paper && latexmk -pdf -quiet nsaflow.tex
 
+rmd-paper:
+	Rscript -e 'rmarkdown::render("paper/nsa_flow.Rmd")'
+
 all: experiments paper
 
 clean:

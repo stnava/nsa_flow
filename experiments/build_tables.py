@@ -204,6 +204,13 @@ def build():
     except Exception as e:
         print(f"Warning: could not rebuild new public benchmarks table: {e}")
 
+    # Rebuild ADNI CDRSB cognitive progression table
+    try:
+        from experiments.build_cdrsb_tables import build_cdrsb_table
+        build_cdrsb_table()
+    except Exception as e:
+        print(f"Warning: could not rebuild CDRSB table: {e}")
+
 
 if __name__ == "__main__":
     print(f"rebuilding tables in {RES}")
