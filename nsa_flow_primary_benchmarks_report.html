@@ -42,14 +42,14 @@
         <div class="card-sub">++0.181 vs PCA (NSA-Flow (consolidated, w=0.5))</div>
     </div>
     <div class="card">
-        <div class="card-title">ADNI CDRSB Linear R&sup2;</div>
-        <div class="card-value">0.379</div>
-        <div class="card-sub">++0.259 &Delta;R&sup2; over Covariates (NSA-Flow (consolidated, w=0.5))</div>
+        <div class="card-title">Golub 3-Class Forest Acc</div>
+        <div class="card-value">0.757</div>
+        <div class="card-sub">++0.028 vs PCA (Signed (w=0.0))</div>
     </div>
     <div class="card purple">
-        <div class="card-title">Unified Harness</div>
-        <div class="card-value">nsa_flow(...)</div>
-        <div class="card-sub">Automatic data sign & dimension dispatch</div>
+        <div class="card-title">Disjoint Sparsity</div>
+        <div class="card-value">66.67%</div>
+        <div class="card-sub">Zero feature overlap with identical linear accuracy</div>
     </div>
     <div class="card amber">
         <div class="card-title">Default Optimizer</div>
@@ -105,7 +105,7 @@
         <td>+0.1898</td>
         <td>2.3569e-04</td>
         <td>&mdash;</td>
-        <td>0.66 s</td>
+        <td>0.65 s</td>
     </tr>
     <tr>
         <td><b>NSA-Flow (signed, w=0.5)</b></td>
@@ -115,7 +115,7 @@
         <td>+0.3451</td>
         <td>5.9586e-03</td>
         <td>2.2554e-13</td>
-        <td>1.38 s</td>
+        <td>1.39 s</td>
     </tr>
     <tr>
         <td><b>NSA-Flow (consolidated, w=0.5)</b></td>
@@ -125,7 +125,7 @@
         <td>+0.3612</td>
         <td>0.0000e+00</td>
         <td>0.0000e+00</td>
-        <td>1.39 s</td>
+        <td>1.46 s</td>
     </tr>
     <tr>
         <td><b>NSA-Flow (anchored, w=0.5)</b></td>
@@ -140,9 +140,9 @@
 </tbody>
 </table>
 
-<h2>2. Primary Result: Golub 3-Class Benchmark (B-ALL / T-ALL / AML, n=72, p=2000, k=3)</h2>
+<h2>2. Primary Result: Golub 3-Class Multiclass Benchmark (B-ALL / T-ALL / AML, n=72, p=2000, k=3)</h2>
 <div class="callout">
-    <b>Hard Multiclass Separation (B-ALL n=38, T-ALL n=9, AML n=25):</b> Evaluated with 5-fold stratified cross-validation on macro balanced accuracy. Signed PCA (<code>w=0.0</code>) achieves top forest accuracy (<b>0.7567</b>, beating Standard PCA by +0.0284). Consolidated signed variants deliver <b>66.67% exact disjoint sparsity</b> (zero feature overlap) while preserving strong linear accuracy.
+    <b>Hard Multiclass Separation (B-ALL n=38, T-ALL n=9, AML n=25):</b> Evaluated with 5-fold stratified cross-validation on macro balanced accuracy. Signed PCA (<code>w=0.0</code>) achieves top forest accuracy (<b>0.7567</b>, beating Standard PCA by +0.0284). Consolidated signed variants deliver <b>66.67% exact disjoint sparsity</b> (zero feature overlap) while preserving identical linear accuracy to Standard PCA.
 </div>
 <table>
 <thead>
@@ -151,121 +151,67 @@
         <th>Linear Balanced Accuracy</th>
         <th>Random Forest Balanced Accuracy</th>
         <th>Disjoint Sparsity</th>
-        <th>Description</th>
-    </tr>
-</thead>
-<tbody>
-    <tr>
-        <td><b>Standard PCA</b></td>
-        <td>0.7638 &plusmn; 0.1500</td>
-        <td>0.7283 &plusmn; 0.1451</td>
-        <td>0.00%</td>
-        <td>Dense baseline; strong linear separation</td>
-    </tr>
-    <tr>
-        <td><b>Signed (w=0.0)</b></td>
-        <td>0.7638 &plusmn; 0.1500</td>
-        <td class="metric-best"><b>0.7567 &plusmn; 0.1470</b></td>
-        <td>0.00%</td>
-        <td>Signed PCA lifting; top non-linear classification accuracy</td>
-    </tr>
-    <tr>
-        <td><b>Signed+consol (w=0.0)</b></td>
-        <td>0.7638 &plusmn; 0.1500</td>
-        <td>0.7188 &plusmn; 0.1544</td>
-        <td><b>66.67%</b></td>
-        <td>Exact disjoint partitions; matches PCA linear accuracy</td>
-    </tr>
-    <tr>
-        <td><b>Signed+consol (w=0.5)</b></td>
-        <td>0.6721 &plusmn; 0.1125</td>
-        <td>0.6783 &plusmn; 0.0816</td>
-        <td><b>66.67%</b></td>
-        <td>Trade-off regularized disjoint components</td>
-    </tr>
-    <tr>
-        <td><b>Signed (w=0.5)</b></td>
-        <td>0.6721 &plusmn; 0.1125</td>
-        <td>0.6317 &plusmn; 0.0517</td>
-        <td>35.08%</td>
-        <td>Partially sparse contrast lobes</td>
-    </tr>
-    <tr>
-        <td><b>NSA-Flow data (w=0.5)</b></td>
-        <td>0.5838 &plusmn; 0.0658</td>
-        <td>0.6460 &plusmn; 0.0285</td>
-        <td>50.35%</td>
-        <td>Pure non-negative data reconstruction</td>
-    </tr>
-</tbody>
-</table>
-
-<h2>3. Golub Leukemia ALL vs AML (Held-Out Test Split, In-Fold Filtering p=2000)</h2>
-<table>
-<thead>
-    <tr>
-        <th>Method</th>
-        <th>Held-Out Test ROC AUC</th>
-        <th>Orthogonality Defect D(Y)</th>
-        <th>Sparsity</th>
+        <th>Defect D(Y)</th>
         <th>Fit Time</th>
     </tr>
 </thead>
 <tbody>
 
     <tr>
-        <td><b>PCA</b></td>
-        <td><b>1.000</b></td>
-        <td>4.9128e-32</td>
+        <td><b>Standard PCA</b></td>
+        <td>0.7638 &plusmn; 0.1500</td>
+        <td>0.7283 &plusmn; 0.1451</td>
         <td>0.00%</td>
+        <td>5.1120e-31</td>
         <td>0.00 s</td>
     </tr>
     <tr>
-        <td><b>SparsePCA</b></td>
-        <td><b>1.000</b></td>
-        <td>0.0000e+00</td>
-        <td>46.98%</td>
-        <td>7.00 s</td>
+        <td><b>Signed (w=0.0)</b></td>
+        <td>0.7638 &plusmn; 0.1500</td>
+        <td class="metric-best">0.7567 &plusmn; 0.1470</td>
+        <td>0.00%</td>
+        <td>1.0243e-01</td>
+        <td>32.56 s</td>
     </tr>
     <tr>
-        <td><b>NMF</b></td>
-        <td><b>0.944</b></td>
-        <td>0.0000e+00</td>
-        <td>5.07%</td>
-        <td>0.03 s</td>
-    </tr>
-    <tr>
-        <td><b>NSA-Flow (data, w=0.5)</b></td>
-        <td><b>0.917</b></td>
-        <td>4.1888e-04</td>
-        <td>63.07%</td>
-        <td>0.65 s</td>
-    </tr>
-    <tr>
-        <td><b>NSA-Flow (signed, w=0.5)</b></td>
-        <td><b>1.000</b></td>
-        <td>8.3176e-03</td>
-        <td>33.25%</td>
-        <td>26.36 s</td>
-    </tr>
-    <tr>
-        <td><b>NSA-Flow (consolidated, w=0.5)</b></td>
-        <td><b>1.000</b></td>
-        <td>0.0000e+00</td>
+        <td><b>Signed+consol (w=0.0)</b></td>
+        <td>0.7638 &plusmn; 0.1500</td>
+        <td>0.7188 &plusmn; 0.1544</td>
         <td>66.67%</td>
-        <td>27.21 s</td>
+        <td>0.0000e+00</td>
+        <td>32.48 s</td>
     </tr>
     <tr>
-        <td><b>NSA-Flow (anchored, w=0.5)</b></td>
-        <td><b>1.000</b></td>
-        <td>3.0928e-02</td>
-        <td>49.85%</td>
-        <td>0.04 s</td>
+        <td><b>Signed (w=0.5)</b></td>
+        <td>0.6721 &plusmn; 0.1125</td>
+        <td>0.6317 &plusmn; 0.0517</td>
+        <td>35.08%</td>
+        <td>8.2370e-03</td>
+        <td>29.01 s</td>
+    </tr>
+    <tr>
+        <td><b>Signed+consol (w=0.5)</b></td>
+        <td>0.6721 &plusmn; 0.1125</td>
+        <td>0.6783 &plusmn; 0.0816</td>
+        <td>66.67%</td>
+        <td>0.0000e+00</td>
+        <td>27.75 s</td>
+    </tr>
+    <tr>
+        <td><b>NSA-Flow data (w=0.5)</b></td>
+        <td>0.5838 &plusmn; 0.0658</td>
+        <td>0.6460 &plusmn; 0.0285</td>
+        <td>50.35%</td>
+        <td>3.7111e-04</td>
+        <td>0.68 s</td>
     </tr>
 </tbody>
 </table>
 
 <h2>3. UCI Diabetes Progression (Held-Out Test Split, p=10, k=4)</h2>
+<div class="callout">
+    <b>Small-p Boundary Test:</b> When p/k is small (10/4 &approx; 2.5 features/part), forcing hard disjoint partitions allocates only 2-3 features per component, confirming the paper's characterization that consolidation is a sparsity control rather than an accuracy one.
+</div>
 <table>
 <thead>
     <tr>
@@ -287,13 +233,13 @@
         <td><b>NSA-Flow (signed, w=0.5)</b></td>
         <td>0.4356</td>
         <td>1.5719e-02</td>
-        <td>0.97 s</td>
+        <td>1.01 s</td>
     </tr>
     <tr>
         <td><b>NSA-Flow (consolidated, w=0.5)</b></td>
         <td>0.3833</td>
         <td>0.0000e+00</td>
-        <td>0.99 s</td>
+        <td>1.01 s</td>
     </tr>
     <tr>
         <td><b>NSA-Flow (data, w=0.5)</b></td>
@@ -324,7 +270,7 @@
         <td>1.2873e-05</td>
         <td>6.000</td>
         <td>0.993</td>
-        <td>2.24 s</td>
+        <td>2.32 s</td>
     </tr>
     <tr>
         <td><b>w = 0.25</b></td>
@@ -332,7 +278,7 @@
         <td>1.1607e-05</td>
         <td>6.000</td>
         <td>0.994</td>
-        <td>2.45 s</td>
+        <td>2.51 s</td>
     </tr>
     <tr>
         <td><b>w = 0.50</b></td>
@@ -340,7 +286,7 @@
         <td>9.6673e-06</td>
         <td>6.000</td>
         <td>0.994</td>
-        <td>1.79 s</td>
+        <td>1.83 s</td>
     </tr>
     <tr>
         <td><b>w = 0.75</b></td>
@@ -348,7 +294,7 @@
         <td>6.3388e-06</td>
         <td>6.000</td>
         <td>0.995</td>
-        <td>3.17 s</td>
+        <td>3.23 s</td>
     </tr>
     <tr>
         <td><b>w = 0.90</b></td>
@@ -356,7 +302,7 @@
         <td>2.7865e-06</td>
         <td>6.000</td>
         <td>0.997</td>
-        <td>1.64 s</td>
+        <td>1.67 s</td>
     </tr>
     <tr>
         <td><b>w = 0.95</b></td>
@@ -364,7 +310,7 @@
         <td>1.2121e-06</td>
         <td>6.000</td>
         <td>0.998</td>
-        <td>1.15 s</td>
+        <td>1.18 s</td>
     </tr>
 </tbody>
 </table>
