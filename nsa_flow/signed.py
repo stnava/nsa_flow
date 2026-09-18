@@ -58,10 +58,24 @@ Measured over 18 dataset/k/w combinations (ADNI centred and raw, METABRIC):
     Coff          7 of 18          1 to 3 in 11 cases
     Cg           12 of 18          0 in ALL 18
 
-and the six remaining ``Cg`` cases are iteration budget, not traps: on the worst
-of them |Gmap| falls 7.2e-05 -> 6.2e-06 -> 1.08e-08 as ``max_iter`` goes 2000 ->
-8000 -> 20000, converging at 15973 iterations in 13 s.  Every ``Coff`` failure
-is a line-search stall at 1e-02 to 1e-03 after 13 to 72 iterations.
+Every ``Coff`` failure is a line-search stall at 1e-02 to 1e-03 after 13 to 72
+iterations.  The remaining ``Cg`` cases were iteration budget, not traps, so the
+default ``max_iter`` is 20000: with that, ALL 18 combinations reach
+|Gmap| < 1e-09 with zero dead lobes, in 69 s for the whole grid.  The budget
+matters for the BASIS even where it does not matter for the objective -- between
+|Gmap| of 4.7e-05 and 1e-09 the reconstruction is identical to five decimals
+while the largest basis entry moves 43%, one component rotates by 15 degrees
+(|cos| 0.967) and 2.7% of the support flips.  Since the interpretability claim
+is about supports, a loose certificate is not good enough.
+
+Two step-rule changes were tried and rejected on measurement.  Scaling the
+Barzilai-Borwein step by 5x is worse everywhere (METABRIC k=2 w=0.25 converges
+at 4118 iterations unboosted and hits the cap at every boost) because Armijo
+backtracks the inflation away and the secant property is lost.  A non-monotone
+GLL reference with memory 10, which is what Birgin-Martinez-Raydan specify,
+also reaches 0 of 18 but needs 15% MORE iterations (87533 against 75805) for the
+same wall time, so the monotone rule is kept -- it is simpler and monotonicity
+is a property worth asserting.
 
 FIXED in 2.8.0: the solver used to exit after one iteration.  Recorded because
 every signed result produced before this release describes an unoptimised
@@ -250,7 +264,7 @@ def _split(W):
 
 
 def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Cg", lobe=1.0,
-                    max_iter=5000, tol=None, sigma=1e-4, dtype=None, device=None,
+                    max_iter=20000, tol=None, sigma=1e-4, dtype=None, device=None,
                     verbose=False, keep_trace=False, consolidate=False):
     """Fit ``V = V+ - V-`` with ``[V+|V-] >= 0`` near-disjoint, reconstructing ``X``.
 
