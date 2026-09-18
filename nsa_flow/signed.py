@@ -391,13 +391,22 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Cg", lobe=1.0,
 
     def _grad_and_energy(Wv):
         E, F, D = parts_energy(Wv)
-        _last_parts[0], _last_parts[1] = float(F), float(D)
+        _last_parts[0] = float(F.detach()) if hasattr(F, "detach") else float(F)
+        _last_parts[1] = float(D.detach()) if hasattr(D, "detach") else float(D)
         return E, parts_grad(Wv)
 
     trace = [] if keep_trace else None
     t0 = time.time()
 
-    if optimizer == "lbfgs":
+    if optimizer in ("torch_lbfgs", "torch-lbfgs"):
+        from .solve import _torch_lbfgs_loop
+        iter_cap = max_iter if max_iter is not None else 1000
+        W, E, it, stop, gmap = _torch_lbfgs_loop(
+            W, _energy, _grad_and_energy,
+            max_iter=iter_cap, tol=tol, verbose=verbose,
+            trace=trace, caller="nsa_flow_signed", w=w,
+        )
+    elif optimizer == "lbfgs":
         from .solve import _lbfgs_b_loop
         bounds = [(0.0, None)] * W.numel()
         W, E, it, stop, gmap = _lbfgs_b_loop(
@@ -426,10 +435,19 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Cg", lobe=1.0,
 
         def _c_grad_and_energy(Wv):
             Ec, Fc, Dc = parts_energy(Wv)
-            _last_parts[0], _last_parts[1] = float(Fc), float(Dc)
+            _last_parts[0] = float(Fc.detach()) if hasattr(Fc, "detach") else float(Fc)
+            _last_parts[1] = float(Dc.detach()) if hasattr(Dc, "detach") else float(Dc)
             return Ec, parts_grad(Wv)
 
-        if optimizer == "lbfgs":
+        if optimizer in ("torch_lbfgs", "torch-lbfgs"):
+            from .solve import _torch_lbfgs_loop
+            iter_cap = max_iter if max_iter is not None else 1000
+            W, _E2, _it2, stop, gmap = _torch_lbfgs_loop(
+                W, _c_energy, _c_grad_and_energy, mask=mask,
+                max_iter=iter_cap, tol=tol, verbose=False,
+                trace=None, caller="nsa_flow_signed (consolidate)",
+            )
+        elif optimizer == "lbfgs":
             from .solve import _lbfgs_b_loop
             mask_flat = mask.cpu().numpy().flatten()
             c_bounds = [(0.0, None) if m else (0.0, 0.0) for m in mask_flat]

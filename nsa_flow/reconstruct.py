@@ -389,13 +389,22 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="C", max_iter=2000,
 
     def _grad_and_energy(Vv):
         Ev, Fv, Dv = energy_of(Vv)
-        _cached[0], _cached[1] = float(Fv), float(Dv)
+        _cached[0] = float(Fv.detach()) if hasattr(Fv, "detach") else float(Fv)
+        _cached[1] = float(Dv.detach()) if hasattr(Dv, "detach") else float(Dv)
         return Ev, grad_of(Vv)
 
     trace = [] if keep_trace else None
     t0 = time.time()
 
-    if optimizer == "lbfgs":
+    if optimizer in ("torch_lbfgs", "torch-lbfgs"):
+        from .solve import _torch_lbfgs_loop
+        iter_cap = max_iter if max_iter is not None else 1000
+        V, E, it, stop, gmap = _torch_lbfgs_loop(
+            V, _energy, _grad_and_energy,
+            max_iter=iter_cap, tol=tol, verbose=verbose,
+            trace=trace, caller="nsa_flow_data", w=w,
+        )
+    elif optimizer == "lbfgs":
         from .solve import _lbfgs_b_loop
         bounds = [(0.0, None)] * V.numel()
         V, E, it, stop, gmap = _lbfgs_b_loop(

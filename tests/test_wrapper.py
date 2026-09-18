@@ -79,3 +79,33 @@ def test_optimizer_lbfgs_signed():
     assert r.Y.shape == (12, 3)
     assert "parts" in r
     assert r.converged
+
+
+def test_optimizer_torch_lbfgs_data():
+    """Explicit torch_lbfgs fits non-negative basis with pure PyTorch quasi-Newton."""
+    torch.manual_seed(16)
+    X = torch.rand(35, 12, dtype=F64)
+    r = nsa_flow(X, k=3, w=0.5, optimizer="torch_lbfgs")
+    assert r.Y.shape == (12, 3)
+    assert (r.Y >= -1e-12).all()
+    assert r.converged
+
+
+def test_optimizer_torch_lbfgs_signed():
+    """Explicit torch_lbfgs fits signed contrast basis with pure PyTorch quasi-Newton."""
+    torch.manual_seed(17)
+    X = torch.randn(35, 12, dtype=F64)
+    r = nsa_flow(X, k=3, w=0.5, optimizer="torch_lbfgs")
+    assert r.Y.shape == (12, 3)
+    assert "parts" in r
+    assert r.converged
+
+
+def test_optimizer_torch_lbfgs_anchored():
+    """torch_lbfgs fits anchored target matrix."""
+    torch.manual_seed(18)
+    target = torch.rand(25, 4, dtype=F64)
+    r = nsa_flow(target, w=0.5, optimizer="torch_lbfgs")
+    assert r.Y.shape == (25, 4)
+    assert (r.Y >= -1e-12).all()
+    assert r.converged

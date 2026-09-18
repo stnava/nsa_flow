@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>NSA-Flow Primary Paper Benchmarks (Unified High-Level Harness)</title>
+<style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 30px 40px; color: #1e293b; background: #f8fafc; }
+    h1 { color: #0f172a; margin-bottom: 6px; font-size: 28px; }
+    h2 { color: #1e3a8a; margin-top: 35px; border-bottom: 2px solid #cbd5e1; padding-bottom: 8px; font-size: 20px; }
+    .subtitle { color: #64748b; font-size: 15px; margin-bottom: 25px; }
+    .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; margin: 20px 0; }
+    .card { background: white; border-radius: 8px; padding: 18px 22px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border-left: 5px solid #2563eb; }
+    .card.green { border-left-color: #10b981; }
+    .card.purple { border-left-color: #8b5cf6; }
+    .card.amber { border-left-color: #f59e0b; }
+    .card-title { font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; color: #64748b; font-weight: 600; }
+    .card-value { font-size: 24px; font-weight: 700; color: #0f172a; margin-top: 6px; }
+    .card-sub { font-size: 13px; color: #475569; margin-top: 4px; }
+    table { border-collapse: collapse; width: 100%; margin: 15px 0 25px 0; background: white; border-radius: 6px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+    th, td { padding: 11px 15px; text-align: left; font-size: 14px; }
+    th { background: #f1f5f9; color: #334155; font-weight: 600; border-bottom: 1px solid #cbd5e1; }
+    tr:nth-child(even) { background: #f8fafc; }
+    tr:hover { background: #f1f5f9; }
+    .badge { display: inline-block; padding: 2px 8px; font-size: 11px; font-weight: 600; border-radius: 12px; }
+    .badge-green { background: #d1fae5; color: #065f46; }
+    .badge-blue { background: #dbeafe; color: #1e40af; }
+    .badge-amber { background: #fef3c7; color: #92400e; }
+    .metric-best { font-weight: 700; color: #059669; }
+    .callout { background: #eff6ff; border-left: 4px solid #3b82f6; padding: 14px 18px; border-radius: 4px; margin: 15px 0; font-size: 14px; line-height: 1.5; }
+    .footer { margin-top: 50px; font-size: 12px; color: #94a3b8; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>NSA-Flow Primary Paper Benchmarks</h1>
+<div class="subtitle">Evaluated strictly with the Unified High-Level Harness (<code>nsa_flow</code> & <code>NSAFlow</code>) defaulting to Native <code>torch_lbfgs</code></div>
+
+<div class="card-grid">
+    <div class="card green">
+        <div class="card-title">ADNI CDRSB Forest R&sup2;</div>
+        <div class="card-value">0.463</div>
+        <div class="card-sub">++0.181 vs PCA (NSA-Flow (consolidated, w=0.5))</div>
+    </div>
+    <div class="card">
+        <div class="card-title">ADNI CDRSB Linear R&sup2;</div>
+        <div class="card-value">0.379</div>
+        <div class="card-sub">++0.259 &Delta;R&sup2; over Covariates (NSA-Flow (consolidated, w=0.5))</div>
+    </div>
+    <div class="card purple">
+        <div class="card-title">Unified Harness</div>
+        <div class="card-value">nsa_flow(...)</div>
+        <div class="card-sub">Automatic data sign & dimension dispatch</div>
+    </div>
+    <div class="card amber">
+        <div class="card-title">Default Optimizer</div>
+        <div class="card-value">torch_lbfgs</div>
+        <div class="card-sub">100% Native PyTorch (Z<sup>2</sup> reparameterization)</div>
+    </div>
+</div>
+
+<h2>1. Primary Result: ADNI Cortical Thickness predicting CDRSB (Held-Out Test Set)</h2>
+<div class="callout">
+    <b>Key Paper Finding Confirmed:</b> Adding consolidated signed contrast lobes (<code>V = V+ - V-</code> with disjoint anatomical supports) delivers substantial gains over PCA on held-out test data for both linear models and non-linear random forests.
+</div>
+<table>
+<thead>
+    <tr>
+        <th>Method</th>
+        <th>Linear Model R&sup2;</th>
+        <th>&Delta;R&sup2; vs Covariates (Linear)</th>
+        <th>Random Forest R&sup2;</th>
+        <th>&Delta;R&sup2; vs Covariates (Forest)</th>
+        <th>Defect D(Y)</th>
+        <th>Lobe Overlap</th>
+        <th>Fit Time</th>
+    </tr>
+</thead>
+<tbody>
+
+    <tr>
+        <td><b>Covariates Baseline</b></td>
+        <td>0.1194</td>
+        <td>+0.0000</td>
+        <td>0.1016</td>
+        <td>+0.0000</td>
+        <td>0.0000e+00</td>
+        <td>&mdash;</td>
+        <td>0.00 s</td>
+    </tr>
+    <tr>
+        <td><b>PCA (k=5)</b></td>
+        <td>0.3422</td>
+        <td>+0.2228</td>
+        <td>0.2814</td>
+        <td>+0.1799</td>
+        <td>1.4663e-31</td>
+        <td>&mdash;</td>
+        <td>0.00 s</td>
+    </tr>
+    <tr>
+        <td><b>NSA-Flow (data, w=0.5)</b></td>
+        <td>0.3647</td>
+        <td>+0.2453</td>
+        <td>0.2914</td>
+        <td>+0.1898</td>
+        <td>2.3569e-04</td>
+        <td>&mdash;</td>
+        <td>0.66 s</td>
+    </tr>
+    <tr>
+        <td><b>NSA-Flow (signed, w=0.5)</b></td>
+        <td>0.3661</td>
+        <td>+0.2467</td>
+        <td>0.4467</td>
+        <td>+0.3451</td>
+        <td>5.9586e-03</td>
+        <td>2.2554e-13</td>
+        <td>1.38 s</td>
+    </tr>
+    <tr>
+        <td><b>NSA-Flow (consolidated, w=0.5)</b></td>
+        <td>0.3789</td>
+        <td>+0.2595</td>
+        <td class="metric-best">0.4628</td>
+        <td>+0.3612</td>
+        <td>0.0000e+00</td>
+        <td>0.0000e+00</td>
+        <td>1.39 s</td>
+    </tr>
+    <tr>
+        <td><b>NSA-Flow (anchored, w=0.5)</b></td>
+        <td>0.3501</td>
+        <td>+0.2307</td>
+        <td>0.4290</td>
+        <td>+0.3274</td>
+        <td>2.7270e-02</td>
+        <td>&mdash;</td>
+        <td>0.01 s</td>
+    </tr>
+</tbody>
+</table>
+
+<h2>2. Golub Leukemia ALL vs AML (Held-Out Test Split, In-Fold Filtering p=2000)</h2>
+<table>
+<thead>
+    <tr>
+        <th>Method</th>
+        <th>Held-Out Test ROC AUC</th>
+        <th>Orthogonality Defect D(Y)</th>
+        <th>Sparsity</th>
+        <th>Fit Time</th>
+    </tr>
+</thead>
+<tbody>
+
+    <tr>
+        <td><b>PCA</b></td>
+        <td><b>1.000</b></td>
+        <td>4.9128e-32</td>
+        <td>0.00%</td>
+        <td>0.00 s</td>
+    </tr>
+    <tr>
+        <td><b>SparsePCA</b></td>
+        <td><b>1.000</b></td>
+        <td>0.0000e+00</td>
+        <td>46.98%</td>
+        <td>7.00 s</td>
+    </tr>
+    <tr>
+        <td><b>NMF</b></td>
+        <td><b>0.944</b></td>
+        <td>0.0000e+00</td>
+        <td>5.07%</td>
+        <td>0.03 s</td>
+    </tr>
+    <tr>
+        <td><b>NSA-Flow (data, w=0.5)</b></td>
+        <td><b>0.917</b></td>
+        <td>4.1888e-04</td>
+        <td>63.07%</td>
+        <td>0.65 s</td>
+    </tr>
+    <tr>
+        <td><b>NSA-Flow (signed, w=0.5)</b></td>
+        <td><b>1.000</b></td>
+        <td>8.3176e-03</td>
+        <td>33.25%</td>
+        <td>26.36 s</td>
+    </tr>
+    <tr>
+        <td><b>NSA-Flow (consolidated, w=0.5)</b></td>
+        <td><b>1.000</b></td>
+        <td>0.0000e+00</td>
+        <td>66.67%</td>
+        <td>27.21 s</td>
+    </tr>
+    <tr>
+        <td><b>NSA-Flow (anchored, w=0.5)</b></td>
+        <td><b>1.000</b></td>
+        <td>3.0928e-02</td>
+        <td>49.85%</td>
+        <td>0.04 s</td>
+    </tr>
+</tbody>
+</table>
+
+<h2>3. UCI Diabetes Progression (Held-Out Test Split, p=10, k=4)</h2>
+<table>
+<thead>
+    <tr>
+        <th>Method</th>
+        <th>Held-Out Test R&sup2;</th>
+        <th>Orthogonality Defect D(Y)</th>
+        <th>Fit Time</th>
+    </tr>
+</thead>
+<tbody>
+
+    <tr>
+        <td><b>PCA</b></td>
+        <td>0.4576</td>
+        <td>6.0020e-32</td>
+        <td>0.00 s</td>
+    </tr>
+    <tr>
+        <td><b>NSA-Flow (signed, w=0.5)</b></td>
+        <td>0.4356</td>
+        <td>1.5719e-02</td>
+        <td>0.97 s</td>
+    </tr>
+    <tr>
+        <td><b>NSA-Flow (consolidated, w=0.5)</b></td>
+        <td>0.3833</td>
+        <td>0.0000e+00</td>
+        <td>0.99 s</td>
+    </tr>
+    <tr>
+        <td><b>NSA-Flow (data, w=0.5)</b></td>
+        <td>0.3738</td>
+        <td>2.9489e-04</td>
+        <td>0.05 s</td>
+    </tr>
+</tbody>
+</table>
+
+<h2>4. Synthetic Ground-Truth Recovery & Monotonicity (Planted Partition, k=6, p=60)</h2>
+<table>
+<thead>
+    <tr>
+        <th>Weight w</th>
+        <th>Fidelity F(Y)</th>
+        <th>Orthogonality Defect D(Y)</th>
+        <th>Effective Rank</th>
+        <th>Ground-Truth Alignment</th>
+        <th>Fit Time</th>
+    </tr>
+</thead>
+<tbody>
+
+    <tr>
+        <td><b>w = 0.00</b></td>
+        <td>0.0407</td>
+        <td>1.2873e-05</td>
+        <td>6.000</td>
+        <td>0.993</td>
+        <td>2.24 s</td>
+    </tr>
+    <tr>
+        <td><b>w = 0.25</b></td>
+        <td>0.0407</td>
+        <td>1.1607e-05</td>
+        <td>6.000</td>
+        <td>0.994</td>
+        <td>2.45 s</td>
+    </tr>
+    <tr>
+        <td><b>w = 0.50</b></td>
+        <td>0.0407</td>
+        <td>9.6673e-06</td>
+        <td>6.000</td>
+        <td>0.994</td>
+        <td>1.79 s</td>
+    </tr>
+    <tr>
+        <td><b>w = 0.75</b></td>
+        <td>0.0407</td>
+        <td>6.3388e-06</td>
+        <td>6.000</td>
+        <td>0.995</td>
+        <td>3.17 s</td>
+    </tr>
+    <tr>
+        <td><b>w = 0.90</b></td>
+        <td>0.0407</td>
+        <td>2.7865e-06</td>
+        <td>6.000</td>
+        <td>0.997</td>
+        <td>1.64 s</td>
+    </tr>
+    <tr>
+        <td><b>w = 0.95</b></td>
+        <td>0.0407</td>
+        <td>1.2121e-06</td>
+        <td>6.000</td>
+        <td>0.998</td>
+        <td>1.15 s</td>
+    </tr>
+</tbody>
+</table>
+
+<div class="footer">
+    Generated automatically by <code>experiments/rapid_primary_benchmarks.py</code> | NSA-Flow v2.10.0
+</div>
+</body>
+</html>

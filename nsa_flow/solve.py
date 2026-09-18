@@ -51,7 +51,7 @@ from .project import project_nonneg
 from .subspace import (SubspaceAnchor, negative_mass, subspace_fidelity,
                        grad_subspace_fidelity)
 
-__all__ = ["nsa_flow", "NSAResult", "_spg_loop", "_lbfgs_b_loop", "_nsa_flow_anchored"]
+__all__ = ["nsa_flow", "NSAResult", "_spg_loop", "_lbfgs_b_loop", "_torch_lbfgs_loop", "_nsa_flow_anchored"]
 
 _T_MIN, _T_MAX = 1e-12, 1e12
 _COMPILED = None
@@ -369,10 +369,92 @@ def _lbfgs_b_loop(Y, bounds, energy_fn, grad_fn, max_iter=2000, tol=1e-5,
     return Y_opt, E_opt, res.nit, stop, gmap
 
 
+def _torch_lbfgs_loop(Y0, energy_fn, grad_fn, max_iter=200, tol=1e-5,
+                      history_size=10, patience=5, rtol=1e-6,
+                      mask=None, verbose=False, trace=None, caller="", w=None):
+    """Pure PyTorch native quasi-Newton L-BFGS loop via quadratic reparameterization Y = Z**2.
+
+    100% PyTorch native (runs on CPU, CUDA, MPS). Enforces non-negativity smoothly
+    without boundary stalling, and uses analytical gradients via the exact chain rule:
+        dE/dZ = (2 * Z * dE/dY).contiguous()
+    """
+    device = Y0.device
+    dtype = Y0.dtype
+    t0 = time.time()
+
+    # Reparameterize: Y = Z**2 >= 0 (or Z**2 * mask if masked)
+    Z_init = torch.sqrt(Y0.clamp_min(1e-8))
+    Z = torch.nn.Parameter(Z_init)
+
+    opt = torch.optim.LBFGS(
+        [Z], lr=1.0, max_iter=20, history_size=history_size,
+        line_search_fn="strong_wolfe", tolerance_grad=tol, tolerance_change=tol
+    )
+
+    stop = "max_iter"
+    gmap = float("inf")
+    E_cur = float("inf")
+    E_window = []
+    outer_steps = max(5, max_iter // 20)
+    total_sub_iters = 0
+
+    for step in range(1, outer_steps + 1):
+        def closure():
+            nonlocal total_sub_iters
+            total_sub_iters += 1
+            opt.zero_grad()
+            if mask is not None:
+                Y_cur = Z.pow(2) * mask
+                E, g = grad_fn(Y_cur)
+                Z.grad = (2.0 * Z * mask * g).contiguous()
+            else:
+                Y_cur = Z.pow(2)
+                E, g = grad_fn(Y_cur)
+                Z.grad = (2.0 * Z * g).contiguous()
+            return torch.as_tensor(E, dtype=dtype, device=device)
+
+        loss = opt.step(closure)
+        E_cur = float(loss.detach())
+
+        with torch.no_grad():
+            if mask is not None:
+                Y_cur = Z.pow(2) * mask
+                _, g_cur = grad_fn(Y_cur)
+                gmap = float((torch.clamp_min(Y_cur - g_cur, 0.0) * mask - Y_cur).norm())
+            else:
+                Y_cur = Z.pow(2)
+                _, g_cur = grad_fn(Y_cur)
+                gmap = float((torch.clamp_min(Y_cur - g_cur, 0.0) - Y_cur).norm())
+
+        if trace is not None:
+            trace.append(dict(iter=total_sub_iters, energy=E_cur, grad_map=gmap, step=1.0))
+
+        if gmap <= tol:
+            stop = "grad_map"
+            break
+
+        E_window.append(E_cur)
+        if len(E_window) > patience:
+            E_window.pop(0)
+        if len(E_window) == patience:
+            span = max(E_window) - min(E_window)
+            if span / (1.0 + abs(min(E_window))) < rtol:
+                stop = "plateau"
+                break
+
+    with torch.no_grad():
+        if mask is not None:
+            Y_opt = Z.pow(2) * mask
+        else:
+            Y_opt = Z.pow(2)
+
+    return Y_opt, E_cur, total_sub_iters, stop, gmap
+
+
 def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
                       continuation=0, w_start=0.0, sigma=1e-4, dtype=None, device=None,
                       verbose=False, keep_trace=False, compile=False, align=False,
-                      fidelity="auto", neg_mass_tol=0.01, orth="D"):
+                      fidelity="auto", neg_mass_tol=0.01, orth="D", optimizer="spg"):
     """Fit a non-negative, near-orthogonal ``Y`` close to ``target``.
 
     Parameters
@@ -580,8 +662,22 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, 
     for wi in ws:
         if verbose:
             print(f"  continuation step w={wi:.4f}")
-        Y, E, it, stop, gmap = _solve_fixed_w(Y, X0, wi, denom, nonneg, max_iter,
-                                              tol, sigma, verbose, trace, vg, align)
+        if optimizer in ("torch_lbfgs", "torch-lbfgs") and not align and nonneg:
+            inv_k_val = inv_k0 if fidelity == "subspace" else (1.0 / (1.0 - 1.0 / k) if k > 1 else 0.0)
+            eye_k = torch.eye(k, dtype=Y.dtype, device=Y.device)
+            def _anc_energy(Y_c):
+                return float(vg(Y_c, X0, wi, denom, inv_k_val, eye_k, False)[0])
+            def _anc_grad_and_energy(Y_c):
+                E_v, _, _, g_v = vg(Y_c, X0, wi, denom, inv_k_val, eye_k, False)
+                return float(E_v), g_v
+            iter_cap = max_iter if max_iter is not None else 300
+            Y, E, it, stop, gmap = _torch_lbfgs_loop(
+                Y, _anc_energy, _anc_grad_and_energy, max_iter=iter_cap, tol=tol,
+                verbose=verbose, trace=trace, caller="_nsa_flow_anchored", w=wi
+            )
+        else:
+            Y, E, it, stop, gmap = _solve_fixed_w(Y, X0, wi, denom, nonneg, max_iter,
+                                                  tol, sigma, verbose, trace, vg, align)
         total_iters += it
 
     if fidelity == "subspace":
@@ -613,7 +709,7 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, 
 
 
 def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=True,
-             consolidate=False, optimizer="spg", init=None, max_iter=None,
+             consolidate=False, optimizer="torch_lbfgs", init=None, max_iter=None,
              tol=None, **kwargs):
     """Unified high-level entry point for NSA-Flow representation learning.
 
@@ -643,8 +739,11 @@ def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=True,
         Execution mode. Default 'auto' detects from data signs and arguments.
     consolidate : bool, default False
         Guarantees exact disjoint supports per component in signed mode.
-    optimizer : {"spg", "lbfgs"}, default "spg"
-        Optimization algorithm: 'spg' (pure PyTorch) or 'lbfgs' (SciPy L-BFGS-B).
+    optimizer : {"torch_lbfgs", "spg", "lbfgs"}, default "torch_lbfgs"
+        Optimization algorithm:
+        - "torch_lbfgs": Native pure PyTorch quasi-Newton via quadratic reparameterization (default).
+        - "spg": Monotone Spectral Projected Gradient.
+        - "lbfgs": SciPy L-BFGS-B (box constrained).
     init : str or Tensor, optional
         Initial point strategy or tensor.
     max_iter : int, optional
@@ -674,21 +773,22 @@ def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=True,
     if mode in ("data", "nonneg"):
         from .reconstruct import nsa_flow_data
         init_strat = init if init is not None else "clamp"
-        iter_cap = max_iter if max_iter is not None else 2000
+        iter_cap = max_iter if max_iter is not None else (1000 if optimizer in ("torch_lbfgs", "torch-lbfgs") else 2000)
         return nsa_flow_data(X, k=k, w=w, init=init_strat, max_iter=iter_cap,
                              tol=tol, optimizer=optimizer, **kwargs)
 
     elif mode in ("signed", "contrast"):
         from .signed import nsa_flow_signed
         init_strat = init if init is not None else "relax"
-        iter_cap = max_iter if max_iter is not None else 8000
+        iter_cap = max_iter if max_iter is not None else (1000 if optimizer in ("torch_lbfgs", "torch-lbfgs") else 8000)
         return nsa_flow_signed(X, k=k, w=w, init=init_strat, consolidate=consolidate,
                                max_iter=iter_cap, tol=tol, optimizer=optimizer, **kwargs)
 
     elif mode in ("anchored", "target"):
         iter_cap = max_iter if max_iter is not None else 20000
+        anc_opt = optimizer if optimizer != "torch_lbfgs" else "spg"
         return _nsa_flow_anchored(X, w=w, nonneg=nonneg, init=init,
-                                  max_iter=iter_cap, tol=tol, **kwargs)
+                                  max_iter=iter_cap, tol=tol, optimizer=anc_opt, **kwargs)
 
     else:
         raise ValueError(f"Unknown mode {mode!r}; choose 'auto', 'data', 'signed', or 'anchored'")

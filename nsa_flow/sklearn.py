@@ -53,7 +53,7 @@ class NSAFlow(*_Base):
     """
 
     def __init__(self, n_components=6, w=0.5, mode="auto", consolidate=False,
-                 optimizer="spg", init=None, max_iter=None, tol=None, **kwargs):
+                 optimizer="torch_lbfgs", init=None, max_iter=None, tol=None, **kwargs):
         self.n_components = n_components
         self.w = w
         self.mode = mode
