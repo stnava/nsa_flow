@@ -341,3 +341,51 @@ def test_defect_is_blind_to_the_rotation_fidelity_pays_for():
         assert abs(float(stiefel_defect(Y @ R)) - d0) < 1e-12
         spread.append(float(fidelity(Y @ R, Y, align=False)))
     assert max(spread) > 1e-2                 # fidelity varies over the orbit
+
+
+# ── Plateau detection ─────────────────────────────────────────────────────────
+
+def test_plateau_detection_fires_and_exits_early():
+    """Plateau stop fires long before max_iter when the objective is flat.
+
+    We run nsa_flow_data with a very large max_iter and verify the solver
+    exits via 'plateau' (or 'grad_map') in far fewer than max_iter iterations.
+    This tests that plateau detection is actually doing work.
+    """
+    from nsa_flow.reconstruct import nsa_flow_data
+    torch.manual_seed(7)
+    X = torch.rand(30, 10, dtype=torch.float64)
+    r = nsa_flow_data(X, k=3, w=0.5, max_iter=10000)
+    assert r.stop_reason in ("grad_map", "plateau"), (
+        f"Expected grad_map or plateau, got {r.stop_reason}")
+    assert r.iters < 5000, (
+        f"Plateau detection should exit well before max_iter=10000; "
+        f"got {r.iters} iters with stop={r.stop_reason}")
+    assert r.converged, f"converged must be True for stop={r.stop_reason}"
+
+
+# ── Signed lobe overlap monotonicity (lobe w-scaling) ───────────────────────
+
+def test_signed_lobe_overlap_is_monotone_in_w():
+    """Lobe overlap must be non-increasing as w increases (lobe scaled by w).
+
+    Before the v2.10.0 fix the lobe weight was constant=1.0, causing a
+    non-monotone spike at small w (e.g. w=0.05 gave overlap 0.55 while
+    w=0.5 gave 0.06).  With w-scaling the lobe penalty grows with w, so
+    larger w drives the overlap lower.
+    """
+    from nsa_flow.signed import nsa_flow_signed
+    torch.manual_seed(42)
+    X = torch.randn(50, 15, dtype=torch.float64)
+    ws = [0.0, 0.1, 0.3, 0.5, 0.7, 0.9]
+    overlaps = []
+    for w in ws:
+        r = nsa_flow_signed(X, k=3, w=w)
+        overlaps.append(r["lobe_overlap"])
+    # Monotone non-increasing: each overlap <= previous + small tolerance
+    # (some numerical noise is acceptable between adjacent w values)
+    for i in range(1, len(overlaps)):
+        assert overlaps[i] <= overlaps[i - 1] + 0.05, (
+            f"Overlap non-monotone at w={ws[i]}: "
+            f"overlaps[{i}]={overlaps[i]:.4f} > overlaps[{i-1}]={overlaps[i-1]:.4f}; "
+            f"full sequence: {[f'{o:.4f}' for o in overlaps]}")

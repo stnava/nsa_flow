@@ -249,7 +249,7 @@ def _orth_terms(orth, k):
     raise ValueError(f"orth must be 'D', 'C' or 'Cg'; got {orth!r}")
 
 
-def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="C", max_iter=5000,
+def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="C", max_iter=500,
                   tol=None, sigma=1e-4, dtype=None, device=None, verbose=False,
                   keep_trace=False, matrix_free=None):
     """Fit a non-negative, near-orthonormal basis ``V`` reconstructing ``X``.
@@ -412,7 +412,8 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="C", max_iter=5000,
         matrix_free=bool(matrix_free),
         effective_rank=float(effective_rank(V)),
         scale_ratio=float("nan"), iters=it,
-        converged=stop != "max_iter" and math.isfinite(gmap),
+        converged=stop in ("grad_map", "plateau") or (
+            stop == "line_search" and math.isfinite(gmap)),
         stop_reason=stop, grad_map=float(gmap), seconds=time.time() - t0,
         w_schedule=[float(w)], trace=trace, nonneg=True, align=False,
     )

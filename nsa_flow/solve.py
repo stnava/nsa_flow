@@ -19,6 +19,17 @@ closed convex feasible set this converges to a stationary point, and the
 gradient-mapping norm ``||Y+ - Y|| / t`` is a computable stationarity
 certificate.
 
+Convergence is detected by three independent criteria (whichever fires first):
+
+* ``"grad_map"``: ``|Gmap| <= tol`` — tight stationarity certificate.
+* ``"plateau"``: energy span over last ``patience`` steps < ``rtol`` (relative)
+  — energy has converged to ~7 significant figures; ``max_iter`` is then a
+  safety cap rather than an operating parameter.
+* ``"line_search"``: step too small — iterate is at a local minimum of the
+  line search (emits ``RuntimeWarning`` if far from stationarity).
+* ``"max_iter"``: safety cap hit — iterate is NOT certified stationary
+  (emits ``RuntimeWarning`` when ``|Gmap| > 1e-3``).
+
 Cost per iteration is two ``[p,k] x [k,k]`` products plus one Gram: ``O(p k^2)``.
 No SVD, eigendecomposition or QR appears in the loop -- except under ``align``
 (deprecated), which adds one ``k x k`` SVD per evaluation.
@@ -195,7 +206,8 @@ def _solve_fixed_w(Y, X0, w, denom, nonneg, max_iter, tol, sigma, verbose, trace
 
 
 def _spg_loop(Y, proj, energy_fn, grad_fn, max_iter, tol, sigma,
-              verbose=False, trace=None, caller="", w=None):
+              verbose=False, trace=None, caller="", w=None,
+              patience=50, rtol=1e-7):
     """Monotone spectral projected gradient loop (shared by signed and data solvers).
 
     Parameters
@@ -210,10 +222,21 @@ def _spg_loop(Y, proj, energy_fn, grad_fn, max_iter, tol, sigma,
         Returns ``(energy, gradient)`` together so the iterate's energy and
         gradient are computed in one call after each accepted step.
     max_iter : int
+        Hard upper bound on iterations.  In practice the loop exits via
+        ``grad_map``, ``plateau``, or ``line_search`` long before this limit.
     tol : float
-        Stop when the projected-gradient mapping norm falls below this.
+        Stop when the projected-gradient mapping norm ``|Y+ - Y|/t`` falls
+        below this.  The tight stationarity certificate.
     sigma : float
         Armijo sufficient-decrease constant.
+    patience : int
+        Plateau window length.  If the energy has not changed by more than
+        ``rtol`` (relative) over the last ``patience`` accepted steps, stop
+        with ``stop_reason="plateau"``.  Default 50.
+    rtol : float
+        Relative energy tolerance for plateau detection.
+        ``(E_max - E_min) / (1 + |E_min|) < rtol`` triggers the stop.
+        Default 1e-7 (energy converged to ~7 significant figures).
     verbose : bool
     trace : list or None
         Append ``dict(iter, energy, grad_map, step)`` if not None.
@@ -227,7 +250,7 @@ def _spg_loop(Y, proj, energy_fn, grad_fn, max_iter, tol, sigma,
     Y : Tensor
     E : float
     it : int
-    stop : str   ``"grad_map"`` | ``"line_search"`` | ``"max_iter"``
+    stop : str   ``"grad_map"`` | ``"plateau"`` | ``"line_search"`` | ``"max_iter"``
     gmap : float
     """
     Y = proj(Y)
@@ -236,6 +259,7 @@ def _spg_loop(Y, proj, energy_fn, grad_fn, max_iter, tol, sigma,
     t = 1.0 / max(float(g.norm()), 1e-12)
     Y_prev = g_prev = None
     gmap, stop, it = float("inf"), "max_iter", 0
+    E_window = []                               # for plateau detection
 
     for it in range(1, max_iter + 1):
         if Y_prev is not None:                      # Barzilai-Borwein
@@ -277,6 +301,16 @@ def _spg_loop(Y, proj, energy_fn, grad_fn, max_iter, tol, sigma,
         E, g = grad_fn(Y)
         E = float(E)
 
+        # ── plateau detection ──────────────────────────────────────────────
+        E_window.append(E)
+        if len(E_window) > patience:
+            E_window.pop(0)
+        if len(E_window) == patience:
+            span = max(E_window) - min(E_window)
+            if span / (1.0 + abs(min(E_window))) < rtol:
+                stop = "plateau"
+                break
+
         if trace is not None:
             row = dict(iter=len(trace) + 1, energy=E, grad_map=gmap, step=t)
             if w is not None:
@@ -288,6 +322,13 @@ def _spg_loop(Y, proj, energy_fn, grad_fn, max_iter, tol, sigma,
         if gmap <= tol:
             stop = "grad_map"
             break
+
+    if stop == "max_iter" and math.isfinite(gmap) and gmap > 1e-3:
+        warnings.warn(
+            f"{caller}: reached max_iter={max_iter} with |Gmap|={gmap:.2e}; "
+            "the iterate is not stationary.  Increase max_iter or lower tol, "
+            "or inspect stop_reason and grad_map.",
+            RuntimeWarning, stacklevel=3)
 
     return Y, E, it, stop, gmap
 
@@ -527,7 +568,8 @@ def nsa_flow(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
         scale_ratio=float(Y.norm() / X0.norm()), iters=total_iters, align=bool(align),
         fidelity_mode=fidelity, fidelity_requested=requested,
         target_negative_mass=neg_mass, clamp_distance=clamp_dist,
-        converged=stop != "max_iter" and math.isfinite(gmap),
+        converged=stop in ("grad_map", "plateau") or (
+            stop == "line_search" and math.isfinite(gmap)),
         stop_reason=stop, grad_map=float(gmap),
         seconds=time.time() - t0,
         w_schedule=ws, trace=trace, nonneg=bool(nonneg),

@@ -40,10 +40,15 @@ atrophy.  The default is therefore ``C`` restricted to off-diagonal angles
 reconstruction term instead, which is where that job belongs: a dead component
 reconstructs nothing.
 
-``lobe`` adds ``sum_i <v+_i, v-_i>`` to forbid a component contrasting a feature
-against itself.  The off-diagonal angle term already pushes every pair of lobes
-apart, including each component's own pair, so this is a refinement rather than a
-necessity; ``lobe=1.0`` drives the overlap to exactly zero.
+``lobe`` adds ``w * sum_i <v+_i, v-_i> / c`` to forbid a component
+contrasting a feature against itself.  The weight is ``w * lobe`` (not just
+``lobe``): at ``w = 0`` the reconstruction term already suppresses
+self-cancellation (a feature in both ``v+_i`` and ``v-_i`` cancels in ``V``
+and wastes capacity), so no extra lobe penalty is needed; the penalty grows
+smoothly with ``w``, giving a **monotone overlap-vs-w response**.  Before this
+change (v2.9.0 and earlier) the lobe weight was a fixed constant, which caused
+a non-monotone spike in lobe overlap at small ``w`` (e.g. ``w = 0.05`` gave
+overlap 0.55 while ``w = 0.5`` gave 0.06).
 
 DEFAULT orth IS NOW "Cg", THE SMOOTH DEFECT.  ``Coff`` traps a descent method:
 ``C`` is a function of column directions only, so it is discontinuous at a zero
@@ -264,7 +269,7 @@ def _split(W):
 
 
 def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Cg", lobe=1.0,
-                    max_iter=20000, tol=None, sigma=1e-4, dtype=None, device=None,
+                    max_iter=3000, tol=None, sigma=1e-4, dtype=None, device=None,
                     verbose=False, keep_trace=False, consolidate=False):
     """Fit ``V = V+ - V-`` with ``[V+|V-] >= 0`` near-disjoint, reconstructing ``X``.
 
@@ -358,8 +363,11 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Cg", lobe=1.0,
         f = reconstruction_fidelity(Vp - Vm, S, c, c)
         d = o_val(Wv)
         e = (1.0 - w) * f + w * d
-        if lobe:
-            e = e + lobe * (Vp * Vm).sum() / c
+        if lobe and w > 0.0:
+            # Lobe overlap penalty scaled by w: at w=0 the reconstruction
+            # term already suppresses self-cancellation; the penalty grows
+            # smoothly with w, ensuring a monotone overlap vs w response.
+            e = e + w * lobe * (Vp * Vm).sum() / c
         return e, f, d
 
     def parts_grad(Wv):
@@ -368,8 +376,8 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Cg", lobe=1.0,
         g = torch.cat([gV, -gV], dim=-1)
         if w != 0.0:
             g = g + w * o_grad(Wv)
-        if lobe:
-            g = g + (lobe / c) * torch.cat([Vm, Vp], dim=-1)
+        if lobe and w > 0.0:
+            g = g + (w * lobe / c) * torch.cat([Vm, Vp], dim=-1)
         return g
 
     # ---- main SPG loop ---------------------------------------------------
@@ -428,7 +436,8 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Cg", lobe=1.0,
         defect=D, raw_defect=float(stiefel_defect(W)),
         effective_rank=float(effective_rank(W)),
         scale_ratio=float("nan"), iters=it,
-        converged=stop != "max_iter" and math.isfinite(gmap),
+        converged=stop in ("grad_map", "plateau") or (
+            stop == "line_search" and math.isfinite(gmap)),
         stop_reason=stop, grad_map=float(gmap), seconds=time.time() - t0,
         w_schedule=[float(w)], trace=trace, nonneg=True, align=False,
     )

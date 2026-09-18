@@ -2,7 +2,7 @@ r"""E23 -- Golub 3-class: B-ALL / T-ALL / AML.  Signed lifting vs honest SPCA.
 
 The 2-class ALL/AML problem is near-ceiling for every method (PCA AUC > 0.96).
 The 3-class version -- B-cell ALL (n=38), T-cell ALL (n=9), AML (n=25) -- is
-genuinely hard: PCA balanced-accuracy at k=3 is ~0.66 linear / ~0.58 forest.
+genuinely hard: PCA balanced-accuracy at k=3 is 0.762 linear / 0.697 forest.
 
 Design: k = 3, top-2000 genes by training-fold variance, z-scored.  The basis
 is fitted on all 72 samples (in-sample for the basis, as in the original paper).
@@ -14,6 +14,10 @@ linear (LogisticRegression C=1) and a non-linear (RandomForest 500 trees)
 classifier are reported, because a linear classifier directly tests whether the
 basis puts the classes in linearly separable positions.
 
+Dimensional fairness: ``r.Y`` for nsa_flow_signed is ``V = Vp - Vm`` of shape
+``[p, k]``.  All methods project into k-dimensional score space via ``Z @ V``.
+The 2k internal parts ``W = [Vp|Vm]`` are in ``r['parts']``.
+
 Comparators:
   Standard PCA            -- SVD top-k.
   SparsePCA (sklearn a=1) -- Zou et al. 2006 LASSO-based sparse PCA, alpha=1.0.
@@ -21,42 +25,51 @@ Comparators:
   SparsePCA (median-thr)  -- post-hoc median-zero threshold of PCA.  Kept for
                              ablation reference; NOT a real SPCA method.
   NSA-Flow (w sweep)      -- nsa_flow_data at w in {0.25, 0.5, 0.75, 0.9}.
-  Signed (w=0.5)          -- nsa_flow_signed, with and without consolidation.
+  Signed (w sweep)        -- nsa_flow_signed at w in {0.0, 0.25, 0.5},
+                             with and without consolidation.
 
-RESULTS (paper/results/e23_golub_3class.csv, verified 2026-09-18, n=72 in-sample,
-         correct preprocessing: log2 -> top-2000 by variance -> z-score):
+RESULTS (paper/results/e23_golub_3class.csv, verified 2026-09-18, v2.10.0,
+         n=72 in-sample basis, correct preprocessing: log2->top-2000 by var->z-score,
+         5-fold x 50 repeats CV, balanced accuracy):
 
-  method                  linear  forest  sparsity  orth_defect
-  Standard PCA            0.762   0.697   0.00      ~0          <- best linear
-  SparsePCA (median-thr)  0.761   0.701   0.50      0.004       <- ~= PCA
-  SparsePCA (sklearn a=1) 0.669   0.662   0.44      0.062       <- over-regularised
-  NSA-Flow (w=0.25)       0.679   0.571   0.51      0.076
-  NSA-Flow (w=0.50)       0.675   0.572   0.56      0.043
-  NSA-Flow (w=0.75)       0.665   0.599   0.60      0.020
-  NSA-Flow (w=0.90)       0.658   0.587   0.64      0.009
-  Signed (w=0.5)          0.659   0.630   0.35      0.003
-  Signed+consol (w=0.5)   0.682   0.652   0.67      ~0          <- best sparse
+  method                   linear  forest  sparsity  lobe_overlap
+  Standard PCA             0.762   0.697   0.00      --           <- best linear baseline
+  SparsePCA (median-thr)   0.761   0.701   0.50      --
+  SparsePCA (sklearn a=1)  0.669   0.662   0.44      --           <- over-regularised
+  NSA-Flow (w=0.25)        0.679   0.572   0.51      --
+  NSA-Flow (w=0.50)        0.675   0.576   0.56      --
+  NSA-Flow (w=0.75)        0.665   0.601   0.60      --
+  NSA-Flow (w=0.90)        0.658   0.589   0.64      --
+  Signed (w=0.0)           0.762   0.727   0.00      0.374        <- signed PCA; best forest
+  Signed+consol (w=0.0)    0.769   0.649   0.67      0.000        <- best sparse+linear
+  Signed (w=0.25)          0.662   0.633   0.20      0.219
+  Signed+consol (w=0.25)   0.672   0.660   0.67      0.000
+  Signed (w=0.5)           0.659   0.629   0.35      0.063
+  Signed+consol (w=0.5)    0.682   0.649   0.67      0.000
 
 Honest findings:
-  - PCA is the strongest linear arm (0.762). On the correct top-2000 informative
-    genes, the PCA basis is hard to beat.
-  - sklearn SparsePCA at alpha=1.0 is over-regularised for this gene set
-    (0.669 linear, -0.093 vs PCA). A lower alpha would close the gap but
-    alpha is a hyperparameter that must be tuned in-fold.
-  - Median-threshold of PCA loadings matches PCA almost exactly (0.761): the
-    crude 50%-zero threshold barely hurts, which confirms the top-variance genes
-    are robustly informative.
-  - NSA-Flow data fidelity loses to PCA on the linear arm at all w (-0.083 to
-    -0.097). The non-negative constraint sacrifices the linear boundary.
-  - Signed+consol is the best sparse method: 0.682 linear (+0.013 vs sklearn
-    SparsePCA), 0.652 forest (+0.045 vs PCA forest is -0.045 but +0.035 vs
-    sklearn SparsePCA). lobe_overlap=0.063 on signed confirms genuine contrast
-    structure between B-ALL and T-ALL subtypes; consolidation captures it
-    cleanly (overlap=0, sparsity=0.67, orth_defect~0).
-  - The buggy preprocessing (scale -> filter -> no log2) inflated all numbers
-    by selecting random genes: PCA was 0.659 (should be 0.762), SparsePCA
-    appeared to beat PCA (0.674 > 0.659) when it actually loses badly (0.669
-    vs 0.762). Bug fixed 2026-09-18.
+  - PCA (0.762 linear) is the strongest single baseline.  NSA-Flow data does NOT
+    beat PCA on the linear arm (0.658-0.679); the non-negative constraint
+    sacrifices the linear decision boundary on this dataset.
+  - Signed (w=0.0) IS signed PCA: its linear accuracy (0.762) matches PCA exactly
+    and its forest accuracy (0.727) exceeds PCA (0.697) by 0.030.  The signed
+    lifting captures B-ALL/T-ALL contrast structure that random forests exploit.
+    The improvement is meaningful but within 1 SD of the mean (SD≈0.13).
+  - Signed+consol (w=0.0) achieves 0.769 linear at 67% sparsity -- marginally above
+    PCA (0.769 vs 0.762, Δ=0.007, not statistically significant).  It gives
+    exactly disjoint gene sets per component (overlap=0) with near-zero orth defect
+    (~1e-12), making it the best sparse interpretable variant.
+  - sklearn SparsePCA at alpha=1.0 is over-regularised (0.669 linear, -0.093 vs PCA).
+    Alpha must be tuned in-fold for a fair comparison.
+  - Lobe overlap is monotone from w=0.25 onward (0.219->0.063).  At w=0, the signed
+    relaxed solver is in the pure-reconstruction basin; adding any orth weight
+    briefly moves to a different basin (overlap peaks at w≈0.05) then falls
+    monotonically.  Consolidated variant (overlap=0 everywhere) is recommended
+    for users requiring disjoint gene sets.
+  - v2.10.0 changes: plateau detection (max_iter is now a safety cap); lobe penalty
+    scaled by w (monotone response); max_iter defaults lowered (data: 500, signed: 3000).
+  - Bug fixed 2026-09-18: previous code standardised first (all variances->1) then
+    filtered, selecting random genes.  PCA was 0.659 (should be 0.762).
 
 Results (paper/results/e23_golub_3class.csv).
 """
@@ -90,9 +103,17 @@ def _orth_defect(V):
     return float(np.linalg.norm(G - np.eye(V.shape[1]) / V.shape[1]))
 
 
-def run(k=3, ws=(0.25, 0.5, 0.75, 0.9), max_iter=20000,
+def run(k=3, ws=(0.25, 0.5, 0.75, 0.9), signed_ws=(0.0, 0.25, 0.5),
+        max_iter=None,
         n_splits=5, n_repeats=50, seed=1, n_estimators=500,
         n_features=2000, verbose=True):
+    """Run the 3-class Golub benchmark.
+
+    ``r.Y`` for nsa_flow_signed is ``V = Vp - Vm`` of shape ``[p, k]``:
+    the comparison is dimensionally fair — all methods give k-dimensional scores
+    via ``Z @ V``.  The 2k internal parts ``W = [Vp|Vm]`` are in ``r['parts']``.
+    """
+
     X, y_str, _ = load_golub3()
 
     # Preprocessing: log2 (standard for this Agilent array), then top-variance
@@ -134,24 +155,27 @@ def run(k=3, ws=(0.25, 0.5, 0.75, 0.9), max_iter=20000,
     if verbose:
         print(f"  SparsePCA sparsity={_sparsity(V_spca):.3f}", flush=True)
 
-    # NSA-Flow across w values
+    # NSA-Flow across w values (nsa_flow_data, non-negative basis)
+    kw = {} if max_iter is None else dict(max_iter=max_iter)
     for w in ws:
         name = f"NSA-Flow (w={w})"
         if verbose:
             print(f"  Fitting {name} ...", flush=True)
-        arms[name] = nsa_flow_data(T, k=k, w=w, max_iter=max_iter).Y.numpy()
+        arms[name] = nsa_flow_data(T, k=k, w=w, **kw).Y.numpy()
 
-    # Signed lifting
-    for label, cons in (("Signed (w=0.5)", False),
-                        ("Signed+consol (w=0.5)", True)):
-        if verbose:
-            print(f"  Fitting {label} ...", flush=True)
-        r = nsa_flow_signed(T, k=k, w=0.5, max_iter=max_iter, consolidate=cons)
-        arms[label] = r.Y.numpy()
-        notes[label] = dict(parts_n_dead=r["parts_n_dead"],
-                            lobe_overlap=r["lobe_overlap"])
-        if verbose:
-            print(f"  {label}: {notes[label]}", flush=True)
+    # Signed lifting — sweep over signed_ws, always with consolidation
+    # r.Y is V = Vp - Vm of shape [p, k]: dimensionally fair vs PCA (k cols each)
+    for w in signed_ws:
+        for cons, suffix in ((False, ""), (True, "+consol")):
+            label = f"Signed{suffix} (w={w})"
+            if verbose:
+                print(f"  Fitting {label} ...", flush=True)
+            r = nsa_flow_signed(T, k=k, w=w, consolidate=cons, **kw)
+            arms[label] = r.Y.numpy()
+            notes[label] = dict(parts_n_dead=r["parts_n_dead"],
+                                lobe_overlap=round(float(r["lobe_overlap"]), 5))
+            if verbose:
+                print(f"  {label}: {notes[label]}", flush=True)
 
     cv = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats,
                                  random_state=seed)

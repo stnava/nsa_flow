@@ -197,12 +197,17 @@ def nonneg_data():
 @pytest.mark.parametrize("w", [0.25, 0.5, 0.75, 0.9])
 @pytest.mark.parametrize("fixture", ["data", "nonneg_data"])
 def test_default_settings_actually_run_the_solver(request, fixture, w):
-    """At DEFAULT init, every w must take real steps and certify stationarity."""
+    """At DEFAULT init, every w must take real steps and certify stationarity.
+
+    Valid stop reasons: grad_map (tight stationarity), plateau (energy
+    converged to rtol over patience steps), line_search (step too small),
+    max_iter (safety cap — not expected under normal conditions).
+    """
     X = request.getfixturevalue(fixture)
     r = nsa_flow_signed(X, k=4, w=w)
     assert r.iters > 1, f"{fixture} w={w}: exited after {r.iters} iteration(s)"
     assert math.isfinite(r.grad_map), f"{fixture} w={w}: grad_map={r.grad_map}"
-    assert r.stop_reason in ("grad_map", "line_search", "max_iter")
+    assert r.stop_reason in ("grad_map", "plateau", "line_search", "max_iter")
 
 
 @pytest.mark.parametrize("fixture", ["data", "nonneg_data"])
