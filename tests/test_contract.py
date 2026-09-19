@@ -224,3 +224,16 @@ def test_explicit_nonneg_routes_to_the_data_solver():
     assert r["mode"] == "signed"
     r = nsa_flow(torch.rand(40, 15, dtype=F64), k=3, w=0.5)
     assert r["mode"] == "data"
+
+
+def test_fidelity_is_an_explicit_parameter_of_nsa_flow():
+    """pysimlr detects the sign-blind fidelity by `'fidelity' in signature`;
+    3.0 moved it into **kwargs and silently disabled that path downstream."""
+    import inspect
+    assert "fidelity" in inspect.signature(nsa_flow).parameters
+    T = torch.randn(30, 4, dtype=F64)
+    a = nsa_flow(T, w=0.5, fidelity="anchor")
+    b = nsa_flow(T, w=0.5, fidelity="subspace")
+    assert a["fidelity_mode"] == "anchor" and b["fidelity_mode"] == "subspace"
+    with pytest.raises(ValueError):
+        nsa_flow(torch.rand(30, 10, dtype=F64), k=3, fidelity="anchor")

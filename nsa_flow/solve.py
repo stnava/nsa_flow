@@ -420,7 +420,7 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
 
 def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=None,
              consolidate=False, optimizer=None, init=None, max_iter=None,
-             tol=None, **kwargs):
+             tol=None, fidelity="auto", **kwargs):
     """Unified high-level entry point for NSA-Flow representation learning.
 
     Automatically inspects input structure, data sign distribution, and task
@@ -460,6 +460,15 @@ def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=None,
         Maximum iterations. Default adapted to method.
     tol : float, optional
         Stationarity tolerance.
+    fidelity : {"auto", "anchor", "subspace"}, default "auto"
+        Anchored mode only: which notion of "close to the target" to use.
+        ``"anchor"`` is the entrywise Euclidean distance -- the one that makes
+        the anchored solve a proximal operator, which is what a proximal-
+        gradient outer loop (e.g. SiMLR) requires.  ``"auto"`` switches to the
+        sign-blind ``"subspace"`` fidelity when the target has negative mass
+        > ``neg_mass_tol``, which is right for one-shot basis recovery from PCA
+        loadings and wrong for a prox.  Explicit here, not in ``**kwargs``,
+        because downstream code detects the capability by signature.
     **kwargs :
         Additional arguments forwarded to the selected solver.
 
@@ -495,6 +504,11 @@ def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=None,
     # an SPG step and an L-BFGS step cost the same thing.
     iter_cap = DEFAULT_MAX_GRAD_EVALS if max_iter is None else int(max_iter)
 
+    if fidelity != "auto" and mode not in ("anchored", "target"):
+        raise ValueError(
+            f"fidelity={fidelity!r} applies to the anchored mode only; "
+            f"mode={mode!r} uses the data reconstruction term.")
+
     if mode in ("data", "nonneg"):
         from .reconstruct import nsa_flow_data
         init_strat = "clamp" if init in (None, "auto") else init
@@ -510,7 +524,7 @@ def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=None,
 
     if mode in ("anchored", "target"):
         return _nsa_flow_anchored(X, w=w, nonneg=(True if nonneg is None else nonneg),
-                                  init=init,
+                                  init=init, fidelity=fidelity,
                                   max_iter=iter_cap, tol=tol, optimizer=optimizer,
                                   **kwargs)
 
