@@ -39,9 +39,19 @@ from .signed import consolidate_supports, nsa_flow_signed, part_sparsity
 from .subspace import (SubspaceAnchor, negative_mass, subspace_fidelity,
                        grad_subspace_fidelity)
 from .layers import NSAFlowLinear, NSAFlowConv2d, NSAFlowLayer
-from .sklearn import NSAFlow
 
-__version__ = "3.1.1"
+__version__ = "3.1.2"
+
+
+def __getattr__(name):
+    # NSAFlow pulls in scikit-learn.  Importing it eagerly made `import
+    # nsa_flow` import sklearn for every user -- including downstream packages
+    # with a tested lazy-import contract (pysimlr) -- for an estimator most
+    # calls never touch.  PEP 562: resolve it on first access instead.
+    if name == "NSAFlow":
+        from .sklearn import NSAFlow
+        return NSAFlow
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     # energy

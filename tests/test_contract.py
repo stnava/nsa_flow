@@ -237,3 +237,13 @@ def test_fidelity_is_an_explicit_parameter_of_nsa_flow():
     assert a["fidelity_mode"] == "anchor" and b["fidelity_mode"] == "subspace"
     with pytest.raises(ValueError):
         nsa_flow(torch.rand(30, 10, dtype=F64), k=3, fidelity="anchor")
+
+
+def test_import_nsa_flow_does_not_import_sklearn():
+    import subprocess, sys
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import sys, nsa_flow; print('sklearn' in sys.modules); "
+         "from nsa_flow import NSAFlow; print(NSAFlow.__name__)"],
+        capture_output=True, text=True, check=True).stdout.split()
+    assert out == ["False", "NSAFlow"], out
