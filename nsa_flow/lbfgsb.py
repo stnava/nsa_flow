@@ -64,7 +64,26 @@ import torch
 
 __all__ = ["lbfgsb_minimize"]
 
-_TINY = 1e-300
+_TINY = 1e-300     # Python-float floor only; NEVER clamp a tensor with this
+
+
+def _tiny(t):
+    """Smallest positive normal of ``t``'s dtype.
+
+    ``clamp_min(1e-300)`` on a float32 tensor clamps to **0.0** -- 1e-300 is
+    below float32's smallest normal (1.2e-38) -- so a curvature floored that way
+    and read back with ``float()`` divides by exactly zero.  Reported from a
+    downstream package on a near-flat objective at iteration 25.  Every tensor
+    floor here must be in the tensor's own dtype.
+    """
+    return float(torch.finfo(t.dtype).tiny)
+
+
+def _safe_div(num, den, tiny):
+    """``num / den`` with ``den`` floored away from zero, sign preserved."""
+    if den >= 0.0:
+        return num / max(den, tiny)
+    return num / min(den, -tiny)
 
 
 class _CompactLBFGS:
@@ -164,11 +183,12 @@ def _cauchy_point(x, g, lo, hi, H, max_breakpoints=512):
     bound by the walk.
     """
     inf = float("inf")
+    tiny = _tiny(x)
     t = torch.full_like(x, inf)
     if lo is not None:
-        t = torch.where(g > 0, (x - lo) / g.clamp_min(_TINY), t)
+        t = torch.where(g > 0, (x - lo) / g.clamp_min(tiny), t)
     if hi is not None:
-        t = torch.where(g < 0, (x - hi) / g.clamp_max(-_TINY), t)
+        t = torch.where(g < 0, (x - hi) / g.clamp_max(-tiny), t)
     t = torch.nan_to_num(t, nan=inf, posinf=inf, neginf=inf).clamp_min(0.0)
 
     moving0 = (t > 0).to(x.dtype)
@@ -185,8 +205,8 @@ def _cauchy_point(x, g, lo, hi, H, max_breakpoints=512):
     fpp = -H.theta * fp
     if two_m:
         fpp = fpp - float(p @ (H.M @ p))
-    fpp = max(fpp, _TINY)
-    dt_min = -fp / fpp
+    fpp = max(fpp, tiny)
+    dt_min = _safe_div(-fp, fpp, tiny)
     t_old = 0.0
 
     # Only finite breakpoints of currently-moving coordinates matter, and only
@@ -229,7 +249,7 @@ def _cauchy_point(x, g, lo, hi, H, max_breakpoints=512):
         else:
             wMc = torch.zeros_like(gb)
             dfpp = -H.theta * gb * gb
-        fpp_j = (fpp + torch.cumsum(dfpp, 0)).clamp_min(_TINY)   # f'' after j
+        fpp_j = (fpp + torch.cumsum(dfpp, 0)).clamp_min(tiny)    # f'' after j
         fpp_prev = torch.cat([fpp_j.new_full((1,), fpp), fpp_j[:-1]])
         dfp = dtb * fpp_prev + gb * gb + H.theta * gb * zb - gb * wMc
         fp_j = fp + torch.cumsum(dfp, 0)                       # f' after j
@@ -247,8 +267,8 @@ def _cauchy_point(x, g, lo, hi, H, max_breakpoints=512):
             fixed[fixed_idx] = True
             t_old = float(tb[n_fix - 1])
             fp = float(fp_j[n_fix - 1])
-            fpp = float(fpp_j[n_fix - 1])
-            dt_min = -fp / fpp
+            fpp = max(float(fpp_j[n_fix - 1]), tiny)
+            dt_min = _safe_div(-fp, fpp, tiny)
             if two_m:
                 p = p_prev[n_fix - 1] + gb[n_fix - 1] * Wb[n_fix - 1]
                 c = c_j[n_fix - 1]
@@ -303,21 +323,23 @@ def _subspace_min(x, g, x_cp, c, fixed, lo, hi, H):
     if lo is not None:
         neg = d_hat < 0
         if bool(neg.any()):
-            lim = ((lo - x_cp) / d_hat.clamp_max(-_TINY))[neg]
+            lim = ((lo - x_cp) / d_hat.clamp_max(-_tiny(x)))[neg]
             alpha = torch.minimum(alpha, lim.clamp_min(0.0).min())
     if hi is not None:
         pos = d_hat > 0
         if bool(pos.any()):
-            lim = ((hi - x_cp) / d_hat.clamp_min(_TINY))[pos]
+            lim = ((hi - x_cp) / d_hat.clamp_min(_tiny(x)))[pos]
             alpha = torch.minimum(alpha, lim.clamp_min(0.0).min())
     return x_cp + alpha * d_hat
 
 
 def _cubic_min(a, fa, ga, b, fb, gb):
     """Minimiser of the cubic through ``(a, fa, ga)`` and ``(b, fb, gb)``."""
+    if a == b:
+        return None
     d1 = ga + gb - 3.0 * (fa - fb) / (a - b)
     q = d1 * d1 - ga * gb
-    if q < 0.0 or a == b:
+    if q < 0.0:
         return None
     d2 = math.sqrt(q) * (1.0 if b > a else -1.0)
     denom = gb - ga + 2.0 * d2
@@ -511,7 +533,7 @@ def lbfgsb_minimize(x0, fun_grad, fun=None, *, lower=0.0, upper=None, mask=None,
             x_cp, c, fixed = _cauchy_point(xf, g, lo, hi, H)
             d = clip(x_cp) - xf
             if float((d * g).sum()) >= 0.0:
-                d = -g / max(float(g.norm()), _TINY)
+                d = -g / max(float(g.norm()), _tiny(g))
 
         # Both xf and x_bar are feasible and the box is convex, so the whole
         # segment is feasible and phi is smooth: no projection inside the search.
@@ -528,7 +550,7 @@ def lbfgsb_minimize(x0, fun_grad, fun=None, *, lower=0.0, upper=None, mask=None,
         if lo is not None:
             neg = d < 0
             if bool(neg.any()):
-                a_max = max(a_max, float(((lo - xf) / d.clamp_max(-_TINY))[neg]
+                a_max = max(a_max, float(((lo - xf) / d.clamp_max(-_tiny(xf)))[neg]
                                          .clamp_min(0.0).min()))
         # Leave one evaluation in hand so the fallback's gradient still lands
         # within the budget; the cap is on gradient evaluations and it binds.

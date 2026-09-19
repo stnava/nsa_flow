@@ -179,3 +179,23 @@ def test_scipy_reference_agrees_with_torch_lbfgsb():
         # same basin: energies agree to solver precision
         assert abs(a.energy - b.energy) <= 1e-8 * (1 + abs(b.energy)), \
             f"{mode}: torch {a.energy:.10e} vs scipy {b.energy:.10e}"
+
+
+def test_float32_flat_model_does_not_divide_by_zero():
+    """clamp_min(1e-300) is 0.0 in float32; the Cauchy walk divided by it.
+
+    Reported downstream (pysimlr, MultiOmics seed 47, iteration 25) as a
+    ZeroDivisionError on a near-flat objective.  Floors are now in the tensor's
+    own dtype and scalar divisions are guarded.
+    """
+    from nsa_flow.lbfgsb import _CompactLBFGS, _cauchy_point
+    x = torch.tensor([0.5, 0.3, 0.0], dtype=torch.float32)
+    g = torch.tensor([0.0, 0.0, 1e-30], dtype=torch.float32)
+    H = _CompactLBFGS(3, 10, torch.float32, "cpu")
+    H.theta = 1e-30
+    x_cp, _, _ = _cauchy_point(x, g, torch.zeros(3, dtype=torch.float32), None, H)
+    assert torch.isfinite(x_cp).all()
+    for seed in range(40, 50):
+        X = torch.rand(60, 40, generator=torch.Generator().manual_seed(seed),
+                       dtype=torch.float32)
+        nsa_flow_data(X, k=4, w=0.99, max_iter=300)       # must not raise
