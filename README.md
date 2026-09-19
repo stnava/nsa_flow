@@ -75,11 +75,10 @@ so "approximately disjoint factors" is a claim with a number attached.
 
 ## Solver
 
-Spectral projected gradient: Barzilai–Borwein steps with Armijo backtracking on
-the projected step. Every accumulation point is a stationary point of the
-constrained problem, and `result.grad_map` is a computable stationarity
-certificate (`result.stop_reason` says why it stopped — never a silent claim of
-convergence).
+Pure-PyTorch L-BFGS-B by default (see below); every accepted step is certified
+by one shared gradient-mapping norm, `result.grad_map`, and `result.stop_reason`
+/ `result.certificate` say exactly what was and was not established — never a
+silent claim of convergence.
 
 The inner loop forms one Gram product and two `[p,k] x [k,k]` products: `O(p k^2)`,
 with **no SVD, eigendecomposition or QR**. Typical convergence is 15–300
@@ -89,6 +88,76 @@ deterministic iterations. Pass `compile=True` for a 3–4x speedup via
 Empirically `E_w` has a unique optimum for `w < 1` — 24 random restarts agree to
 machine precision on every problem family tested — so there are no restarts,
 schedules or step-size heuristics to tune.
+
+## Evaluation results (v3.0.0, certified solver)
+
+All numbers below were produced by the pure-PyTorch L-BFGS-B default with the
+shared certificate, on bases fitted **inside** every training fold or split.
+Earlier releases fitted the Golub basis on all 72 samples and reported the
+ADNI result from one 80/20 split of an unconverged solve; both are corrected
+here and the differences are stated.
+
+**Golub leukemia, 3 classes** (B-ALL / T-ALL / AML; p=2000, k=3; 5-fold
+stratified CV, balanced accuracy; `experiments/rapid_primary_benchmarks.py`)
+
+| basis | linear | forest | fit time (5 folds) |
+|---|---|---|---|
+| PCA | 0.698 | 0.660 | — |
+| NSA signed, w=0 | 0.698 | 0.660 | 2.9 s |
+| NSA signed, w=0.5 | **0.748** | **0.681** | 13.6 s |
+| NSA signed + consolidate, w=0.5 | 0.735 | 0.639 | 14.1 s |
+
+At w=0 the signed lifting is PCA and now returns it exactly (the previous
+solver reported `defect_D = 0.10` there). The old transductive numbers were
+0.06–0.07 higher across the board; that was leakage.
+
+**ADNI cortical thickness → CDRSB** (n≈300, p=66, k=5; **20 repeated 80/20
+splits**, ΔR² against PCA on the same splits, 95% paired-t interval;
+`experiments/adni_cdrsb_repeated.py`)
+
+| basis (w=0.5) | ΔR² forest [95% CI] | ΔR² linear [95% CI] |
+|---|---|---|
+| NSA signed + consolidate | **+0.123 [0.065, 0.182]** | +0.023 [0.003, 0.043] |
+| NSA signed | +0.094 [0.042, 0.146] | +0.023 [0.008, 0.039] |
+| NSA data | +0.092 [0.016, 0.169] | −0.021 [−0.043, 0.001] |
+| NSA anchored | +0.065 [0.008, 0.122] | +0.002 [−0.002, 0.007] |
+
+Split-to-split SD of R² is 0.24–0.31, so the single-split value in earlier
+releases (+0.18 forest, from a solve at `defect_D = 0.006`) was not evidence
+either way. The effect survives with a converged solver: smaller, and now
+with an interval.
+
+**Public data** (`experiments/benchmark_new_public_data.py`, 5-fold; defect
+column is `defect_D` for every method, comparable to PCA)
+
+| dataset | PCA | NSA signed w=0 | NSA signed w=0.5 | NSA consolidate w=0.5 |
+|---|---|---|---|---|
+| Sonar (AUC) | 0.819 | 0.819 | 0.810 | 0.812 |
+| Prostate (AUC) | 0.896 | 0.896 | 0.890 | 0.884 |
+| Tecator (forest R²) | 0.913 | — | 0.699 | 0.662 |
+
+Signed w=0 equals PCA exactly on both classification sets; the previous solver
+reported `defect_D` of 0.04 (Sonar) and 0.50 (Prostate) at that setting. Fits
+are 10–20× faster than in 2.15 (Prostate: 12.6 s → 1.3 s per fit).
+
+**Speed against PCA** (`top_k_eigenvectors`, exact, on-device; float64 CPU,
+planted structure, w=0.5, default tolerance)
+
+| shape | mode | PCA | NSA-Flow | gradients |
+|---|---|---|---|---|
+| 300×66, k=5 (ADNI-like) | signed | 0.4 ms | 262 ms | 159 |
+| 300×66, k=5 | data | 1.0 ms | 268 ms | 195 |
+| 57×2000, k=3 (Golub-like) | signed | ~2 ms | > 2 s | — |
+
+NSA-Flow is an iterative constrained method; PCA is one factorisation. On the
+paper's imaging shape a fit is a quarter of a second, ~1.5 ms per gradient, of
+which the objective itself is ~5%: the rest is L-BFGS-B's active-set
+bookkeeping (~2 ms per iteration of small-tensor dispatch), which is the price
+of a solver that identifies the whole active set each step and never lands in
+a worse basin than SciPy's Fortran. It is **not** within an order of magnitude
+of PCA on small problems, and this README does not claim it is. On MPS the
+same code runs with zero host↔device copies but at ~3 ms per gradient from
+per-kernel latency. Fusing the objective is the remaining lever.
 
 ## Torch layers
 
@@ -158,7 +227,9 @@ pipe.fit(X_train, y_train)
 
 ### Optimizers & Performance
 
-All solvers default to `optimizer="torch_lbfgs"`, a 100% pure PyTorch native quasi-Newton optimizer using quadratic reparameterization ($V = Z^2$) and exact analytical chain rule gradients ($\nabla_Z E = 2 Z \odot \nabla_V E$). It achieves **up to 23.2× speedup** over spectral projected gradient (SPG) without boundary stalling or host-device transfers. SPG (`optimizer="spg"`) and SciPy L-BFGS-B (`optimizer="lbfgs"`) remain available.
+All solvers default to `optimizer="lbfgsb"`: L-BFGS-B (Byrd, Lu, Nocedal & Zhu 1995) implemented in pure PyTorch — generalized Cauchy point plus subspace minimisation over the compact limited-memory representation — so it runs unmodified on CPU, CUDA and MPS in float32 or float64 with **no host↔device transfers** (the top-*k* eigenvector initialisation is computed on-device too; see `nsa_flow/linalg.py`). It was chosen by measurement (`experiments/optimizer_study.py`): it matches SciPy's Fortran L-BFGS-B energy to twelve figures on every problem tried, finds a strictly lower minimum on the hardest, and is the only pure-torch method that certified convergence on every configuration. `fista`, `spg` and `pqn` remain available; `torch_lbfgs` is deprecated (it never certified convergence and froze the support at its initialisation).
+
+Every result carries the same diagnostics under fixed definitions — `grad_map` is one scale-invariant certificate for every optimiser, `defect_D`/`defect_Cg`/`defect_C` are all evaluated on the returned basis, and `converged` is set only when a certificate is earned (`result.certificate` is `"stationary"` or `"numerical_floor"`). `max_iter` caps gradient evaluations. The default `tol` is 1e-6 (float64) / 1e-4 (float32), which returns the same support as 1e-9 for 30–50% less work.
 
 `nsa_flow_signed` writes each component as a contrast of two non-negative
 parts, which restores a signed basis's representational capacity: at `w = 0` it

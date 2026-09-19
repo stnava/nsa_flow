@@ -97,19 +97,19 @@ def evaluate_tecator(k=5, n_splits=5, seed=42):
                 
             elif method == "nsa_nonneg_w0":
                 # NSA-Flow nonneg on raw absorbance, w=0.0
-                res = nsa_flow(X_tr_raw, k=k, w=0.0, nonneg=True, max_iter=200)
+                res = nsa_flow(X_tr_raw, k=k, w=0.0, mode="data", max_iter=200)
                 V = res.V.cpu().numpy()
                 Z_tr = X_tr_raw @ V
                 Z_te = X_te_raw @ V
-                defect_val = float(res.defect)
+                defect_val = float(res["defect_D"])
                 
             elif method == "nsa_nonneg_w05":
                 # NSA-Flow nonneg on raw absorbance, w=0.5
-                res = nsa_flow(X_tr_raw, k=k, w=0.5, nonneg=True, max_iter=200)
+                res = nsa_flow(X_tr_raw, k=k, w=0.5, mode="data", max_iter=200)
                 V = res.V.cpu().numpy()
                 Z_tr = X_tr_raw @ V
                 Z_te = X_te_raw @ V
-                defect_val = float(res.defect)
+                defect_val = float(res["defect_D"])
                 
             elif method == "nsa_signed_w05":
                 # NSA-Flow signed on standardized spectra, w=0.5
@@ -117,7 +117,7 @@ def evaluate_tecator(k=5, n_splits=5, seed=42):
                 V = res.V.cpu().numpy()
                 Z_tr = X_tr_s @ V
                 Z_te = X_te_s @ V
-                defect_val = float(res.defect)
+                defect_val = float(res["defect_D"])
                 
             elif method == "nsa_consol_w05":
                 # NSA-Flow consolidated signed, w=0.5
@@ -125,7 +125,7 @@ def evaluate_tecator(k=5, n_splits=5, seed=42):
                 V = res.V.cpu().numpy()
                 Z_tr = X_tr_s @ V
                 Z_te = X_te_s @ V
-                defect_val = float(res.defect)
+                defect_val = float(res["defect_D"])
                 
             elapsed = time.time() - t0
             
@@ -225,32 +225,32 @@ def evaluate_sonar(k=6, n_splits=5, seed=42):
                 defect_val = float(stiefel_defect_normalised(V_t))
                 
             elif method == "nsa_nonneg_w05":
-                res = nsa_flow(X_tr_raw, k=k, w=0.5, nonneg=True, max_iter=150)
+                res = nsa_flow(X_tr_raw, k=k, w=0.5, mode="data", max_iter=150)
                 V = res.V.cpu().numpy()
                 Z_tr = X_tr_raw @ V
                 Z_te = X_te_raw @ V
-                defect_val = float(res.defect)
+                defect_val = float(res["defect_D"])
                 
             elif method == "nsa_signed_w0":
                 res = nsa_flow(X_tr_s, k=k, w=0.0, signed=True, max_iter=100)
                 V = res.V.cpu().numpy()
                 Z_tr = X_tr_s @ V
                 Z_te = X_te_s @ V
-                defect_val = float(res.defect)
+                defect_val = float(res["defect_D"])
                 
             elif method == "nsa_signed_w05":
                 res = nsa_flow(X_tr_s, k=k, w=0.5, signed=True, max_iter=100)
                 V = res.V.cpu().numpy()
                 Z_tr = X_tr_s @ V
                 Z_te = X_te_s @ V
-                defect_val = float(res.defect)
+                defect_val = float(res["defect_D"])
                 
             elif method == "nsa_consol_w05":
                 res = nsa_flow(X_tr_s, k=k, w=0.5, signed=True, consolidate=True, max_iter=100)
                 V = res.V.cpu().numpy()
                 Z_tr = X_tr_s @ V
                 Z_te = X_te_s @ V
-                defect_val = float(res.defect)
+                defect_val = float(res["defect_D"])
                 
             elapsed = time.time() - t0
             
@@ -349,7 +349,7 @@ def evaluate_prostate(k=6, n_splits=5, top_genes=2000, seed=42):
                 V = res.V.cpu().numpy()
                 Z_tr = X_tr_s @ V
                 Z_te = X_te_s @ V
-                defect_val = float(res.defect)
+                defect_val = float(res["defect_D"])
                 sparsity_val = float(np.mean(V == 0.0))
                 
             elif method == "nsa_signed_w05":
@@ -357,7 +357,7 @@ def evaluate_prostate(k=6, n_splits=5, top_genes=2000, seed=42):
                 V = res.V.cpu().numpy()
                 Z_tr = X_tr_s @ V
                 Z_te = X_te_s @ V
-                defect_val = float(res.defect)
+                defect_val = float(res["defect_D"])
                 sparsity_val = float(np.mean(V == 0.0))
                 
             elif method == "nsa_consol_w05":
@@ -365,7 +365,7 @@ def evaluate_prostate(k=6, n_splits=5, top_genes=2000, seed=42):
                 V = res.V.cpu().numpy()
                 Z_tr = X_tr_s @ V
                 Z_te = X_te_s @ V
-                defect_val = float(res.defect)
+                defect_val = float(res["defect_D"])
                 sparsity_val = float(np.mean(V == 0.0))
                 
             elapsed = time.time() - t0

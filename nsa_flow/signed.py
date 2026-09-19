@@ -197,14 +197,13 @@ import warnings
 
 import torch
 
-from .angle import (angle_defect, grad_angle_defect,
-                    gram_offdiag_defect, grad_gram_offdiag_defect)
-from .energy import (grad_stiefel_defect, stiefel_defect,
-                     stiefel_defect_normalised, effective_rank)
+from .diagnostics import basis_report, default_tol, make_result, orth_terms
+from .linalg import leading_eigenvectors
+from .optim import minimise
 from .project import project_nonneg
 from .reconstruct import (grad_reconstruction_fidelity, reconstruction_fidelity,
                           relax_into_nonneg)
-from .solve import NSAResult, _spg_loop
+from .solve import NSAResult
 
 __all__ = ["nsa_flow_signed", "consolidate_supports", "part_sparsity"]
 
@@ -268,10 +267,10 @@ def _split(W):
     return W[..., :k], W[..., k:]
 
 
-def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Cg", lobe=1.0,
+def nsa_flow_signed(X, k=None, w=0.5, *, init="auto", orth="Cg", lobe=1.0,
                     max_iter=None, tol=None, sigma=1e-4, dtype=None, device=None,
                     verbose=False, keep_trace=False, consolidate=False,
-                    optimizer="spg"):
+                    optimizer=None):
     """Fit ``V = V+ - V-`` with ``[V+|V-] >= 0`` near-disjoint, reconstructing ``X``.
 
     Returns an ``NSAResult`` whose ``Y`` is the signed ``V`` of shape ``[p, k]``;
@@ -312,18 +311,12 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Cg", lobe=1.0,
     if float(c) <= 0:
         raise ValueError("X is all zeros; fidelity is undefined")
 
-    if optimizer in ("torch_lbfgs", "torch-lbfgs"):
-        if tol is None:
-            tol = 1e-5
-        iter_cap = max_iter if max_iter is not None else 150
-    elif optimizer == "lbfgs":
-        if tol is None:
-            tol = 1e-5
-        iter_cap = max_iter if max_iter is not None else 1000
-    else:
-        if tol is None:
-            tol = 1e-9 if Xt.dtype == torch.float64 else 1e-6
-        iter_cap = max_iter if max_iter is not None else 8000
+    if tol is None:
+        tol = default_tol(Xt.dtype)
+    from .solve import DEFAULT_MAX_GRAD_EVALS, DEFAULT_OPTIMIZER
+    optimizer = DEFAULT_OPTIMIZER if optimizer is None else optimizer
+    max_iter = DEFAULT_MAX_GRAD_EVALS if max_iter is None else int(max_iter)
+    iter_cap = max_iter
 
     if isinstance(init, str):
         if k is None:
@@ -347,8 +340,7 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Cg", lobe=1.0,
                     "Use the default init='auto' or 'adaptive', which seeds both lobes "
                     "through an adaptive homotopy path.",
                     DeprecationWarning, stacklevel=2)
-            evals, evecs = torch.linalg.eigh(S)
-            E = evecs[:, -k:].flip(-1)
+            E = leading_eigenvectors(k, S=S)
             W = torch.cat([E.clamp_min(0.0), (-E).clamp_min(0.0)], dim=-1).clone()
         elif init_strat == "adaptive":
             V0 = relax_into_nonneg(S, c, k, float(w), fast=True, trS=c)
@@ -369,21 +361,7 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Cg", lobe=1.0,
     if W.shape != (p, 2 * k):
         raise ValueError(f"init shape {tuple(W.shape)} != [p, 2k] = {(p, 2 * k)}")
 
-    inv_k = 1.0 / (1.0 - 1.0 / (2 * k))
-    if orth == "Cg":            # default: smooth; no zero-column discontinuity
-        o_val, o_grad = gram_offdiag_defect, grad_gram_offdiag_defect
-    elif orth == "Coff":        # pairwise angles only; traps at a zero lobe
-        o_val = lambda Wv: angle_defect(Wv, diagonal=False)
-        o_grad = lambda Wv: grad_angle_defect(Wv, diagonal=False)
-    elif orth == "C":           # angles plus a dead-lobe penalty
-        o_val, o_grad = angle_defect, grad_angle_defect
-    elif orth == "D":           # orthoNORMality; retained only for the ablation
-        o_val = stiefel_defect_normalised
-        def o_grad(Wv):
-            return inv_k * grad_stiefel_defect(Wv)
-    else:
-        raise ValueError(
-            f"orth must be 'Cg', 'Coff', 'C' or 'D'; got {orth!r}")
+    o_val, o_grad = orth_terms(orth)
 
     def parts_energy(Wv):
         Vp, Vm = _split(Wv)
@@ -407,103 +385,54 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="relax", orth="Cg", lobe=1.0,
             g = g + (w * lobe / c) * torch.cat([Vm, Vp], dim=-1)
         return g
 
-    # ---- main SPG loop ---------------------------------------------------
-    # _spg_loop's grad_fn must return (E, gradient).  Cache F, D so the trace
-    # can include them without a second energy evaluation.
-    _last_parts = [None, None]   # [F, D]
-
     def _energy(Wv):
         return parts_energy(Wv)[0]
 
     def _grad_and_energy(Wv):
-        E, F, D = parts_energy(Wv)
-        _last_parts[0] = float(F.detach()) if hasattr(F, "detach") else float(F)
-        _last_parts[1] = float(D.detach()) if hasattr(D, "detach") else float(D)
-        return E, parts_grad(Wv)
+        return parts_energy(Wv)[0], parts_grad(Wv)
 
     trace = [] if keep_trace else None
     t0 = time.time()
-
-    if optimizer in ("torch_lbfgs", "torch-lbfgs"):
-        from .solve import _torch_lbfgs_loop
-        W, E, it, stop, gmap = _torch_lbfgs_loop(
-            W, _energy, _grad_and_energy,
-            max_iter=iter_cap, tol=tol, verbose=verbose,
-            trace=trace, caller="nsa_flow_signed", w=w,
-        )
-    elif optimizer == "lbfgs":
-        from .solve import _lbfgs_b_loop
-        bounds = [(0.0, None)] * W.numel()
-        W, E, it, stop, gmap = _lbfgs_b_loop(
-            W, bounds, _energy, _grad_and_energy,
-            max_iter=iter_cap, tol=tol, verbose=verbose,
-            trace=trace, caller="nsa_flow_signed", w=w,
-        )
-    else:
-        W, E, it, stop, gmap = _spg_loop(
-            W, project_nonneg, _energy, _grad_and_energy,
-            iter_cap, tol, sigma, verbose=verbose,
-            trace=trace, caller="nsa_flow_signed", w=w,
-        )
-
-    # For the result we need up-to-date F and D.
-    E_final, F_final, D_final = parts_energy(W)
-    E, F, D = float(E_final), float(F_final), float(D_final)
+    rep = minimise(W, _energy, _grad_and_energy, project_nonneg,
+                   optimizer=optimizer, max_iter=iter_cap, tol=tol, sigma=sigma,
+                   verbose=verbose, trace=trace, caller="nsa_flow_signed", w=w)
+    W = rep.Y
+    n_grad, n_energy = rep.n_grad, rep.n_energy
+    iters, stop, gmap = rep.iters, rep.stop, rep.grad_map
 
     if consolidate:
         # Round to exactly disjoint supports, then keep optimising with the
-        # support fixed.
-        mask = (consolidate_supports(W) != 0)
+        # support held fixed.  Same optimiser, same certificate, same budget.
+        mask = (consolidate_supports(W) != 0).to(W.dtype)
+        rep2 = minimise(W, _energy, _grad_and_energy, project_nonneg,
+                        optimizer=optimizer, max_iter=iter_cap, tol=tol,
+                        sigma=sigma, mask=mask, verbose=False, trace=None,
+                        caller="nsa_flow_signed (consolidate)", w=w)
+        W = rep2.Y
+        n_grad += rep2.n_grad
+        n_energy += rep2.n_energy
+        iters, stop, gmap = rep2.iters, rep2.stop, rep2.grad_map
 
-        def _c_energy(Wv):
-            return parts_energy(Wv)[0]
-
-        def _c_grad_and_energy(Wv):
-            Ec, Fc, Dc = parts_energy(Wv)
-            _last_parts[0] = float(Fc.detach()) if hasattr(Fc, "detach") else float(Fc)
-            _last_parts[1] = float(Dc.detach()) if hasattr(Dc, "detach") else float(Dc)
-            return Ec, parts_grad(Wv)
-
-        if optimizer in ("torch_lbfgs", "torch-lbfgs"):
-            from .solve import _torch_lbfgs_loop
-            W, _E2, _it2, stop, gmap = _torch_lbfgs_loop(
-                W, _c_energy, _c_grad_and_energy, mask=mask,
-                max_iter=iter_cap, tol=tol, verbose=False,
-                trace=None, caller="nsa_flow_signed (consolidate)",
-            )
-        elif optimizer == "lbfgs":
-            from .solve import _lbfgs_b_loop
-            mask_flat = mask.cpu().numpy().flatten()
-            c_bounds = [(0.0, None) if m else (0.0, 0.0) for m in mask_flat]
-            W, _E2, _it2, stop, gmap = _lbfgs_b_loop(
-                W, c_bounds, _c_energy, _c_grad_and_energy,
-                max_iter=iter_cap, tol=tol, verbose=False,
-                trace=None, caller="nsa_flow_signed (consolidate)",
-            )
-        else:
-            proj_masked = lambda A: A.clamp_min(0.0) * mask
-            W, _E2, _it2, stop, gmap = _spg_loop(
-                W, proj_masked, _c_energy, _c_grad_and_energy,
-                iter_cap, tol, sigma, verbose=False,
-                trace=None, caller="nsa_flow_signed (consolidate)",
-            )
-        E_final, F_final, D_final = parts_energy(W)
-        E, F, D = float(E_final), float(F_final), float(D_final)
-
+    E_final, F_final, D_final = parts_energy(W)
     Vp, Vm = _split(W)
     V = Vp - Vm
-    r = NSAResult(
-        Y=V, target=None, w=float(w), energy=E, fidelity=F,
-        defect=D, raw_defect=float(stiefel_defect(W)),
-        effective_rank=float(effective_rank(W)),
-        scale_ratio=float("nan"), iters=it,
-        converged=stop in ("grad_map", "plateau") or (
-            stop == "line_search" and math.isfinite(gmap)),
-        stop_reason=stop, grad_map=float(gmap), seconds=time.time() - t0,
-        w_schedule=[float(w)], trace=trace, nonneg=True, align=False,
+
+    r = make_result(
+        NSAResult, Y=V, w=w, orth=orth, mode="signed", optimizer=rep["optimizer"],
+        energy=float(E_final), fidelity=float(F_final), defect=float(D_final),
+        iters=iters, stop=stop, grad_map=gmap, tol=tol,
+        seconds=time.time() - t0,
+        energy_start=rep["energy_start"],
+        grad_map_start=rep["grad_map_start"],
+        target=None, nonneg=True, align=False, n_grad=n_grad, n_energy=n_energy,
+        scale_ratio=float("nan"), w_schedule=[float(w)], trace=trace,
     )
+    # The parts W are the non-negative object the orthogonality term acts on;
+    # report their diagnostics separately from the signed basis V's, rather than
+    # silently mixing the two as the "defect" field once did.
     r["parts"] = W
-    r["lobe_overlap"] = float((Vp * Vm).sum())        # -> 0 as D(W) -> 0
+    r["parts_report"] = basis_report(W)
+    r["lobe_overlap"] = float((Vp * Vm).sum() / c)   # normalised by ||X||_F^2
     r["consolidated"] = bool(consolidate)
     r.update({f"parts_{key}": val for key, val in part_sparsity(W).items()
               if key != "nnz_per_part"})

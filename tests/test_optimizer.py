@@ -26,7 +26,8 @@ import torch
 from nsa_flow import nsa_flow, nsa_flow_data, nsa_flow_signed
 
 F64 = torch.float64
-TOL = 1e-9          # the float64 default the solvers pick
+from nsa_flow.diagnostics import default_tol
+TOL = default_tol(F64)     # the float64 default the solvers pick
 
 
 # --------------------------------------------------------------- data regimes

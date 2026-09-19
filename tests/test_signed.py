@@ -288,14 +288,21 @@ def test_split_and_auto_init_on_centered_data_no_warning(data):
     assert math.isfinite(r_auto.grad_map)
 
 
-def test_adaptive_init_converges_fast(nonneg_data):
-    """init='adaptive' prevents stalling on uncentred positive data in < 1 second."""
-    import time
-    t0 = time.time()
+def test_adaptive_init_does_not_stall(nonneg_data):
+    """init='adaptive' must not strand the solver on uncentred positive data.
+
+    This used to assert a wall-clock budget of one second, which it met only
+    because the default budget was 150 gradient evaluations -- it was timing a
+    truncated solve, not a fast one.  The property that matters is that the
+    initialiser does not put the iterate on the zero-lobe discontinuity, so the
+    assertion is on progress and on the certificate, not on the clock.  Speed is
+    measured where speed is the subject: ``experiments/optimizer_study.py`` and
+    ``experiments/speed_vs_pca.py``.
+    """
     r = nsa_flow_signed(nonneg_data, k=4, w=0.5, init="adaptive")
-    elapsed = time.time() - t0
     assert r.iters > 5
     assert math.isfinite(r.grad_map)
-    assert elapsed < 1.0, f"Adaptive init should finish in < 1s; took {elapsed:.2f}s"
+    assert r["energy_reduction"] > 0.0, "adaptive init returned its own starting point"
+    assert r.grad_map < r["grad_map_start"]
 
 

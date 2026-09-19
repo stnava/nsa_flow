@@ -37,24 +37,61 @@ No SVD, eigendecomposition or QR appears in the loop -- except under ``align``
 import time
 import warnings
 
-import math
-import warnings
-
 import torch
 
-from .angle import (angle_defect, grad_angle_defect,
-                     gram_offdiag_defect, grad_gram_offdiag_defect)
-from .energy import (energy, stiefel_defect, stiefel_defect_normalised,
-                     grad_stiefel_defect, effective_rank, value_and_grad,
-                     aligned_target)
+from .diagnostics import default_tol, make_result, orth_terms
+from .energy import (energy, stiefel_defect_normalised, grad_stiefel_defect,
+                     value_and_grad, aligned_target)
+from .optim import minimise, optimizer_names
 from .project import project_nonneg
 from .subspace import (SubspaceAnchor, negative_mass, subspace_fidelity,
                        grad_subspace_fidelity)
 
-__all__ = ["nsa_flow", "NSAResult", "_spg_loop", "_lbfgs_b_loop", "_torch_lbfgs_loop", "_nsa_flow_anchored"]
+__all__ = ["nsa_flow", "NSAResult", "_nsa_flow_anchored"]
 
-_T_MIN, _T_MAX = 1e-12, 1e12
 _COMPILED = None
+
+#: The optimiser every entry point uses unless told otherwise.
+#:
+#: Chosen by ``experiments/optimizer_study.py`` over three modes x two problem
+#: families x three values of ``w`` x two seeds, scored on median wall time,
+#: median gradient evaluations, energy above the best found on that instance,
+#: and how often the shared certificate was actually earned:
+#:
+#:     mode      optimizer   med_s  med_n_grad    med_dE    max_dE  certified
+#:     anchored  fista       0.022          82  1.38e-16  1.02e-02       100%
+#:     anchored  lbfgsb      0.012          65  4.66e-17  1.55e-15       100%
+#:     anchored  spg         0.036         114  7.32e-19  1.02e-02       100%
+#:     anchored  pqn         0.074         115  0.00e+00  1.02e-02       100%
+#:     data      fista       0.057         308  1.45e-15  7.43e-14       100%
+#:     data      lbfgsb      0.022         148  6.47e-16  1.43e-14       100%
+#:     data      spg         0.112         306  6.27e-16  2.63e-04        83%
+#:     data      pqn         0.184         269  0.00e+00  1.14e-05       100%
+#:     signed    fista       0.093         370  2.71e-16  9.03e-12       100%
+#:     signed    lbfgsb      0.053         252  2.55e-16  1.74e-04       100%
+#:     signed    spg         0.233         718  3.30e-16  1.74e-04       100%
+#:     signed    pqn         0.191         328  7.16e-18  1.74e-04       100%
+#:
+#: ``lbfgsb`` is the fastest and the most reliable at avoiding a bad basin, but
+#: SciPy is not a dependency of this package (``pyproject`` requires only
+#: ``torch``) and it is host-side float64 only, so it cannot be the default for
+#: a library that has to run on a GPU.  ``fista`` is pure PyTorch, runs
+#: unmodified on CPU, CUDA and MPS in either precision, earned the certificate
+#: on every configuration tried, and costs 2-4x ``lbfgsb`` -- against 2-4x again
+#: for ``spg`` and ``pqn``.  Its one weakness is shared with ``spg`` and
+#: ``pqn``: on one anchored instance all three settled 1.0e-02 above the basin
+#: ``lbfgsb`` found.  If you have SciPy, are on CPU in float64, and care about
+#: that last margin, pass ``optimizer="lbfgsb"``.
+#:
+#: ``torch_lbfgs`` remains available and is not recommended: see
+#: :mod:`nsa_flow.optim`.
+DEFAULT_OPTIMIZER = "lbfgsb"
+
+#: Default budget, in GRADIENT EVALUATIONS (see :mod:`nsa_flow.optim`).  Large
+#: because the stopping rule is the certificate, not the cap: a solve that needs
+#: 200 evaluations takes 200, and one that needs 12000 is not silently truncated
+#: at a point whose support is still moving.
+DEFAULT_MAX_GRAD_EVALS = 20000
 
 
 def _fused(use_compile):
@@ -90,6 +127,25 @@ class NSAResult(dict):
                 f"stop={self['stop_reason']}, |Gmap|={self['grad_map']:.2e})")
 
 
+def _custom_orth_vg(orth):
+    """value_and_grad with a registry orthogonality term replacing Dtilde."""
+    orth_val, orth_grad = orth_terms(orth)
+
+    def vg(Y, X0, w, denom, inv_k_, eye_k, align):
+        k = Y.shape[-1]
+        d_ = float(denom)
+        R = Y - (aligned_target(X0, Y) if align else X0)
+        F = R.pow(2).sum() / d_
+        Dn = (orth_val(Y) if k > 1
+              else torch.zeros((), dtype=Y.dtype, device=Y.device))
+        E = (1.0 - w) * F + w * Dn
+        g = (1.0 - w) * (2.0 * R / d_)
+        if k > 1 and w != 0.0:
+            g = g + w * orth_grad(Y)
+        return E, F, Dn, g
+    return vg
+
+
 def _subspace_vg(anchor, inv_k):
     """value_and_grad with the sign-blind fidelity in place of the anchored one."""
     def vg(Y, X0, w, denom, inv_k_, eye_k, align):
@@ -105,373 +161,10 @@ def _subspace_vg(anchor, inv_k):
     return vg
 
 
-def _orth_terms_anchor(orth):
-    """Return (orth_val, orth_grad, inv_k_fn) for the chosen orthogonality term.
-
-    ``inv_k_fn(k)`` returns the normalisation constant such that the defect
-    equals 1.0 at full collinearity -- the same convention as Dtilde.
-    """
-    if orth == "D":
-        # Default: orthoNORMality, same normalisation as _solve_fixed_w
-        return (stiefel_defect_normalised,
-                lambda Y: (1.0 / (1.0 - 1.0 / max(Y.shape[-1], 2)))
-                           * grad_stiefel_defect(Y),
-                lambda k: 1.0 / (1.0 - 1.0 / k) if k > 1 else 0.0)
-    if orth == "Cg":
-        return (gram_offdiag_defect, grad_gram_offdiag_defect, lambda k: None)
-    if orth == "C":
-        return (angle_defect, grad_angle_defect, lambda k: None)
-    raise ValueError(f"orth must be 'D', 'Cg' or 'C' for nsa_flow; got {orth!r}")
-
-
-def _custom_orth_vg(orth_val, orth_grad):
-    """value_and_grad with a custom orthogonality term replacing Dtilde."""
-    def vg(Y, X0, w, denom, inv_k_, eye_k, align):
-        k = Y.shape[-1]
-        d_ = float(denom)
-        R = Y - (aligned_target(X0, Y) if align else X0)
-        F = R.pow(2).sum() / d_
-        Dn = orth_val(Y) if k > 1 else torch.zeros([], dtype=Y.dtype, device=Y.device)
-        E = (1.0 - w) * F + w * Dn
-        g = (1.0 - w) * (2.0 * R / d_)
-        if k > 1 and w != 0.0:
-            g = g + w * orth_grad(Y)
-        return E, F, Dn, g
-    return vg
-
-
-def _solve_fixed_w(Y, X0, w, denom, nonneg, max_iter, tol, sigma, verbose, trace,
-                   vg=value_and_grad, align=False):
-    """Monotone spectral projected gradient for a single value of ``w``."""
-    proj = project_nonneg if nonneg else (lambda A: A)
-    k = Y.shape[-1]
-    eye_k = torch.eye(k, dtype=Y.dtype, device=Y.device)
-    inv_k = 1.0 / (1.0 - 1.0 / k) if k > 1 else 0.0
-
-    Y = proj(Y)
-    E, F, Dn, g = vg(Y, X0, w, denom, inv_k, eye_k, align)
-    E = float(E)
-    t = 1.0 / max(float(g.norm()), 1e-12)          # scale-free first guess
-    Y_prev = g_prev = None
-    it = 0
-    gmap = float("inf")
-    stop = "max_iter"
-
-    for it in range(1, max_iter + 1):
-        if Y_prev is not None:                      # Barzilai-Borwein
-            s_ = Y - Y_prev
-            r_ = g - g_prev
-            sr = float((s_ * r_).sum())
-            t = float((s_ * s_).sum()) / sr if sr > 0 else _T_MAX
-            t = min(max(t, _T_MIN), _T_MAX)
-
-        accepted = False
-        t_first, dn2_first = t, None
-        for _ in range(60):                         # Armijo backtracking
-            Y_new = proj(Y - t * g)
-            d_ = Y_new - Y
-            dn2 = float((d_ * d_).sum())
-            if dn2_first is None:
-                dn2_first = dn2
-            E_new = float(vg(Y_new, X0, w, denom, inv_k, eye_k, align)[0])
-            if E_new <= E - sigma * dn2 / t:
-                accepted = True
-                break
-            t *= 0.5
-        if not accepted:
-            # No feasible descent step exists to within working precision.  That
-            # is convergence ONLY IF grad_map says so -- it is also what a
-            # stalled start looks like, so measure the certificate rather than
-            # leaving the sentinel, and warn when it is far from stationary.
-            stop = "line_search"
-            if not math.isfinite(gmap):
-                gmap = (dn2_first ** 0.5) / t_first
-            # A finite but large certificate is not stationarity.  The caller
-            # cannot be expected to inspect grad_map on every call, so say so.
-            if gmap > max(tol, 0.0) * 1e3:
-                warnings.warn(
-                    "nsa_flow: line search stalled after "
-                    f"{it} iteration(s) with |Gmap|={gmap:.2e} against "
-                    f"tol={tol:.1e}; the returned point is not stationary. "
-                    "Inspect stop_reason and grad_map.",
-                    RuntimeWarning, stacklevel=3)
-            break
-
-        gmap = (dn2 ** 0.5) / t                     # ||Y+ - Y|| / t
-        Y_prev, g_prev = Y, g
-        Y = Y_new
-        E, F, Dn, g = vg(Y, X0, w, denom, inv_k, eye_k, align)
-        E = float(E)
-
-        if trace is not None:
-            trace.append(dict(iter=len(trace) + 1, w=float(w), energy=E,
-                              fidelity=float(F), defect=float(Dn),
-                              grad_map=gmap, step=t))
-        if verbose and (it % max(1, max_iter // 10) == 0 or it == 1):
-            print(f"    [w={w:.3f} it={it:5d}] E={E:.8e} |Gmap|={gmap:.3e} t={t:.3e}")
-        if gmap <= tol:
-            stop = "grad_map"
-            break
-
-    return Y, E, it, stop, gmap
-
-
-def _spg_loop(Y, proj, energy_fn, grad_fn, max_iter, tol, sigma,
-              verbose=False, trace=None, caller="", w=None,
-              patience=50, rtol=1e-7):
-    """Monotone spectral projected gradient loop (shared by signed and data solvers).
-
-    Parameters
-    ----------
-    Y : Tensor
-        Starting point; projected onto the feasible set before the first step.
-    proj : callable ``Tensor -> Tensor``
-        Feasible-set projection (e.g. ``project_nonneg`` or a masked clamp).
-    energy_fn : callable ``Tensor -> float``
-        Objective value; called only inside the Armijo backtracking.
-    grad_fn : callable ``Tensor -> (E, Tensor)``
-        Returns ``(energy, gradient)`` together so the iterate's energy and
-        gradient are computed in one call after each accepted step.
-    max_iter : int
-        Hard upper bound on iterations.  In practice the loop exits via
-        ``grad_map``, ``plateau``, or ``line_search`` long before this limit.
-    tol : float
-        Stop when the projected-gradient mapping norm ``|Y+ - Y|/t`` falls
-        below this.  The tight stationarity certificate.
-    sigma : float
-        Armijo sufficient-decrease constant.
-    patience : int
-        Plateau window length.  If the energy has not changed by more than
-        ``rtol`` (relative) over the last ``patience`` accepted steps, stop
-        with ``stop_reason="plateau"``.  Default 30.
-    rtol : float
-        Relative energy tolerance for plateau detection.
-        ``(E_max - E_min) / (1 + |E_min|) < rtol`` triggers the stop.
-        Default 1e-5 (energy converged to ~5 significant figures).
-    verbose : bool
-    trace : list or None
-        Append ``dict(iter, energy, grad_map, step)`` if not None.
-    caller : str
-        Name used in the stall warning (e.g. ``"nsa_flow_signed"``).
-    w : float or None
-        Logged into ``trace`` if provided.
-
-    Returns
-    -------
-    Y : Tensor
-    E : float
-    it : int
-    stop : str   ``"grad_map"`` | ``"plateau"`` | ``"line_search"`` | ``"max_iter"``
-    gmap : float
-    """
-    Y = proj(Y)
-    E, g = grad_fn(Y)
-    E = float(E)
-    t = 1.0 / max(float(g.norm()), 1e-12)
-    Y_prev = g_prev = None
-    gmap, stop, it = float("inf"), "max_iter", 0
-    E_window = []                               # for plateau detection
-
-    for it in range(1, max_iter + 1):
-        if Y_prev is not None:                      # Barzilai-Borwein with ABB
-            s_ = Y - Y_prev
-            r_ = g - g_prev
-            sr = float((s_ * r_).sum())
-            if sr > 0:
-                if it % 2 == 0:
-                    t = float((s_ * s_).sum()) / sr
-                else:
-                    t = sr / max(float((r_ * r_).sum()), 1e-12)
-            else:
-                # Safeguard: when sr <= 0 (non-convex curvature), don't jump to 1e12
-                t = min(max(t, 1e-3), 10.0)
-            t = min(max(t, _T_MIN), _T_MAX)
-
-        accepted = False
-        t_first, dn2_first = t, None
-        for _ in range(30):                         # Armijo backtracking
-            Y_new = proj(Y - t * g)
-            d_ = Y_new - Y
-            dn2 = float((d_ * d_).sum())
-            if dn2_first is None:
-                dn2_first = dn2
-            if float(energy_fn(Y_new)) <= E - sigma * dn2 / t:
-                accepted = True
-                break
-            t *= 0.5
-
-        if not accepted:
-            stop = "line_search"
-            if not math.isfinite(gmap):
-                gmap = (dn2_first ** 0.5) / t_first
-            if gmap > max(tol, 0.0) * 1e3:
-                warnings.warn(
-                    f"{caller}: line search stalled after "
-                    f"{it} iteration(s) with |Gmap|={gmap:.2e} against "
-                    f"tol={tol:.1e}; the returned point is not stationary. "
-                    "Inspect stop_reason and grad_map.",
-                    RuntimeWarning, stacklevel=3)
-            break
-
-        gmap = (dn2 ** 0.5) / t
-        Y_prev, g_prev = Y, g
-        Y = Y_new
-        E, g = grad_fn(Y)
-        E = float(E)
-
-        # ── plateau detection ──────────────────────────────────────────────
-        E_window.append(E)
-        if len(E_window) > patience:
-            E_window.pop(0)
-        if len(E_window) == patience:
-            span = max(E_window) - min(E_window)
-            if span / (1.0 + abs(min(E_window))) < rtol:
-                stop = "plateau"
-                break
-
-        if trace is not None:
-            row = dict(iter=len(trace) + 1, energy=E, grad_map=gmap, step=t)
-            if w is not None:
-                row["w"] = float(w)
-            trace.append(row)
-        if verbose and (it % max(1, max_iter // 10) == 0 or it == 1):
-            w_tag = f" w={w:.3f}" if w is not None else ""
-            print(f"    [{w_tag}it={it:5d}] E={E:.8e} |Gmap|={gmap:.3e} t={t:.3e}")
-        if gmap <= tol:
-            stop = "grad_map"
-            break
-
-    if stop == "max_iter" and math.isfinite(gmap) and gmap > 1e-3:
-        warnings.warn(
-            f"{caller}: reached max_iter={max_iter} with |Gmap|={gmap:.2e}; "
-            "the iterate is not stationary.  Increase max_iter or lower tol, "
-            "or inspect stop_reason and grad_map.",
-            RuntimeWarning, stacklevel=3)
-
-    return Y, E, it, stop, gmap
-
-
-def _lbfgs_b_loop(Y, bounds, energy_fn, grad_fn, max_iter=2000, tol=1e-5,
-                  verbose=False, trace=None, caller="", w=None):
-    """Quasi-Newton L-BFGS-B loop for box-constrained optimization."""
-    from scipy.optimize import minimize
-    import numpy as np
-    shape = Y.shape
-    device = Y.device
-    dtype = Y.dtype
-
-    def f_and_g(y_flat):
-        Y_t = torch.as_tensor(y_flat.reshape(shape), dtype=dtype, device=device)
-        E, g = grad_fn(Y_t)
-        return float(E), g.detach().cpu().numpy().astype(np.float64).flatten()
-
-    y0 = Y.detach().cpu().numpy().astype(np.float64).flatten()
-    res = minimize(
-        f_and_g, y0, method="L-BFGS-B", jac=True, bounds=bounds,
-        options=dict(maxiter=max_iter, ftol=1e-8, gtol=tol if tol is not None else 1e-5)
-    )
-    Y_opt = torch.as_tensor(res.x.reshape(shape), dtype=dtype, device=device)
-    E_opt = float(res.fun)
-    gmap = float(np.max(np.abs(res.jac)))
-    msg = str(res.message).upper()
-    stop = "grad_map" if res.success else ("plateau" if "CONVERGENCE" in msg else "max_iter")
-    if trace is not None:
-        trace.append(dict(iter=res.nit, energy=E_opt, grad_map=gmap, step=0.0))
-    return Y_opt, E_opt, res.nit, stop, gmap
-
-
-def _torch_lbfgs_loop(Y0, energy_fn, grad_fn, max_iter=200, tol=1e-5,
-                      history_size=10, patience=5, rtol=1e-6,
-                      mask=None, verbose=False, trace=None, caller="", w=None):
-    """Pure PyTorch native quasi-Newton L-BFGS loop via quadratic reparameterization Y = Z**2.
-
-    100% PyTorch native (runs on CPU, CUDA, MPS). Enforces non-negativity smoothly
-    without boundary stalling, and uses analytical gradients via the exact chain rule:
-        dE/dZ = (2 * Z * dE/dY).contiguous()
-    """
-    device = Y0.device
-    dtype = Y0.dtype
-    t0 = time.time()
-
-    # Reparameterize: Y = Z**2 >= 0 (or Z**2 * mask if masked)
-    Z_init = torch.sqrt(Y0.clamp_min(1e-8))
-    Z = torch.nn.Parameter(Z_init)
-
-    opt = torch.optim.LBFGS(
-        [Z], lr=1.0, max_iter=20, history_size=history_size,
-        line_search_fn="strong_wolfe", tolerance_grad=tol, tolerance_change=tol
-    )
-
-    stop = "max_iter"
-    gmap = float("inf")
-    E_cur = float("inf")
-    E_window = []
-    outer_steps = max(5, max_iter // 20)
-    total_sub_iters = 0
-
-    prev_E = None
-    for step in range(1, outer_steps + 1):
-        def closure():
-            nonlocal total_sub_iters
-            total_sub_iters += 1
-            opt.zero_grad()
-            if mask is not None:
-                Y_cur = Z.pow(2) * mask
-                E, g = grad_fn(Y_cur)
-                Z.grad = (2.0 * Z * mask * g).contiguous()
-            else:
-                Y_cur = Z.pow(2)
-                E, g = grad_fn(Y_cur)
-                Z.grad = (2.0 * Z * g).contiguous()
-            return torch.as_tensor(E, dtype=dtype, device=device)
-
-        loss = opt.step(closure)
-        E_cur = float(loss.detach())
-
-        with torch.no_grad():
-            if mask is not None:
-                Y_cur = Z.pow(2) * mask
-                _, g_cur = grad_fn(Y_cur)
-                gmap = float((torch.clamp_min(Y_cur - g_cur, 0.0) * mask - Y_cur).norm())
-            else:
-                Y_cur = Z.pow(2)
-                _, g_cur = grad_fn(Y_cur)
-                gmap = float((torch.clamp_min(Y_cur - g_cur, 0.0) - Y_cur).norm())
-
-        if trace is not None:
-            trace.append(dict(iter=total_sub_iters, energy=E_cur, grad_map=gmap, step=1.0))
-
-        if gmap <= tol:
-            stop = "grad_map"
-            break
-
-        if prev_E is not None and abs(E_cur - prev_E) / (1.0 + abs(E_cur)) < rtol:
-            stop = "plateau"
-            break
-        prev_E = E_cur
-
-        E_window.append(E_cur)
-        if len(E_window) > patience:
-            E_window.pop(0)
-        if len(E_window) == patience:
-            span = max(E_window) - min(E_window)
-            if span / (1.0 + abs(min(E_window))) < rtol:
-                stop = "plateau"
-                break
-
-    with torch.no_grad():
-        if mask is not None:
-            Y_opt = Z.pow(2) * mask
-        else:
-            Y_opt = Z.pow(2)
-
-    return Y_opt, E_cur, total_sub_iters, stop, gmap
-
-
-def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, tol=None,
+def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, tol=None,
                       continuation=0, w_start=0.0, sigma=1e-4, dtype=None, device=None,
                       verbose=False, keep_trace=False, compile=False, align=False,
-                      fidelity="auto", neg_mass_tol=0.01, orth="D", optimizer="spg"):
+                      fidelity="auto", neg_mass_tol=0.01, orth="D", optimizer=None):
     """Fit a non-negative, near-orthogonal ``Y`` close to ``target``.
 
     Parameters
@@ -609,7 +302,9 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, 
 
 
     if tol is None:
-        tol = 1e-9 if X0.dtype == torch.float64 else 1e-6
+        tol = default_tol(X0.dtype)
+    optimizer = DEFAULT_OPTIMIZER if optimizer is None else optimizer
+    max_iter = DEFAULT_MAX_GRAD_EVALS if max_iter is None else int(max_iter)
 
     if fidelity not in ("auto", "anchor", "subspace"):
         raise ValueError("fidelity must be 'auto', 'anchor' or 'subspace'; "
@@ -668,34 +363,37 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, 
         inv_k0 = 1.0 / (1.0 - 1.0 / k) if k > 1 else 0.0
         vg = _subspace_vg(anchor, inv_k0)
     else:
-        if orth == "D":
-            vg = _fused(compile)
-        else:
-            ov, og, _ = _orth_terms_anchor(orth)
-            vg = _custom_orth_vg(ov, og)
+        # "D" has a fused kernel that shares one Gram product between the value
+        # and the gradient; everything else goes through the shared registry.
+        vg = _fused(compile) if orth == "D" else _custom_orth_vg(orth)
+
     trace = [] if keep_trace else None
     t0 = time.time()
-    total_iters, stop, gmap = 0, "max_iter", float("inf")
+    proj = project_nonneg if nonneg else None      # None == unconstrained
+    eye_k = torch.eye(k, dtype=X0.dtype, device=X0.device)
+    inv_k = 1.0 / (1.0 - 1.0 / k) if k > 1 else 0.0
+    total_iters = n_grad = n_energy = 0
+    stop, gmap = "max_iter", float("inf")
+
     for wi in ws:
         if verbose:
             print(f"  continuation step w={wi:.4f}")
-        if optimizer in ("torch_lbfgs", "torch-lbfgs") and not align and nonneg:
-            inv_k_val = inv_k0 if fidelity == "subspace" else (1.0 / (1.0 - 1.0 / k) if k > 1 else 0.0)
-            eye_k = torch.eye(k, dtype=Y.dtype, device=Y.device)
-            def _anc_energy(Y_c):
-                return float(vg(Y_c, X0, wi, denom, inv_k_val, eye_k, False)[0])
-            def _anc_grad_and_energy(Y_c):
-                E_v, _, _, g_v = vg(Y_c, X0, wi, denom, inv_k_val, eye_k, False)
-                return float(E_v), g_v
-            iter_cap = max_iter if max_iter is not None else 300
-            Y, E, it, stop, gmap = _torch_lbfgs_loop(
-                Y, _anc_energy, _anc_grad_and_energy, max_iter=iter_cap, tol=tol,
-                verbose=verbose, trace=trace, caller="_nsa_flow_anchored", w=wi
-            )
-        else:
-            Y, E, it, stop, gmap = _solve_fixed_w(Y, X0, wi, denom, nonneg, max_iter,
-                                                  tol, sigma, verbose, trace, vg, align)
-        total_iters += it
+
+        def _anc_energy(Yc, _w=wi):
+            return float(vg(Yc, X0, _w, denom, inv_k, eye_k, align)[0])
+
+        def _anc_grad_and_energy(Yc, _w=wi):
+            E_v, _, _, g_v = vg(Yc, X0, _w, denom, inv_k, eye_k, align)
+            return float(E_v), g_v
+
+        rep = minimise(Y, _anc_energy, _anc_grad_and_energy, proj,
+                       optimizer=optimizer, max_iter=max_iter, tol=tol,
+                       sigma=sigma, verbose=verbose, trace=trace,
+                       caller="nsa_flow (anchored)", w=wi)
+        Y, stop, gmap = rep.Y, rep.stop, rep.grad_map
+        total_iters += rep.iters
+        n_grad += rep.n_grad
+        n_energy += rep.n_energy
 
     if fidelity == "subspace":
         # both terms are degree-0 homogeneous, so the scale is a free gauge;
@@ -703,30 +401,30 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=5000, 
         nY = float(Y.norm())
         if nY > 0:
             Y = Y * (float(X0.norm()) / nY)
-        tot, f, dd = vg(Y, X0, float(w), denom, None, None, False)[:3]
-        tot, f, dd = float(tot), float(f), float(dd)
+        tot, f, dd = vg(Y, X0, float(w), denom, inv_k, eye_k, False)[:3]
     else:
         tot, f, dd = energy(Y, X0, w=float(w), denom=denom, return_parts=True,
                             align=align)
     clamp_ref = X0.clamp_min(0.0)
     clamp_dist = float((Y - clamp_ref).norm() / clamp_ref.norm().clamp_min(1e-300))
-    return NSAResult(
-        Y=Y, target=X0, w=float(w), energy=float(tot), fidelity=float(f),
-        defect=float(dd), raw_defect=float(stiefel_defect(Y)),
-        effective_rank=float(effective_rank(Y)),
-        scale_ratio=float(Y.norm() / X0.norm()), iters=total_iters, align=bool(align),
+
+    return make_result(
+        NSAResult, Y=Y, w=w, orth=orth, mode="anchored",
+        optimizer=rep["optimizer"], energy=float(tot), fidelity=float(f),
+        defect=float(dd), iters=total_iters, stop=stop, grad_map=gmap, tol=tol,
+        seconds=time.time() - t0,
+        energy_start=rep["energy_start"],
+        grad_map_start=rep["grad_map_start"],
+        target=X0, align=bool(align), nonneg=bool(nonneg),
         fidelity_mode=fidelity, fidelity_requested=requested,
         target_negative_mass=neg_mass, clamp_distance=clamp_dist,
-        converged=stop in ("grad_map", "plateau") or (
-            stop == "line_search" and math.isfinite(gmap)),
-        stop_reason=stop, grad_map=float(gmap),
-        seconds=time.time() - t0,
-        w_schedule=ws, trace=trace, nonneg=bool(nonneg),
+        scale_ratio=float(Y.norm() / X0.norm()),
+        n_grad=n_grad, n_energy=n_energy, w_schedule=ws, trace=trace,
     )
 
 
 def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=True,
-             consolidate=False, optimizer="torch_lbfgs", init=None, max_iter=None,
+             consolidate=False, optimizer=None, init=None, max_iter=None,
              tol=None, **kwargs):
     """Unified high-level entry point for NSA-Flow representation learning.
 
@@ -780,40 +478,52 @@ def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=True,
     if X.ndim != 2:
         raise ValueError(f"Input must be 2-D [n, p] or [p, k]; got shape {tuple(X.shape)}")
 
-    if "signed" in kwargs:
-        if kwargs.pop("signed"):
-            mode = "signed"
-    if "nonneg" in kwargs:
-        if kwargs.pop("nonneg"):
-            mode = "data"
+    optimizer = DEFAULT_OPTIMIZER if optimizer is None else optimizer
+
+    # ``signed=``/``nonneg=`` as mode selectors.  ``nonneg`` is also a real
+    # parameter of this function (it selects the feasible set of the anchored
+    # form), so it can never appear in **kwargs -- the branch that used to test
+    # for it there was dead, and ``nsa_flow(signed_X, k=3, nonneg=True)``
+    # silently returned a signed basis.  Handle the parameter itself.
+    if kwargs.pop("signed", False):
+        mode = "signed"
+    if mode == "auto" and k is not None and nonneg is True and float(X.min()) < -1e-12:
+        # A caller who asks for a non-negative basis on signed data means the
+        # data-reconstruction mode; say so rather than silently lifting.
+        warnings.warn(
+            "nsa_flow: nonneg=True was passed with signed data and mode='auto'. "
+            "nonneg selects the feasible set, not the mode, so this would "
+            "otherwise dispatch to the SIGNED lifting and return a basis with "
+            "negative entries. Pass mode='data' for a non-negative basis (shift "
+            "or clamp the data first), or mode='signed' to silence this.",
+            RuntimeWarning, stacklevel=2)
 
     if mode == "auto":
-        if k is not None:
-            min_val = float(X.min())
-            mode = "signed" if min_val < -1e-12 else "data"
-        else:
-            mode = "anchored"
+        mode = ("anchored" if k is None else
+                ("signed" if float(X.min()) < -1e-12 else "data"))
+
+    # One budget rule for every mode and every optimiser.  ``max_iter`` counts
+    # GRADIENT EVALUATIONS (see nsa_flow.optim), which is the only unit in which
+    # an SPG step and an L-BFGS step cost the same thing.
+    iter_cap = DEFAULT_MAX_GRAD_EVALS if max_iter is None else int(max_iter)
 
     if mode in ("data", "nonneg"):
         from .reconstruct import nsa_flow_data
         init_strat = "clamp" if init in (None, "auto") else init
-        iter_cap = max_iter if max_iter is not None else (150 if optimizer in ("torch_lbfgs", "torch-lbfgs") else 2000)
         return nsa_flow_data(X, k=k, w=w, init=init_strat, max_iter=iter_cap,
                              tol=tol, optimizer=optimizer, **kwargs)
 
-    elif mode in ("signed", "contrast"):
+    if mode in ("signed", "contrast"):
         from .signed import nsa_flow_signed
         init_strat = init if init is not None else "auto"
-        iter_cap = max_iter if max_iter is not None else (150 if optimizer in ("torch_lbfgs", "torch-lbfgs") else 8000)
-        tol_val = tol if tol is not None else (1e-5 if optimizer in ("torch_lbfgs", "torch-lbfgs") else None)
         return nsa_flow_signed(X, k=k, w=w, init=init_strat, consolidate=consolidate,
-                               max_iter=iter_cap, tol=tol_val, optimizer=optimizer, **kwargs)
+                               max_iter=iter_cap, tol=tol, optimizer=optimizer,
+                               **kwargs)
 
-    elif mode in ("anchored", "target"):
-        iter_cap = max_iter if max_iter is not None else 20000
-        anc_opt = optimizer if optimizer != "torch_lbfgs" else "spg"
+    if mode in ("anchored", "target"):
         return _nsa_flow_anchored(X, w=w, nonneg=nonneg, init=init,
-                                  max_iter=iter_cap, tol=tol, optimizer=anc_opt, **kwargs)
+                                  max_iter=iter_cap, tol=tol, optimizer=optimizer,
+                                  **kwargs)
 
-    else:
-        raise ValueError(f"Unknown mode {mode!r}; choose 'auto', 'data', 'signed', or 'anchored'")
+    raise ValueError(
+        f"Unknown mode {mode!r}; choose 'auto', 'data', 'signed' or 'anchored'")

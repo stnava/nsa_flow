@@ -59,7 +59,7 @@ def sweep_tecator(w_list=[0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95], k=5, n_splits=5
 
                 t0 = time.time()
                 if mode_type == "nonneg":
-                    res = nsa_flow(X_tr_raw, k=k, w=w, nonneg=True, max_iter=200)
+                    res = nsa_flow(X_tr_raw, k=k, w=w, mode="data", max_iter=200)
                     V = res.V.cpu().numpy()
                     Z_tr = X_tr_raw @ V
                     Z_te = X_te_raw @ V
@@ -244,7 +244,7 @@ def sweep_optimizers(k=5, seed=42):
     for opt in ["torch_lbfgs", "spg"]:
         for w in [0.1, 0.5, 0.9]:
             t0 = time.time()
-            res = nsa_flow(X_raw, k=k, w=w, nonneg=True, optimizer=opt, max_iter=1000)
+            res = nsa_flow(X_raw, k=k, w=w, mode="data", optimizer=opt, max_iter=1000)
             elapsed = time.time() - t0
             rec = {
                 "optimizer": opt,

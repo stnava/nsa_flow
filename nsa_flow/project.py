@@ -10,6 +10,8 @@ divides by ``h_i + h_j > 0`` instead, and so never degenerates.
 """
 import torch
 
+from .linalg import safe_eigh
+
 __all__ = ["project_nonneg", "project_scaled_stiefel", "polar_factor"]
 
 
@@ -39,7 +41,7 @@ class _PolarFactor(torch.autograd.Function):
     @staticmethod
     def forward(ctx, Y, eps):
         S = Y.transpose(-2, -1) @ Y
-        lam, Q = torch.linalg.eigh(S)
+        lam, Q = safe_eigh(S)
         lam = lam.clamp_min(eps)
         h = lam.sqrt()
         inv_h = h.reciprocal()

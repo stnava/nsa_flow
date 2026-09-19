@@ -34,16 +34,13 @@ Honest caveat: ``||X - X V V'||_F^2`` is quartic in ``V`` and not convex, unlike
 anchored ``||V - X0||_F^2``, so SPG converges to a stationary point rather than to
 a global minimum, and the relaxation path matters (see ``relax_into_nonneg``).
 """
-import time
-
-import math
-import warnings
 import torch
 
-from .angle import angle_defect, grad_angle_defect
-from .energy import stiefel_defect, stiefel_defect_normalised, effective_rank
+from .diagnostics import default_tol, make_result, orth_terms
+from .linalg import leading_eigenvectors
+from .optim import minimise
 from .project import project_nonneg
-from .solve import NSAResult, _spg_loop
+from .solve import NSAResult
 
 __all__ = ["reconstruction_fidelity", "grad_reconstruction_fidelity", "nsa_flow_data",
            "relax_into_nonneg", "GramOperator"]
@@ -97,17 +94,7 @@ class GramOperator:
         Both routes produce the same result up to a global column permutation
         and sign convention.  We use: first non-negligible entry positive.
         """
-        if self.X is not None:
-            _, _, Vh = torch.linalg.svd(self.X, full_matrices=False)
-            E = Vh[:k].transpose(-2, -1).clone()
-        else:
-            _, evecs = torch.linalg.eigh(self.S)
-            E = evecs[..., -k:].flip(-1).clone()
-        # Canonical sign: make the entry with largest absolute value positive.
-        signs = E.abs().argmax(dim=0)                          # [k]
-        flip = E[signs, torch.arange(k, device=E.device)].sign()
-        flip = flip.where(flip != 0, torch.ones_like(flip))   # handle exact zero
-        return E * flip.unsqueeze(0)
+        return leading_eigenvectors(k, S=self.S, X=self.X)
 
 
 def _as_ops(S_or_ops):
@@ -126,6 +113,26 @@ def _grad_fid(V, ops, c):
     SV, A = ops.both(V)
     B = V.transpose(-2, -1) @ V
     return (2.0 / c) * (-2.0 * SV + SV @ B + V @ A)
+
+
+def _fid_and_grad(V, ops, c, trS=None):
+    r"""``(F, grad F)`` from **one** pass over the data.
+
+    ``_fid`` needs ``A = V'SV`` and ``_grad_fid`` needs ``(SV, A)``; called
+    separately they each form ``X V``, so every gradient evaluation multiplied by
+    the data matrix twice.  Both quantities come from the single pair
+    ``(SV, A) = ops.both(V)``, which is also fewer kernel launches -- and launch
+    count, not arithmetic, is what this loop is bound by: one gradient on a
+    ``500 x 200`` problem costs ~2 MFLOP and was taking 128 us on CPU and
+    1.3 ms on MPS.
+    """
+    SV, A = ops.both(V)
+    B = V.transpose(-2, -1) @ V
+    t = ops.trS if trS is None else trS
+    F = (t - 2.0 * A.diagonal(dim1=-2, dim2=-1).sum(-1)
+         + (A * B.transpose(-2, -1)).sum((-2, -1))) / c
+    G = (2.0 / c) * (-2.0 * SV + SV @ B + V @ A)
+    return F, G, B
 
 
 def reconstruction_fidelity(V, S, c, trS=None):
@@ -245,24 +252,9 @@ def relax_into_nonneg(S, c, k, w, mus=None, max_iter=600, tol=1e-10, sigma=1e-4,
     return V
 
 
-def _orth_terms(orth, k):
-    """Return (value, grad) for the chosen orthogonality functional."""
-    if orth == "D":                      # orthoNORMality: ||G - I/k||^2, scaled
-        from .energy import grad_stiefel_defect
-        inv = 1.0 / (1.0 - 1.0 / k) if k > 1 else 0.0
-        return (lambda V: stiefel_defect_normalised(V),
-                lambda V: inv * grad_stiefel_defect(V))
-    if orth == "C":                      # orthogonality only: mean cos^2
-        return angle_defect, grad_angle_defect
-    if orth == "Cg":                     # smooth orthogonality; see nsa_flow.angle
-        from .angle import gram_offdiag_defect, grad_gram_offdiag_defect
-        return gram_offdiag_defect, grad_gram_offdiag_defect
-    raise ValueError(f"orth must be 'D', 'C' or 'Cg'; got {orth!r}")
-
-
-def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="C", max_iter=2000,
+def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="D", max_iter=None,
                   tol=None, sigma=1e-4, dtype=None, device=None, verbose=False,
-                  keep_trace=False, matrix_free=None, optimizer="spg"):
+                  keep_trace=False, matrix_free=None, optimizer=None):
     """Fit a non-negative, near-orthonormal basis ``V`` reconstructing ``X``.
 
     Parameters
@@ -336,7 +328,10 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="C", max_iter=2000,
         raise ValueError("X is all zeros; fidelity is undefined")
     trS = ops.trS
     if tol is None:
-        tol = 1e-9 if Xt.dtype == torch.float64 else 1e-6
+        tol = default_tol(Xt.dtype)
+    from .solve import DEFAULT_MAX_GRAD_EVALS, DEFAULT_OPTIMIZER
+    optimizer = DEFAULT_OPTIMIZER if optimizer is None else optimizer
+    max_iter = DEFAULT_MAX_GRAD_EVALS if max_iter is None else int(max_iter)
 
     if isinstance(init, str):
         if k is None:
@@ -378,11 +373,11 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="C", max_iter=2000,
     if V.shape != (p, k):
         raise ValueError(f"init shape {tuple(V.shape)} != [p, k] = {(p, k)}")
 
-    orth_val, orth_grad = _orth_terms(orth, k)
+    orth_val, orth_grad = orth_terms(orth)
 
     def energy_of(Vv):
         f = _fid(Vv, ops, c, trS)
-        d = orth_val(Vv)
+        d = orth_val(Vv) if k > 1 else torch.zeros((), dtype=Vv.dtype, device=Vv.device)
         return (1.0 - w) * f + w * d, f, d
 
     def grad_of(Vv):
@@ -391,58 +386,35 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="C", max_iter=2000,
             g = g + w * orth_grad(Vv)
         return g
 
-    # ---- SPG loop --------------------------------------------------------
-    # grad_fn caches (F, D) so we have them for the result without a second call.
-    _cached = [None, None]   # [F, D]
-
     def _energy(Vv):
         return energy_of(Vv)[0]
 
     def _grad_and_energy(Vv):
-        Ev, Fv, Dv = energy_of(Vv)
-        _cached[0] = float(Fv.detach()) if hasattr(Fv, "detach") else float(Fv)
-        _cached[1] = float(Dv.detach()) if hasattr(Dv, "detach") else float(Dv)
-        return Ev, grad_of(Vv)
+        """Fused: the fidelity and its gradient share one pass over the data."""
+        f, gf, _B = _fid_and_grad(Vv, ops, c, trS)
+        if k > 1:
+            E = (1.0 - w) * f + w * orth_val(Vv)
+            g = (1.0 - w) * gf
+            if w != 0.0:
+                g = g + w * orth_grad(Vv)
+            return E, g
+        return (1.0 - w) * f, (1.0 - w) * gf
 
     trace = [] if keep_trace else None
-    t0 = time.time()
-
-    if optimizer in ("torch_lbfgs", "torch-lbfgs"):
-        from .solve import _torch_lbfgs_loop
-        iter_cap = max_iter if max_iter is not None else 1000
-        V, E, it, stop, gmap = _torch_lbfgs_loop(
-            V, _energy, _grad_and_energy,
-            max_iter=iter_cap, tol=tol, verbose=verbose,
-            trace=trace, caller="nsa_flow_data", w=w,
-        )
-    elif optimizer == "lbfgs":
-        from .solve import _lbfgs_b_loop
-        bounds = [(0.0, None)] * V.numel()
-        V, E, it, stop, gmap = _lbfgs_b_loop(
-            V, bounds, _energy, _grad_and_energy,
-            max_iter=max_iter, tol=tol, verbose=verbose,
-            trace=trace, caller="nsa_flow_data", w=w,
-        )
-    else:
-        V, E, it, stop, gmap = _spg_loop(
-            V, project_nonneg, _energy, _grad_and_energy,
-            max_iter, tol, sigma, verbose=verbose,
-            trace=trace, caller="nsa_flow_data", w=w,
-        )
-
-    # Re-evaluate to get fresh F and D at the final iterate.
+    rep = minimise(V, _energy, _grad_and_energy, project_nonneg,
+                   optimizer=optimizer, max_iter=max_iter, tol=tol, sigma=sigma,
+                   verbose=verbose, trace=trace, caller="nsa_flow_data", w=w)
+    V = rep.Y
     E_final, F_final, D_final = energy_of(V)
 
-    return NSAResult(
-        Y=V, target=None, w=float(w), energy=float(E_final),
-        fidelity=float(F_final), defect=float(D_final),
-        raw_defect=float(stiefel_defect(V)),
-        angle_defect=float(angle_defect(V)), orth=orth,
-        matrix_free=bool(matrix_free),
-        effective_rank=float(effective_rank(V)),
-        scale_ratio=float("nan"), iters=it,
-        converged=stop in ("grad_map", "plateau") or (
-            stop == "line_search" and math.isfinite(gmap)),
-        stop_reason=stop, grad_map=float(gmap), seconds=time.time() - t0,
-        w_schedule=[float(w)], trace=trace, nonneg=True, align=False,
+    return make_result(
+        NSAResult, Y=V, w=w, orth=orth, mode="data", optimizer=rep["optimizer"],
+        energy=float(E_final), fidelity=float(F_final), defect=float(D_final),
+        iters=rep.iters, stop=rep.stop, grad_map=rep.grad_map, tol=tol,
+        seconds=rep.seconds,
+        energy_start=rep["energy_start"],
+        grad_map_start=rep["grad_map_start"],
+        target=None, matrix_free=bool(matrix_free), nonneg=True, align=False,
+        n_grad=rep.n_grad, n_energy=rep.n_energy, scale_ratio=float("nan"),
+        w_schedule=[float(w)], trace=trace,
     )
