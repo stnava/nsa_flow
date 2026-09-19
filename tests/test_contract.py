@@ -203,7 +203,8 @@ def test_float32_flat_model_does_not_divide_by_zero():
 
 def test_sklearn_centers_and_transform_matches_fit():
     from nsa_flow import NSAFlow
-    X = np.random.default_rng(0).normal(size=(60, 12)) + 5.0      # far from zero
+    X = np.random.default_rng(0).normal(size=(60, 12)) + 0.5      # signed, off-centre
+    assert X.min() < 0                                             # so auto -> signed
     m = NSAFlow(n_components=3, w=0.5).fit(X)
     assert np.allclose(m.mean_, X.mean(0))
     Z1 = m.transform(X)

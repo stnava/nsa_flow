@@ -51,8 +51,9 @@ class NSAFlow(*_Base):
         ``None`` uses the working-precision default.
     center : bool, default True
         Subtract the training column means before fitting and in ``transform``
-        (stored as ``mean_``).  Ignored for ``mode="data"``, whose input must
-        stay non-negative.
+        (stored as ``mean_``).  Applied only to signed fits -- ``mode="signed"``,
+        or ``mode="auto"`` on data with negative entries -- so it never turns a
+        non-negative matrix signed and changes the mode it dispatches to.
     **kwargs :
         Additional arguments forwarded to `nsa_flow`.
 
@@ -137,7 +138,13 @@ class NSAFlow(*_Base):
         # shift.  Every benchmark in experiments/ was doing this by hand, which
         # is the most likely thing a user forgets.  Off for non-negative modes
         # where the sign of the data is the point.
-        self.mean_ = (X_arr.mean(axis=0) if (self.center and self.mode != "data")
+        # Centering must never change which mode the data selects: under
+        # mode="auto" non-negative data means the non-negative (data) mode, and
+        # centering it would turn it signed.  So centre only when the fit is
+        # signed by request or the data already is.
+        signed_fit = (self.mode in ("signed", "contrast")
+                      or (self.mode == "auto" and float(X_arr.min()) < 0.0))
+        self.mean_ = (X_arr.mean(axis=0) if (self.center and signed_fit)
                       else np.zeros(X_arr.shape[1]))
         res = nsa_flow(
             X_arr - self.mean_, k=self.n_components, w=self.w, mode=self.mode,
