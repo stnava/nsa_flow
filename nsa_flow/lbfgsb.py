@@ -37,8 +37,10 @@ can only release one bound per iteration.  L-BFGS-B instead:
 2. **Subspace minimisation.**  With the active set fixed by the Cauchy point,
    minimise the model over the remaining free variables using the limited-memory
    Hessian, then truncate the step to stay feasible.
-3. **Projected backtracking line search**, so the whole method is monotone and
-   every accepted step is certified by the shared gradient mapping.
+3. **Strong-Wolfe line search** along the feasible segment (both endpoints are
+   feasible and the box is convex, so no projection is needed inside it), with
+   projected backtracking as a fallback; every accepted step is certified by
+   the shared gradient mapping.
 
 The limited-memory Hessian is held in the compact representation
 

@@ -49,6 +49,10 @@ class NSAFlow(*_Base):
     tol : float, optional
         Stationarity tolerance on the shared gradient-mapping certificate.
         ``None`` uses the working-precision default.
+    center : bool, default True
+        Subtract the training column means before fitting and in ``transform``
+        (stored as ``mean_``).  Ignored for ``mode="data"``, whose input must
+        stay non-negative.
     **kwargs :
         Additional arguments forwarded to `nsa_flow`.
 
@@ -70,7 +74,9 @@ class NSAFlow(*_Base):
     """
 
     def __init__(self, n_components=6, w=0.5, mode="auto", consolidate=False,
-                 optimizer=None, init="auto", max_iter=None, tol=None, **kwargs):
+                 optimizer=None, init="auto", max_iter=None, tol=None,
+                 center=True, **kwargs):
+        self.center = center
         self.n_components = n_components
         self.w = w
         self.mode = mode
@@ -94,7 +100,7 @@ class NSAFlow(*_Base):
         except AttributeError:                       # sklearn not installed
             params = {k: getattr(self, k) for k in
                       ("n_components", "w", "mode", "consolidate",
-                       "optimizer", "init", "max_iter", "tol")}
+                       "optimizer", "init", "max_iter", "tol", "center")}
         params.update(self.kwargs)
         return params
 
@@ -126,8 +132,15 @@ class NSAFlow(*_Base):
         self : object
             Fitted estimator.
         """
+        X_arr = X.values if hasattr(X, "values") else np.asarray(X, dtype=float)
+        # Centre once here and store the mean, so transform() applies the same
+        # shift.  Every benchmark in experiments/ was doing this by hand, which
+        # is the most likely thing a user forgets.  Off for non-negative modes
+        # where the sign of the data is the point.
+        self.mean_ = (X_arr.mean(axis=0) if (self.center and self.mode != "data")
+                      else np.zeros(X_arr.shape[1]))
         res = nsa_flow(
-            X, k=self.n_components, w=self.w, mode=self.mode,
+            X_arr - self.mean_, k=self.n_components, w=self.w, mode=self.mode,
             consolidate=self.consolidate, optimizer=self.optimizer,
             init=self.init, max_iter=self.max_iter, tol=self.tol,
             **self.kwargs
@@ -157,8 +170,8 @@ class NSAFlow(*_Base):
         """
         if not hasattr(self, "components_"):
             raise ValueError("NSAFlow instance is not fitted yet. Call 'fit' before 'transform'.")
-        X_arr = X.values if hasattr(X, "values") else np.asarray(X)
-        return X_arr @ self.components_.T  # [n, k]
+        X_arr = X.values if hasattr(X, "values") else np.asarray(X, dtype=float)
+        return (X_arr - self.mean_) @ self.components_.T  # [n, k]
 
     def fit_transform(self, X, y=None):
         """Fit to data, then transform it.

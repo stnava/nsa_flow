@@ -12,27 +12,22 @@ where ``Orth`` is one of three orthogonality functionals selected by ``orth``:
 * ``"Cg"``:  ``||offdiag(V'V)||_F^2 / tr(V'V)^2``, smooth everywhere.
 * ``"C"``:  mean squared cosine between column pairs, per-column normalised.
 
-The method is Spectral Projected Gradient (Birgin, Martinez & Raydan 2000):
-Barzilai-Borwein step lengths safeguarded by an Armijo backtracking line search
-on the projected-gradient step.  For continuously differentiable ``E_w`` and
-closed convex feasible set this converges to a stationary point, and the
-gradient-mapping norm ``||Y+ - Y|| / t`` is a computable stationarity
-certificate.
+The default optimiser is L-BFGS-B implemented in pure PyTorch
+(:mod:`nsa_flow.lbfgsb`); ``spg``, ``fista`` and ``pqn`` are available via
+``optimizer=``.  All of them are scored by ONE certificate,
+:func:`nsa_flow.diagnostics.gradient_mapping` -- scale-invariant, projected --
+and stop for one of four reasons:
 
-Convergence is detected by three independent criteria (whichever fires first):
+* ``"grad_map"``: certificate <= ``tol``  (``certificate="stationary"``).
+* ``"plateau"``: energy AND certificate both stopped improving
+  (``certificate="numerical_floor"``).
+* ``"line_search"``: no descent step at working precision, far from
+  stationarity -- NOT converged; a ``RuntimeWarning`` names the certificate.
+* ``"max_iter"``: the gradient-evaluation budget ran out -- NOT converged.
 
-* ``"grad_map"``: ``|Gmap| <= tol`` — tight stationarity certificate.
-* ``"plateau"``: energy span over last ``patience`` steps < ``rtol`` (relative)
-  — energy has converged to ~7 significant figures; ``max_iter`` is then a
-  safety cap rather than an operating parameter.
-* ``"line_search"``: step too small — iterate is at a local minimum of the
-  line search (emits ``RuntimeWarning`` if far from stationarity).
-* ``"max_iter"``: safety cap hit — iterate is NOT certified stationary
-  (emits ``RuntimeWarning`` when ``|Gmap| > 1e-3``).
-
-Cost per iteration is two ``[p,k] x [k,k]`` products plus one Gram: ``O(p k^2)``.
-No SVD, eigendecomposition or QR appears in the loop -- except under ``align``
-(deprecated), which adds one ``k x k`` SVD per evaluation.
+``result.converged`` is true only in the first two cases.  No SVD or
+eigendecomposition appears in the loop; the top-k initialisation is exact and
+on-device (:mod:`nsa_flow.linalg`).
 """
 import time
 import warnings
@@ -457,7 +452,7 @@ def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=True,
     optimizer : {"torch_lbfgs", "spg", "lbfgs"}, default "torch_lbfgs"
         Optimization algorithm:
         - "torch_lbfgs": Native pure PyTorch quasi-Newton via quadratic reparameterization (default).
-        - "spg": Monotone Spectral Projected Gradient.
+        - "spg": Spectral projected gradient (alternating Barzilai-Borwein).
         - "lbfgs": SciPy L-BFGS-B (box constrained).
     init : str or Tensor, optional
         Initial point strategy or tensor.

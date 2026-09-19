@@ -199,3 +199,15 @@ def test_float32_flat_model_does_not_divide_by_zero():
         X = torch.rand(60, 40, generator=torch.Generator().manual_seed(seed),
                        dtype=torch.float32)
         nsa_flow_data(X, k=4, w=0.99, max_iter=300)       # must not raise
+
+
+def test_sklearn_centers_and_transform_matches_fit():
+    from nsa_flow import NSAFlow
+    X = np.random.default_rng(0).normal(size=(60, 12)) + 5.0      # far from zero
+    m = NSAFlow(n_components=3, w=0.5).fit(X)
+    assert np.allclose(m.mean_, X.mean(0))
+    Z1 = m.transform(X)
+    Z2 = (X - X.mean(0)) @ m.components_.T
+    assert np.allclose(Z1, Z2)
+    m2 = NSAFlow(n_components=3, w=0.5, mode="data").fit(np.abs(X))
+    assert np.all(m2.mean_ == 0.0)

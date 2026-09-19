@@ -68,19 +68,23 @@ def summarise(df):
               .reset_index())
 
 
-def refinement_table(df):
-    """Each base against its best refinement, averaged over noise and seeds."""
+def refinement_table(df, w=0.5):
+    """Each base against its refinement at a FIXED ``w``, averaged over noise and seeds.
+
+    Earlier versions picked ``w`` by maximising the reported cosine and then
+    reported that maximum -- selection on the outcome, worth ~18% of the
+    reported gain on the committed CSV.  ``w = 0.5`` is the library default and
+    the value used everywhere else in the paper.
+    """
     rows = []
     for base in BASES:
         b = df[(df.base == base) & (~df.refined)]
-        r = df[(df.base == base) & (df.refined) & (df.w > 0)]
-        per_w = r.groupby("w")[["cosine", "support_f1", "overlap"]].mean()
-        best_w = per_w.cosine.idxmax()
+        r = df[(df.base == base) & (df.refined) & (df.w == w)]
         rows.append({
             "base": base,
-            "cos": b.cosine.mean(), "cos +NSA": per_w.loc[best_w, "cosine"],
-            "F1": b.support_f1.mean(), "F1 +NSA": per_w.loc[best_w, "support_f1"],
-            "overlap": b.overlap.mean(), "overlap +NSA": per_w.loc[best_w, "overlap"],
-            "best $w$": best_w,
+            "cos": b.cosine.mean(), "cos +NSA": r.cosine.mean(),
+            "F1": b.support_f1.mean(), "F1 +NSA": r.support_f1.mean(),
+            "overlap": b.overlap.mean(), "overlap +NSA": r.overlap.mean(),
+            "$w$": w,
         })
     return pd.DataFrame(rows)

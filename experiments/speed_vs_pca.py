@@ -90,7 +90,9 @@ def pca_reference(X, k):
 
 def run(devices=("cpu",), shapes=SHAPES, reps=3, seed=0, budget=20000,
         optimizers=None):
-    optimizers = tuple(optimizers or optimizer_names())
+    # the live optimizers only; scipy_lbfgsb is a host-side reference and
+    # torch_lbfgs is deprecated -- both belong in optimizer_study, not here
+    optimizers = tuple(optimizers or ("lbfgsb", "fista", "spg", "pqn"))
     rows = []
     for device in devices:
         dtypes = (torch.float32,) if device != "cpu" else (torch.float32, torch.float64)

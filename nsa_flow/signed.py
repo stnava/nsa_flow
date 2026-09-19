@@ -27,7 +27,8 @@ Getting the term right took two corrections, both forced by measurement.
 ``2k`` parts of EQUAL norm.  A contrast is legitimately asymmetric -- a
 mostly-positive component has a small or empty negative lobe -- so on ADNI the
 part-norm ratio at ``w = 0`` is ~4e8, and raising ``w`` inflates the near-empty
-lobes to equalise them: lobe overlap ROSE from 3e-9 to 2.55 between ``w = 0`` and
+lobes to equalise them: lobe overlap (then unnormalised; ``result['lobe_overlap']``
+is now divided by ``||X||_F^2``) ROSE from 3e-9 to 2.55 between ``w = 0`` and
 ``w = 0.25``.  Switching to the squared-cosine defect ``C``, which is indifferent
 to norms, cut that to 0.122 -- a 21x improvement for 0.4% reconstruction cost.
 
