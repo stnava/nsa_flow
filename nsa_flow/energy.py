@@ -112,8 +112,20 @@ def procrustes_rotation(X0, Y):
     ``X0, Y``; see ``aligned_target`` for the consequence.
     """
     M = X0.transpose(-2, -1) @ Y
-    U, _, Vh = torch.linalg.svd(M)
-    return U @ Vh
+    # Q = U V' is the orthogonal polar factor of M, i.e. M (M'M)^{-1/2}.  Taking
+    # it from a symmetric eigendecomposition of the k x k matrix M'M rather than
+    # from an SVD keeps this on-device: svd is unimplemented on MPS and silently
+    # falls back to the host elsewhere.  The k x k eigenproblem is also cheaper.
+    from .linalg import safe_eigh
+    lam, V = safe_eigh(M.transpose(-2, -1) @ M)
+    inv_sqrt = lam.clamp_min(torch.finfo(M.dtype).tiny).rsqrt()
+    Q = M @ ((V * inv_sqrt.unsqueeze(-2)) @ V.transpose(-2, -1))
+    # Forming M'M squares the condition number, which costs ~1e-12 of
+    # orthogonality in float64; one Newton-Schulz step Q <- Q (3I - Q'Q) / 2
+    # restores it to machine precision at the price of two k x k products.
+    k = Q.shape[-1]
+    eye = torch.eye(k, dtype=Q.dtype, device=Q.device)
+    return Q @ (1.5 * eye - 0.5 * (Q.transpose(-2, -1) @ Q))
 
 
 def aligned_target(X0, Y):

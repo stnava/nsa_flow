@@ -34,6 +34,8 @@ result to ``||X0||_F``.
 """
 import torch
 
+from .linalg import symmetric_rank
+
 __all__ = ["negative_mass", "SubspaceAnchor", "subspace_fidelity",
            "grad_subspace_fidelity"]
 
@@ -69,7 +71,10 @@ class SubspaceAnchor:
                 "target spans no subspace (X0'X0 has zero trace), so the "
                 "projector onto range(X0) is undefined; the subspace fidelity "
                 "cannot be used with an all-zero target")
-        self.rank_deficient = bool(torch.linalg.matrix_rank(G) < k)
+        # matrix_rank is built on svd, which is unimplemented on MPS and a
+        # silent host round trip elsewhere; G is symmetric, so its
+        # eigenvalues answer the question directly and on-device.
+        self.rank_deficient = bool(symmetric_rank(G) < k)
         self.chol = torch.linalg.cholesky(G + (eps * scale) * eye)
 
     def project(self, Y):

@@ -75,11 +75,10 @@ so "approximately disjoint factors" is a claim with a number attached.
 
 ## Solver
 
-Spectral projected gradient: Barzilai–Borwein steps with Armijo backtracking on
-the projected step. Every accumulation point is a stationary point of the
-constrained problem, and `result.grad_map` is a computable stationarity
-certificate (`result.stop_reason` says why it stopped — never a silent claim of
-convergence).
+Pure-PyTorch L-BFGS-B by default (see below); every accepted step is certified
+by one shared gradient-mapping norm, `result.grad_map`, and `result.stop_reason`
+/ `result.certificate` say exactly what was and was not established — never a
+silent claim of convergence.
 
 The inner loop forms one Gram product and two `[p,k] x [k,k]` products: `O(p k^2)`,
 with **no SVD, eigendecomposition or QR**. Typical convergence is 15–300
@@ -158,7 +157,9 @@ pipe.fit(X_train, y_train)
 
 ### Optimizers & Performance
 
-All solvers default to `optimizer="torch_lbfgs"`, a 100% pure PyTorch native quasi-Newton optimizer using quadratic reparameterization ($V = Z^2$) and exact analytical chain rule gradients ($\nabla_Z E = 2 Z \odot \nabla_V E$). It achieves **up to 23.2× speedup** over spectral projected gradient (SPG) without boundary stalling or host-device transfers. SPG (`optimizer="spg"`) and SciPy L-BFGS-B (`optimizer="lbfgs"`) remain available.
+All solvers default to `optimizer="lbfgsb"`: L-BFGS-B (Byrd, Lu, Nocedal & Zhu 1995) implemented in pure PyTorch — generalized Cauchy point plus subspace minimisation over the compact limited-memory representation — so it runs unmodified on CPU, CUDA and MPS in float32 or float64 with **no host↔device transfers** (the top-*k* eigenvector initialisation is computed on-device too; see `nsa_flow/linalg.py`). It was chosen by measurement (`experiments/optimizer_study.py`): it matches SciPy's Fortran L-BFGS-B energy to twelve figures on every problem tried, finds a strictly lower minimum on the hardest, and is the only pure-torch method that certified convergence on every configuration. `fista`, `spg` and `pqn` remain available; `torch_lbfgs` is deprecated (it never certified convergence and froze the support at its initialisation).
+
+Every result carries the same diagnostics under fixed definitions — `grad_map` is one scale-invariant certificate for every optimiser, `defect_D`/`defect_Cg`/`defect_C` are all evaluated on the returned basis, and `converged` is set only when a certificate is earned (`result.certificate` is `"stationary"` or `"numerical_floor"`). `max_iter` caps gradient evaluations. The default `tol` is 1e-6 (float64) / 1e-4 (float32), which returns the same support as 1e-9 for 30–50% less work.
 
 `nsa_flow_signed` writes each component as a contrast of two non-negative
 parts, which restores a signed basis's representational capacity: at `w = 0` it

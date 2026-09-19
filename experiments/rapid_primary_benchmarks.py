@@ -99,7 +99,7 @@ def benchmark_adni_cdrsb(k=5, test_size=0.2, seed=42):
             V = r.Y.detach().cpu().numpy()
             Z_tr = X_tr_pos @ V
             Z_te = X_te_pos @ V
-            defect_val = r.defect
+            defect_val = r["defect_D"]
             dt = time.time() - t0
             lr = LinearRegression().fit(np.column_stack([C_tr, Z_tr]), y_tr)
             rf = RandomForestRegressor(n_estimators=150, random_state=seed).fit(np.column_stack([C_tr, Z_tr]), y_tr)
@@ -111,7 +111,7 @@ def benchmark_adni_cdrsb(k=5, test_size=0.2, seed=42):
             V = r.Y.detach().cpu().numpy()
             Z_tr = X_tr_c @ V
             Z_te = X_te_c @ V
-            defect_val = r.defect
+            defect_val = r["defect_D"]
             lobe_overlap = r.get("lobe_overlap", 0.0)
             dt = time.time() - t0
             lr = LinearRegression().fit(np.column_stack([C_tr, Z_tr]), y_tr)
@@ -125,7 +125,7 @@ def benchmark_adni_cdrsb(k=5, test_size=0.2, seed=42):
             V = r.Y.detach().cpu().numpy()
             Z_tr = X_tr_c @ V
             Z_te = X_te_c @ V
-            defect_val = r.defect
+            defect_val = r["defect_D"]
             dt = time.time() - t0
             lr = LinearRegression().fit(np.column_stack([C_tr, Z_tr]), y_tr)
             rf = RandomForestRegressor(n_estimators=150, random_state=seed).fit(np.column_stack([C_tr, Z_tr]), y_tr)
@@ -154,11 +154,6 @@ def benchmark_golub_3class(p=2000, k=3, seed=42):
     y = le.fit_transform(y_str)
 
     X_log = np.log2(np.clip(X_raw, 1.0, None))
-    var = np.var(X_log, axis=0)
-    top_idx = np.argsort(var)[-p:]
-    X = StandardScaler().fit_transform(X_log[:, top_idx])
-    X_pos = np.clip(X - X.min(axis=0), 0, None)
-
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
 
     methods = [
@@ -170,40 +165,56 @@ def benchmark_golub_3class(p=2000, k=3, seed=42):
         ("NSA-Flow data (w=0.5)", "data", {"w": 0.5}),
     ]
 
+    # Everything -- gene selection, standardisation, the basis -- is fitted on
+    # the training fold only.  The previous version fitted all of it on the full
+    # 72 samples and then cross-validated the classifier on the resulting
+    # scores, which is transductive and contradicts experiments/common.py.
+    acc = {name: {"lr": [], "rf": [], "sp": [], "def": [], "t": []} for name, _, _ in methods}
+    for tr, te in cv.split(X_log, y):
+        var = np.var(X_log[tr], axis=0)
+        top_idx = np.argsort(var)[-p:]
+        scaler = StandardScaler().fit(X_log[tr][:, top_idx])
+        Xtr = scaler.transform(X_log[tr][:, top_idx])
+        Xte = scaler.transform(X_log[te][:, top_idx])
+        mn = Xtr.min(axis=0)
+        Xtr_pos, Xte_pos = np.clip(Xtr - mn, 0, None), np.clip(Xte - mn, 0, None)
+
+        for name, kind, kwargs in methods:
+            t0 = time.time()
+            if kind == "pca":
+                pca = PCA(n_components=k, random_state=seed).fit(Xtr)
+                V = pca.components_.T
+                Ztr, Zte = Xtr @ V, Xte @ V
+                defect_val = float(stiefel_defect_normalised(torch.as_tensor(V)))
+            elif kind == "data":
+                r = nsa_flow(Xtr_pos, k=k, w=kwargs["w"], mode="data")
+                V = r.Y.detach().cpu().numpy()
+                Ztr, Zte = Xtr_pos @ V, Xte_pos @ V
+                defect_val = r["defect_D"]
+            else:
+                r = nsa_flow(Xtr, k=k, w=kwargs["w"], mode="signed",
+                             consolidate=kwargs.get("consolidate", False))
+                V = r.Y.detach().cpu().numpy()
+                Ztr, Zte = Xtr @ V, Xte @ V
+                defect_val = r["defect_D"]
+            acc[name]["t"].append(time.time() - t0)
+            acc[name]["def"].append(defect_val)
+            acc[name]["sp"].append(float((np.abs(V) < 1e-10).mean()))
+            clf_lr = LogisticRegression(C=1.0, max_iter=500, random_state=seed).fit(Ztr, y[tr])
+            clf_rf = RandomForestClassifier(n_estimators=100, random_state=seed).fit(Ztr, y[tr])
+            from sklearn.metrics import balanced_accuracy_score
+            acc[name]["lr"].append(balanced_accuracy_score(y[te], clf_lr.predict(Zte)))
+            acc[name]["rf"].append(balanced_accuracy_score(y[te], clf_rf.predict(Zte)))
+
     rows = []
-    for name, kind, kwargs in methods:
-        t0 = time.time()
-        if kind == "pca":
-            pca = PCA(n_components=k, random_state=seed).fit(X)
-            V = pca.components_.T / np.linalg.norm(pca.components_.T, axis=0, keepdims=True)
-            defect_val = float(stiefel_defect_normalised(torch.as_tensor(pca.components_.T)))
-        elif kind == "data":
-            r = nsa_flow(X_pos, k=k, w=kwargs["w"], mode="data")
-            V = r.Y.detach().cpu().numpy()
-            defect_val = r.defect
-        else:
-            r = nsa_flow(X, k=k, w=kwargs["w"], mode="signed", consolidate=kwargs.get("consolidate", False))
-            V = r.Y.detach().cpu().numpy()
-            defect_val = r.defect
-
-        dt = time.time() - t0
-        Z = X @ V
-        clf_lr = LogisticRegression(C=1.0, max_iter=500, random_state=seed)
-        scores_lr = cross_val_score(clf_lr, Z, y, cv=cv, scoring="balanced_accuracy")
-        clf_rf = RandomForestClassifier(n_estimators=100, random_state=seed)
-        scores_rf = cross_val_score(clf_rf, Z, y, cv=cv, scoring="balanced_accuracy")
-        sp = float((np.abs(V) < 1e-10).mean())
-
+    for name, _, _ in methods:
+        a = acc[name]
         rows.append({
-            "experiment": "golub_3class",
-            "method": name,
-            "linear_bal_acc": np.mean(scores_lr),
-            "linear_sd": np.std(scores_lr),
-            "forest_bal_acc": np.mean(scores_rf),
-            "forest_sd": np.std(scores_rf),
-            "sparsity": sp,
-            "defect": defect_val,
-            "fit_time_s": dt,
+            "experiment": "golub_3class", "method": name,
+            "linear_bal_acc": np.mean(a["lr"]), "linear_sd": np.std(a["lr"]),
+            "forest_bal_acc": np.mean(a["rf"]), "forest_sd": np.std(a["rf"]),
+            "sparsity": np.mean(a["sp"]), "defect": np.mean(a["def"]),
+            "fit_time_s": np.sum(a["t"]),
         })
     return pd.DataFrame(rows)
 
@@ -244,14 +255,14 @@ def benchmark_diabetes_split(k=4, test_size=0.2, seed=42):
             V = r.Y.detach().cpu().numpy()
             Z_tr = X_tr_pos @ V
             Z_te = X_te_pos @ V
-            defect_val = r.defect
+            defect_val = r["defect_D"]
         elif kind == "signed":
             consolidate = kwargs.get("consolidate", False)
             r = nsa_flow(X_tr, k=k, w=kwargs["w"], mode="signed", consolidate=consolidate)
             V = r.Y.detach().cpu().numpy()
             Z_tr = X_tr @ V
             Z_te = X_te @ V
-            defect_val = r.defect
+            defect_val = r["defect_D"]
 
         dt = time.time() - t0
         reg = Ridge(alpha=1.0)
