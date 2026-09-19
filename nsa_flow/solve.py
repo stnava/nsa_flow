@@ -409,6 +409,7 @@ def _torch_lbfgs_loop(Y0, energy_fn, grad_fn, max_iter=200, tol=1e-5,
     outer_steps = max(5, max_iter // 20)
     total_sub_iters = 0
 
+    prev_E = None
     for step in range(1, outer_steps + 1):
         def closure():
             nonlocal total_sub_iters
@@ -443,6 +444,11 @@ def _torch_lbfgs_loop(Y0, energy_fn, grad_fn, max_iter=200, tol=1e-5,
         if gmap <= tol:
             stop = "grad_map"
             break
+
+        if prev_E is not None and abs(E_cur - prev_E) / (1.0 + abs(E_cur)) < rtol:
+            stop = "plateau"
+            break
+        prev_E = E_cur
 
         E_window.append(E_cur)
         if len(E_window) > patience:
@@ -790,17 +796,18 @@ def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=True,
 
     if mode in ("data", "nonneg"):
         from .reconstruct import nsa_flow_data
-        init_strat = init if init is not None else "clamp"
-        iter_cap = max_iter if max_iter is not None else (1000 if optimizer in ("torch_lbfgs", "torch-lbfgs") else 2000)
+        init_strat = "clamp" if init in (None, "auto") else init
+        iter_cap = max_iter if max_iter is not None else (150 if optimizer in ("torch_lbfgs", "torch-lbfgs") else 2000)
         return nsa_flow_data(X, k=k, w=w, init=init_strat, max_iter=iter_cap,
                              tol=tol, optimizer=optimizer, **kwargs)
 
     elif mode in ("signed", "contrast"):
         from .signed import nsa_flow_signed
-        init_strat = init if init is not None else "relax"
-        iter_cap = max_iter if max_iter is not None else (1000 if optimizer in ("torch_lbfgs", "torch-lbfgs") else 8000)
+        init_strat = init if init is not None else "auto"
+        iter_cap = max_iter if max_iter is not None else (150 if optimizer in ("torch_lbfgs", "torch-lbfgs") else 8000)
+        tol_val = tol if tol is not None else (1e-5 if optimizer in ("torch_lbfgs", "torch-lbfgs") else None)
         return nsa_flow_signed(X, k=k, w=w, init=init_strat, consolidate=consolidate,
-                               max_iter=iter_cap, tol=tol, optimizer=optimizer, **kwargs)
+                               max_iter=iter_cap, tol=tol_val, optimizer=optimizer, **kwargs)
 
     elif mode in ("anchored", "target"):
         iter_cap = max_iter if max_iter is not None else 20000

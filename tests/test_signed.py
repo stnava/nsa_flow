@@ -261,17 +261,41 @@ def test_default_init_converges_on_nonneg_data(nonneg_data):
 
 
 def test_split_init_is_deprecated(nonneg_data):
-    """init='split' must emit a DeprecationWarning so callers can migrate.
+    """init='split' must emit a DeprecationWarning on non-negative uncentred data.
 
-    The warning is the only output; the solver still runs (for ablation use).
-    We do NOT assert convergence here: split is fragile on non-negative data
-    by construction (V⁻ = max(0,-E) ≈ 0), and that fragility is exactly what
-    the deprecation communicates.
+    The warning is emitted because split is fragile on uncentred non-negative data
+    by construction (V⁻ = max(0,-E) ≈ 0).
     """
     import warnings as _w
     with _w.catch_warnings(record=True) as caught:
         _w.simplefilter("always")
         nsa_flow_signed(nonneg_data, k=4, w=0.5, init="split", max_iter=50)
     dep_warns = [c for c in caught if issubclass(c.category, DeprecationWarning)]
-    assert dep_warns, "init='split' must emit a DeprecationWarning"
+    assert dep_warns, "init='split' on non-negative data must emit a DeprecationWarning"
+
+
+def test_split_and_auto_init_on_centered_data_no_warning(data):
+    """On centered data, init='auto' and init='split' are exact and emit no warning."""
+    import warnings as _w
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        r_auto = nsa_flow_signed(data, k=4, w=0.5, init="auto")
+        r_split = nsa_flow_signed(data, k=4, w=0.5, init="split")
+    dep_warns = [c for c in caught if issubclass(c.category, DeprecationWarning)]
+    assert not dep_warns, f"No DeprecationWarning expected on centered data; got {dep_warns}"
+    assert r_auto.converged
+    assert r_split.converged
+    assert math.isfinite(r_auto.grad_map)
+
+
+def test_adaptive_init_converges_fast(nonneg_data):
+    """init='adaptive' prevents stalling on uncentred positive data in < 1 second."""
+    import time
+    t0 = time.time()
+    r = nsa_flow_signed(nonneg_data, k=4, w=0.5, init="adaptive")
+    elapsed = time.time() - t0
+    assert r.iters > 5
+    assert math.isfinite(r.grad_map)
+    assert elapsed < 1.0, f"Adaptive init should finish in < 1s; took {elapsed:.2f}s"
+
 

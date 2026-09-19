@@ -175,7 +175,7 @@ def _smooth_descent(V, obj, grad, max_iter, tol, sigma):
 
 
 def relax_into_nonneg(S, c, k, w, mus=None, max_iter=600, tol=1e-10, sigma=1e-4,
-                      trS=None):
+                      trS=None, fast=False):
     r"""Penalty homotopy: follow the solution path from signed PCA into ``V >= 0``.
 
     Solves a sequence of *smooth unconstrained* problems
@@ -188,6 +188,10 @@ def relax_into_nonneg(S, c, k, w, mus=None, max_iter=600, tol=1e-10, sigma=1e-4,
     ``C^1`` (its gradient ``2 mu min(0, V)`` is continuous), so every subproblem is
     smooth and ordinary descent applies.
 
+    When ``fast=True``, applies an adaptive 2-stage continuation (``mu in [0.0, 10.0]``)
+    with relaxed tolerances (``max_iter=25, tol=1e-4``) ideal for warm-starting
+    downstream quasi-Newton solvers without spending seconds on intermediate barriers.
+
     This exists because the alternative -- mapping a signed basis to a
     non-negative one in one shot -- has no variational justification.  ``abs()``
     is not even the projection (for an entry ``-3`` it moves distance 6 where the
@@ -198,7 +202,14 @@ def relax_into_nonneg(S, c, k, w, mus=None, max_iter=600, tol=1e-10, sigma=1e-4,
     from .energy import grad_stiefel_defect, stiefel_defect_normalised
     ops = _as_ops(S)
     inv_k = 1.0 / (1.0 - 1.0 / k) if k > 1 else 0.0
-    if mus is None:
+    if fast:
+        if mus is None:
+            mus = [0.0, 10.0]
+        if max_iter == 600:
+            max_iter = 25
+        if tol == 1e-10:
+            tol = 1e-4
+    elif mus is None:
         # Continuation in mu, which is NOT the `continuation` argument of
         # nsa_flow (that one steps in w and is only a diagnostic).
         # Nine stages, and the resolution of this path is load-bearing: on ADNI a
@@ -331,7 +342,7 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="C", max_iter=2000,
         if k is None:
             raise ValueError("give k when init is a strategy name")
         E = ops.leading(k)
-        if init == "clamp":
+        if init in ("clamp", "auto"):
             # Project top-k PCA eigenvectors onto non-neg orthant.  Fast and
             # lands in the same basin as "relax" for the reconstruction objective.
             V = E.clamp_min(0.0).clone()
