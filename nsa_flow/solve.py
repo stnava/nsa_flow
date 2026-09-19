@@ -418,7 +418,7 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
     )
 
 
-def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=True,
+def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=None,
              consolidate=False, optimizer=None, init=None, max_iter=None,
              tol=None, **kwargs):
     """Unified high-level entry point for NSA-Flow representation learning.
@@ -475,23 +475,16 @@ def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=True,
 
     optimizer = DEFAULT_OPTIMIZER if optimizer is None else optimizer
 
-    # ``signed=``/``nonneg=`` as mode selectors.  ``nonneg`` is also a real
-    # parameter of this function (it selects the feasible set of the anchored
-    # form), so it can never appear in **kwargs -- the branch that used to test
-    # for it there was dead, and ``nsa_flow(signed_X, k=3, nonneg=True)``
-    # silently returned a signed basis.  Handle the parameter itself.
+    # ``signed=`` and ``nonneg=`` are mode selectors.  An explicit
+    # ``nonneg=True`` with ``k`` means "I want a non-negative basis for this
+    # data": route to the data-reconstruction solver, whose objective
+    # ||X - X V V'||^2 with V >= 0 is well defined on signed X.  An explicit
+    # ``nonneg=False`` means the signed lifting.  ``None`` (default) lets the
+    # data's sign decide, and in anchored mode means ``nonneg=True``.
     if kwargs.pop("signed", False):
         mode = "signed"
-    if mode == "auto" and k is not None and nonneg is True and float(X.min()) < -1e-12:
-        # A caller who asks for a non-negative basis on signed data means the
-        # data-reconstruction mode; say so rather than silently lifting.
-        warnings.warn(
-            "nsa_flow: nonneg=True was passed with signed data and mode='auto'. "
-            "nonneg selects the feasible set, not the mode, so this would "
-            "otherwise dispatch to the SIGNED lifting and return a basis with "
-            "negative entries. Pass mode='data' for a non-negative basis (shift "
-            "or clamp the data first), or mode='signed' to silence this.",
-            RuntimeWarning, stacklevel=2)
+    if mode == "auto" and k is not None and nonneg is not None:
+        mode = "data" if nonneg else "signed"
 
     if mode == "auto":
         mode = ("anchored" if k is None else
@@ -516,7 +509,8 @@ def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=True,
                                **kwargs)
 
     if mode in ("anchored", "target"):
-        return _nsa_flow_anchored(X, w=w, nonneg=nonneg, init=init,
+        return _nsa_flow_anchored(X, w=w, nonneg=(True if nonneg is None else nonneg),
+                                  init=init,
                                   max_iter=iter_cap, tol=tol, optimizer=optimizer,
                                   **kwargs)
 

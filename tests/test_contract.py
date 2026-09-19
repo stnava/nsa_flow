@@ -212,3 +212,15 @@ def test_sklearn_centers_and_transform_matches_fit():
     assert np.allclose(Z1, Z2)
     m2 = NSAFlow(n_components=3, w=0.5, mode="data").fit(np.abs(X))
     assert np.all(m2.mean_ == 0.0)
+
+
+def test_explicit_nonneg_routes_to_the_data_solver():
+    X = torch.randn(40, 15, dtype=F64)                 # signed data
+    r = nsa_flow(X, k=3, w=0.5, nonneg=True)
+    assert r["mode"] == "data" and (r.Y >= 0).all()
+    r = nsa_flow(X, k=3, w=0.5, nonneg=False)
+    assert r["mode"] == "signed"
+    r = nsa_flow(X, k=3, w=0.5)                        # default: data decides
+    assert r["mode"] == "signed"
+    r = nsa_flow(torch.rand(40, 15, dtype=F64), k=3, w=0.5)
+    assert r["mode"] == "data"
