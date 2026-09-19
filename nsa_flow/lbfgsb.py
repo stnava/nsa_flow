@@ -124,12 +124,16 @@ class _CompactLBFGS:
         self.W = torch.cat([Y, th * S], dim=1)       # [n, 2m]
 
         SY = S.transpose(0, 1) @ Y                   # [m, m]; (SY)_ij = s_i'y_j
-        D = torch.diag(torch.diagonal(SY))
-        L = torch.tril(SY, diagonal=-1)              # i > j
         SS = S.transpose(0, 1) @ S
-        top = torch.cat([-D, L.transpose(0, 1)], dim=1)
-        bot = torch.cat([L, th * SS], dim=1)
-        K = torch.cat([top, bot], dim=0)             # [2m, 2m]
+        # Build K = [[-D, L'], [L, th S'S]] with one allocation and elementwise
+        # masks.  torch.tril + three cats on 10x10 matrices cost 0.25 ms per
+        # call here -- a quarter of the whole iteration -- purely in dispatch.
+        strict = torch.ones(m, m, dtype=self.dtype, device=self.device).tril(-1)
+        K = torch.empty(2 * m, 2 * m, dtype=self.dtype, device=self.device)
+        K[:m, :m] = -torch.diag_embed(torch.diagonal(SY))
+        K[m:, :m] = SY * strict                      # L, i > j
+        K[:m, m:] = K[m:, :m].transpose(0, 1)
+        K[m:, m:] = th * SS
         eye = torch.eye(2 * m, dtype=self.dtype, device=self.device)
         try:
             self.M = torch.linalg.solve(K, eye)
@@ -167,12 +171,11 @@ def _cauchy_point(x, g, lo, hi, H, max_breakpoints=512):
         t = torch.where(g < 0, (x - hi) / g.clamp_max(-_TINY), t)
     t = torch.nan_to_num(t, nan=inf, posinf=inf, neginf=inf).clamp_min(0.0)
 
-    d = torch.where(t > 0, -g, torch.zeros_like(g))
-    x_cp = x.clone()
+    moving0 = (t > 0).to(x.dtype)
+    d = -g * moving0
     fixed = t <= 0                                    # already at a bound, leaving
-    if bool(fixed.any()):
-        bound = lo if lo is not None else hi
-        x_cp = torch.where(fixed, bound if bound is not None else x_cp, x_cp)
+    bound = lo if lo is not None else hi
+    x_cp = x * moving0 + (bound * (1.0 - moving0) if bound is not None else 0.0)
 
     two_m = H.W.shape[1]
     p = H.W.transpose(0, 1) @ d if two_m else torch.zeros(0, dtype=x.dtype,
@@ -191,47 +194,64 @@ def _cauchy_point(x, g, lo, hi, H, max_breakpoints=512):
     # repeatedly scanning for the minimum.
     cand = torch.nonzero(torch.isfinite(t) & (t > 0), as_tuple=False).flatten()
     if cand.numel():
+        # The walk's state (p, c, f', f'') evolves by recurrences that are all
+        # cumulative sums over the breakpoints in order, so the entire walk is
+        # computed at once and the first segment containing its own minimiser
+        # is found by a single vectorised comparison.  The sequential Python
+        # version visited ~44 breakpoints per iteration with a device sync at
+        # each: 55% of a fit's wall time against 10% for the objective itself.
         order = cand[torch.argsort(t[cand])][:max_breakpoints]
-        # One host transfer for everything the walk reads per breakpoint.  The
-        # first version did ~6 scalar reads per breakpoint (t, g, x, lo and
-        # three 2m-vector products) and each was a device synchronisation; on
-        # MPS that came to 3.7 ms per gradient.  Gather the per-coordinate
-        # scalars once, keep the 2m-vector algebra on-device, and read back the
-        # three model scalars with a single .tolist() per breakpoint.
-        tb_all = t[order].tolist()
-        g_all = g[order].tolist()
-        x_all = x[order].tolist()
-        lo_all = lo[order].tolist() if lo is not None else None
-        hi_all = hi[order].tolist() if hi is not None else None
-        W_rows = H.W[order] if two_m else None
-        idx_all = order.tolist()
-        for j, tb in enumerate(tb_all):
-            dt = tb - t_old
-            if dt_min < dt or dt <= 0.0:
-                break
-            idx, gb = idx_all[j], g_all[j]
-            xcp_b = (lo_all[j] if (lo_all is not None and gb > 0)
-                     else (hi_all[j] if hi_all is not None else 0.0))
-            zb = xcp_b - x_all[j]
+        tb = t[order]                                          # [B]
+        gb = g[order]
+        xb = x[order]
+        if lo is not None and hi is not None:
+            xcp_b = torch.where(gb > 0, lo[order], hi[order])
+        elif lo is not None:
+            xcp_b = lo[order]
+        else:
+            xcp_b = hi[order]
+        zb = xcp_b - xb
+        t_prev = torch.cat([tb.new_zeros(1), tb[:-1]])
+        dtb = tb - t_prev                                      # [B]
 
-            if two_m:
-                c = c + dt * p
-                wb = W_rows[j]
-                wMc, wMp, wMw = torch.stack([wb @ (H.M @ c), wb @ (H.M @ p),
-                                             wb @ (H.M @ wb)]).tolist()
-                fp = fp + dt * fpp + gb * gb + H.theta * gb * zb - gb * wMc
-                fpp = fpp - H.theta * gb * gb - 2.0 * gb * wMp - gb * gb * wMw
-                p = p + gb * wb
-            else:
-                fp = fp + dt * fpp + gb * gb + H.theta * gb * zb
-                fpp = fpp - H.theta * gb * gb
-            fpp = max(fpp, _TINY)
+        if two_m:
+            Wb = H.W[order]                                    # [B, 2m]
+            # p_{j-1}: p before breakpoint j is processed
+            p_prev = p.unsqueeze(0) + torch.cumsum(gb.unsqueeze(1) * Wb, 0) \
+                - gb.unsqueeze(1) * Wb
+            # c_j: c after adding dt_j p_{j-1}
+            c_j = c.unsqueeze(0) + torch.cumsum(dtb.unsqueeze(1) * p_prev, 0)
+            MWb = Wb @ H.M                                     # [B, 2m] (M symmetric)
+            wMc = (MWb * c_j).sum(1)
+            wMp = (MWb * p_prev).sum(1)
+            wMw = (MWb * Wb).sum(1)
+            dfpp = -H.theta * gb * gb - 2.0 * gb * wMp - gb * gb * wMw
+        else:
+            wMc = torch.zeros_like(gb)
+            dfpp = -H.theta * gb * gb
+        fpp_j = (fpp + torch.cumsum(dfpp, 0)).clamp_min(_TINY)   # f'' after j
+        fpp_prev = torch.cat([fpp_j.new_full((1,), fpp), fpp_j[:-1]])
+        dfp = dtb * fpp_prev + gb * gb + H.theta * gb * zb - gb * wMc
+        fp_j = fp + torch.cumsum(dfp, 0)                       # f' after j
+        dt_min_j = -fp_j / fpp_j                               # minimiser on segment j+1
+        # stop before breakpoint j if dt_min_{j-1} < dt_j (segment j holds the min)
+        dt_min_prev = torch.cat([dt_min_j.new_full((1,), dt_min), dt_min_j[:-1]])
+        stop_mask = (dt_min_prev < dtb) | (dtb <= 0.0)
+        hit = torch.nonzero(stop_mask, as_tuple=False)
+        n_fix = int(hit[0]) if hit.numel() else int(order.numel())
 
-            d[idx] = 0.0
-            x_cp[idx] = xcp_b
-            fixed[idx] = True
-            t_old = tb
+        if n_fix > 0:
+            fixed_idx = order[:n_fix]
+            d[fixed_idx] = 0.0
+            x_cp[fixed_idx] = xcp_b[:n_fix]
+            fixed[fixed_idx] = True
+            t_old = float(tb[n_fix - 1])
+            fp = float(fp_j[n_fix - 1])
+            fpp = float(fpp_j[n_fix - 1])
             dt_min = -fp / fpp
+            if two_m:
+                p = p_prev[n_fix - 1] + gb[n_fix - 1] * Wb[n_fix - 1]
+                c = c_j[n_fix - 1]
 
     dt_min = max(dt_min, 0.0)
     t_old = t_old + dt_min
@@ -261,12 +281,13 @@ def _subspace_min(x, g, x_cp, c, fixed, lo, hi, H):
     r = g + th * z
     if H.m:
         r = r - H.W @ (H.M @ c)
-    r = torch.where(free, r, torch.zeros_like(r))
+    free_f = free.to(x.dtype)
+    r = r * free_f
 
     if H.m == 0:
         d_hat = -r / th
     else:
-        Wf = torch.where(free.unsqueeze(1), H.W, torch.zeros_like(H.W))
+        Wf = H.W * free_f.unsqueeze(1)
         v = H.M @ (Wf.transpose(0, 1) @ r)
         N = torch.eye(H.W.shape[1], dtype=x.dtype, device=x.device) \
             - (H.M @ (Wf.transpose(0, 1) @ Wf)) / th
@@ -275,7 +296,7 @@ def _subspace_min(x, g, x_cp, c, fixed, lo, hi, H):
         except Exception:
             v = torch.zeros_like(v)
         d_hat = -(r / th) - (Wf @ v) / (th * th)
-    d_hat = torch.where(free, d_hat, torch.zeros_like(d_hat))
+    d_hat = d_hat * free_f
 
     # largest alpha in [0, 1] keeping x_cp + alpha d_hat feasible
     alpha = torch.ones((), dtype=x.dtype, device=x.device)

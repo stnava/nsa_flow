@@ -390,7 +390,15 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="D", max_iter=None,
         return energy_of(Vv)[0]
 
     def _grad_and_energy(Vv):
-        return energy_of(Vv)[0], grad_of(Vv)
+        """Fused: the fidelity and its gradient share one pass over the data."""
+        f, gf, _B = _fid_and_grad(Vv, ops, c, trS)
+        if k > 1:
+            E = (1.0 - w) * f + w * orth_val(Vv)
+            g = (1.0 - w) * gf
+            if w != 0.0:
+                g = g + w * orth_grad(Vv)
+            return E, g
+        return (1.0 - w) * f, (1.0 - w) * gf
 
     trace = [] if keep_trace else None
     rep = minimise(V, _energy, _grad_and_energy, project_nonneg,
