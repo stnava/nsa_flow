@@ -62,7 +62,30 @@ import math
 
 import torch
 
-__all__ = ["lbfgsb_minimize"]
+__all__ = ["lbfgsb_minimize", "set_compile"]
+
+_COMPILED = {}
+
+
+def set_compile(enabled=True, backend="inductor"):
+    """Compile the pure-tensor pieces of the iteration with ``torch.compile``.
+
+    What is compiled: the subspace step (branchless) and the compact-form
+    rebuild.  What is not: the Cauchy walk, whose breakpoint count is
+    data-dependent and whose early exit is Python control flow.  Whether this
+    is a win is a measurement, not a principle -- see ``experiments/`` -- and it
+    is off by default so that a missing compiler backend never costs a user
+    anything.
+    """
+    global _subspace_min_impl, _rebuild_K_impl
+    if not enabled:
+        _COMPILED.clear()
+        return
+    if "sub" not in _COMPILED:
+        _COMPILED["sub"] = torch.compile(_subspace_min_tensor, dynamic=True,
+                                         backend=backend)
+        _COMPILED["K"] = torch.compile(_build_K, dynamic=True, backend=backend)
+
 
 _TINY = 1e-300     # Python-float floor only; NEVER clamp a tensor with this
 
@@ -142,20 +165,9 @@ class _CompactLBFGS:
         th = self.theta
         self.W = torch.cat([Y, th * S], dim=1)       # [n, 2m]
 
-        SY = S.transpose(0, 1) @ Y                   # [m, m]; (SY)_ij = s_i'y_j
-        SS = S.transpose(0, 1) @ S
-        # Build K = [[-D, L'], [L, th S'S]] with one allocation and elementwise
-        # masks.  torch.tril + three cats on 10x10 matrices cost 0.25 ms per
-        # call here -- a quarter of the whole iteration -- purely in dispatch.
-        strict = torch.ones(m, m, dtype=self.dtype, device=self.device).tril(-1)
-        K = torch.empty(2 * m, 2 * m, dtype=self.dtype, device=self.device)
-        K[:m, :m] = -torch.diag_embed(torch.diagonal(SY))
-        K[m:, :m] = SY * strict                      # L, i > j
-        K[:m, m:] = K[m:, :m].transpose(0, 1)
-        K[m:, m:] = th * SS
-        eye = torch.eye(2 * m, dtype=self.dtype, device=self.device)
+        fn = _COMPILED.get("K", _build_K)
         try:
-            self.M = torch.linalg.solve(K, eye)
+            self.M = fn(S, Y, th)
         except Exception:                            # singular: drop the memory
             self.reset()
 
@@ -164,6 +176,19 @@ class _CompactLBFGS:
         if self.m == 0:
             return self.theta * v
         return self.theta * v - self.W @ (self.M @ (self.W.transpose(0, 1) @ v))
+
+
+def _build_K(S, Y, th):
+    """``M = [[-D, L'], [L, th S'S]]^{-1}`` from the correction pairs -- pure tensor."""
+    m = S.shape[1]
+    SY = S.transpose(0, 1) @ Y                       # (SY)_ij = s_i'y_j
+    SS = S.transpose(0, 1) @ S
+    strict = torch.ones(m, m, dtype=S.dtype, device=S.device).tril(-1)
+    L = SY * strict                                  # i > j
+    D = torch.diag_embed(torch.diagonal(SY))
+    K = torch.cat([torch.cat([-D, L.transpose(0, 1)], 1),
+                   torch.cat([L, th * SS], 1)], 0)
+    return torch.linalg.solve(K, torch.eye(2 * m, dtype=S.dtype, device=S.device))
 
 
 def _cauchy_point(x, g, lo, hi, H, max_breakpoints=512):
@@ -282,55 +307,55 @@ def _cauchy_point(x, g, lo, hi, H, max_breakpoints=512):
     return x_cp, c, fixed
 
 
+def _subspace_min_tensor(x, g, x_cp, c, free_f, lo, hi, W, M, th, m):
+    """Pure-tensor core of :func:`_subspace_min` (compilable)."""
+    z = x_cp - x
+    r = g + th * z
+    if m:
+        r = r - W @ (M @ c)
+    r = r * free_f
+    if m == 0:
+        d_hat = -r / th
+    else:
+        Wf = W * free_f.unsqueeze(1)
+        v = M @ (Wf.transpose(0, 1) @ r)
+        N = torch.eye(W.shape[1], dtype=x.dtype, device=x.device) \
+            - (M @ (Wf.transpose(0, 1) @ Wf)) / th
+        v = torch.linalg.solve(N, v)
+        d_hat = -(r / th) - (Wf @ v) / (th * th)
+    d_hat = d_hat * free_f
+    tiny = float(torch.finfo(x.dtype).tiny)
+    inf = torch.full_like(d_hat, float("inf"))
+    alpha = torch.ones((), dtype=x.dtype, device=x.device)
+    if lo is not None:
+        lim = torch.where(d_hat < 0, (lo - x_cp) / d_hat.clamp_max(-tiny), inf)
+        alpha = torch.minimum(alpha, lim.clamp_min(0.0).min())
+    if hi is not None:
+        lim = torch.where(d_hat > 0, (hi - x_cp) / d_hat.clamp_min(tiny), inf)
+        alpha = torch.minimum(alpha, lim.clamp_min(0.0).min())
+    return x_cp + alpha * d_hat
+
+
 def _subspace_min(x, g, x_cp, c, fixed, lo, hi, H):
     r"""Minimise the model over the free variables, then truncate to the box.
 
     The direct primal method of Byrd et al. section 5.1.  With ``z = x_cp - x``
-    the reduced gradient at the Cauchy point is
-
-        r = (g + theta z - W M c)   restricted to the free set,
-
-    and the subspace Newton step is obtained from the compact form by solving a
-    ``2m x 2m`` system rather than anything of the size of the iterate.
+    the reduced gradient at the Cauchy point is ``r = (g + theta z - W M c)``
+    restricted to the free set, and the subspace Newton step is obtained from
+    the compact form by solving a ``2m x 2m`` system rather than anything of the
+    size of the iterate.  Tensor core in :func:`_subspace_min_tensor`.
     """
     free = ~fixed
     if not bool(free.any()):
         return x_cp
-    th = H.theta
-    z = x_cp - x
-    r = g + th * z
-    if H.m:
-        r = r - H.W @ (H.M @ c)
-    free_f = free.to(x.dtype)
-    r = r * free_f
-
-    if H.m == 0:
-        d_hat = -r / th
-    else:
-        Wf = H.W * free_f.unsqueeze(1)
-        v = H.M @ (Wf.transpose(0, 1) @ r)
-        N = torch.eye(H.W.shape[1], dtype=x.dtype, device=x.device) \
-            - (H.M @ (Wf.transpose(0, 1) @ Wf)) / th
-        try:
-            v = torch.linalg.solve(N, v)
-        except Exception:
-            v = torch.zeros_like(v)
-        d_hat = -(r / th) - (Wf @ v) / (th * th)
-    d_hat = d_hat * free_f
-
-    # largest alpha in [0, 1] keeping x_cp + alpha d_hat feasible
-    alpha = torch.ones((), dtype=x.dtype, device=x.device)
-    if lo is not None:
-        neg = d_hat < 0
-        if bool(neg.any()):
-            lim = ((lo - x_cp) / d_hat.clamp_max(-_tiny(x)))[neg]
-            alpha = torch.minimum(alpha, lim.clamp_min(0.0).min())
-    if hi is not None:
-        pos = d_hat > 0
-        if bool(pos.any()):
-            lim = ((hi - x_cp) / d_hat.clamp_min(_tiny(x)))[pos]
-            alpha = torch.minimum(alpha, lim.clamp_min(0.0).min())
-    return x_cp + alpha * d_hat
+    fn = _COMPILED.get("sub", _subspace_min_tensor)
+    try:
+        return fn(x, g, x_cp, c, free.to(x.dtype), lo, hi, H.W, H.M, H.theta, H.m)
+    except Exception:
+        if fn is not _subspace_min_tensor:
+            return _subspace_min_tensor(x, g, x_cp, c, free.to(x.dtype), lo, hi,
+                                        H.W, H.M, H.theta, H.m)
+        return x_cp
 
 
 def _cubic_min(a, fa, ga, b, fb, gb):

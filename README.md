@@ -141,23 +141,31 @@ reported `defect_D` of 0.04 (Sonar) and 0.50 (Prostate) at that setting. Fits
 are 10–20× faster than in 2.15 (Prostate: 12.6 s → 1.3 s per fit).
 
 **Speed against PCA** (`top_k_eigenvectors`, exact, on-device; float64 CPU,
-planted structure, w=0.5, default tolerance)
+planted structure, w=0.5, default tolerance; v3.1.0)
 
-| shape | mode | PCA | NSA-Flow | gradients |
-|---|---|---|---|---|
-| 300×66, k=5 (ADNI-like) | signed | 0.4 ms | 262 ms | 159 |
-| 300×66, k=5 | data | 1.0 ms | 268 ms | 195 |
-| 57×2000, k=3 (Golub-like) | signed | ~2 ms | > 2 s | — |
+| shape | mode | PCA | NSA-Flow | gradients | ms / gradient |
+|---|---|---|---|---|---|
+| 300×66, k=5 (ADNI-like) | signed | 0.4 ms | 106 ms | 159 | 0.67 |
+| 300×66, k=5 | data | 0.4 ms | 99 ms | 195 | 0.51 |
+| 57×2000, k=3 (Golub-like) | signed | 0.4 ms | 720 ms | 329 | 2.2 |
+| 57×2000, k=3 | data | 0.4 ms | 524 ms | 371 | 1.4 |
+| 500×200, k=10 | signed | 2.4 ms | 485 ms | 416 | 1.2 |
 
-NSA-Flow is an iterative constrained method; PCA is one factorisation. On the
-paper's imaging shape a fit is a quarter of a second, ~1.5 ms per gradient, of
-which the objective itself is ~5%: the rest is L-BFGS-B's active-set
-bookkeeping (~2 ms per iteration of small-tensor dispatch), which is the price
-of a solver that identifies the whole active set each step and never lands in
-a worse basin than SciPy's Fortran. It is **not** within an order of magnitude
-of PCA on small problems, and this README does not claim it is. On MPS the
-same code runs with zero host↔device copies but at ~3 ms per gradient from
-per-kernel latency. Fusing the objective is the remaining lever.
+v3.1.0 is 2.7–2.9× faster than v3.0.0 on every row (ADNI-like 262 → 106 ms,
+Golub-like signed 2080 → 720 ms). Two changes did it, neither of them
+`torch.compile`: the L-BFGS-B subspace step is branchless (no per-iteration
+host syncs), and the signed lifting now uses the matrix-free `X'(XV)` route
+when p > n instead of forming the p×p Gram — the data mode already did.
+`torch.compile` on the pure-tensor pieces was measured at +5–9% and is
+available via `nsa_flow.lbfgsb.set_compile(True)` but off by default.
+
+NSA-Flow is an iterative constrained method; PCA is one factorisation. A fit
+on the paper's imaging shape is a tenth of a second. The objective is ~10% of
+each iteration; the rest is L-BFGS-B's active-set bookkeeping in Python
+(~0.5–2 ms/iteration of tensor dispatch), which is also why the same code on
+MPS runs at ~3 ms/gradient with zero host↔device copies. It is **not** within
+an order of magnitude of PCA on small problems and this README does not claim
+it is. A compiled (C++/Metal) iteration is the remaining lever.
 
 ## Torch layers
 

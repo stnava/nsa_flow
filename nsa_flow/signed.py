@@ -201,8 +201,8 @@ from .diagnostics import basis_report, default_tol, make_result, orth_terms
 from .linalg import leading_eigenvectors
 from .optim import minimise
 from .project import project_nonneg
-from .reconstruct import (grad_reconstruction_fidelity, reconstruction_fidelity,
-                          relax_into_nonneg)
+from .reconstruct import (GramOperator, grad_reconstruction_fidelity,
+                          reconstruction_fidelity, relax_into_nonneg)
 from .solve import NSAResult
 
 __all__ = ["nsa_flow_signed", "consolidate_supports", "part_sparsity"]
@@ -306,8 +306,13 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="auto", orth="Cg", lobe=1.0,
         raise ValueError(f"w must lie in [0, 1]; got {w}")
 
     n, p = Xt.shape
-    S = Xt.transpose(-2, -1) @ Xt
-    c = S.diagonal().sum()
+    # Same shape rule as nsa_flow_data: matrix-free from X when p > n, else the
+    # p x p Gram.  This path used to form S = X'X unconditionally, so on the
+    # paper's own genomics shape (57 x 2000) every gradient was O(p^2 k) --
+    # measured 6.4 ms against 1.4 ms for the data mode on the same matrix.
+    ops = GramOperator(X=Xt) if p > n else GramOperator(S=Xt.transpose(-2, -1) @ Xt)
+    S = ops                                      # every consumer accepts the operator
+    c = ops.c
     if float(c) <= 0:
         raise ValueError("X is all zeros; fidelity is undefined")
 
@@ -340,7 +345,8 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="auto", orth="Cg", lobe=1.0,
                     "Use the default init='auto' or 'adaptive', which seeds both lobes "
                     "through an adaptive homotopy path.",
                     DeprecationWarning, stacklevel=2)
-            E = leading_eigenvectors(k, S=S)
+            E = (leading_eigenvectors(k, X=Xt) if ops.matrix_free
+                 else leading_eigenvectors(k, S=ops.S))
             W = torch.cat([E.clamp_min(0.0), (-E).clamp_min(0.0)], dim=-1).clone()
         elif init_strat == "adaptive":
             V0 = relax_into_nonneg(S, c, k, float(w), fast=True, trS=c)
