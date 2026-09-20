@@ -12,6 +12,9 @@ what it should buy, and the risk.
 
 ## A. Compiled L-BFGS-B iteration — the only thing that changes the speed story
 
+**Precise implementation plan: `docs/NATIVE_KERNEL_PLAN.md`.** Diagnosis is now
+exact: 314 aten ops/iteration at 2.2 µs; init, tol, threads, memory ruled out.
+
 **Where the time is.** Profiled ADNI-shaped fit: the objective is ~10% of each
 iteration; the other 90% is ~50 small tensor ops of L-BFGS-B bookkeeping
 dispatched from Python at 0.5–2 ms/iteration. `torch.compile` on the compilable
