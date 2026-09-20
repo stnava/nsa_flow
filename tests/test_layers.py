@@ -263,3 +263,55 @@ def test_w0_layer_initialises_like_nn_linear_not_orthogonally():
     G = W.T @ W
     off = (G - torch.diag(torch.diagonal(G))).abs().max().item()
     assert off > 1e-3            # orthogonal_ would make this ~1e-7
+
+
+# ------------------------------------------------------ performance contract (3.2.2)
+def test_eval_mode_caches_the_effective_weight_and_invalidates_on_update():
+    from torch.utils._python_dispatch import TorchDispatchMode
+
+    class Count(TorchDispatchMode):
+        def __init__(self): super().__init__(); self.n = 0
+        def __torch_dispatch__(self, f, t, a=(), k=None): self.n += 1; return f(*a, **(k or {}))
+
+    layer = NSAFlowLinear(66, 5, w=1.0, nonneg="hard")
+    x = torch.randn(8, 66)
+    layer.eval()
+    first = layer(x)
+    with Count() as c:
+        second = layer(x)
+    assert torch.equal(first, second)
+    assert c.n <= 3, f"eval forward issued {c.n} ops; cache is not engaged"   # nn.Linear issues 2
+    with torch.no_grad():
+        layer.weight.add_(1.0)                    # parameter changed -> cache must drop
+    third = layer(x)
+    assert not torch.equal(first, third)
+    layer.train()
+    with Count() as c:
+        layer(x)
+    assert c.n > 3                                # training recomputes
+
+
+def test_newton_schulz_polar_matches_eigh_projection():
+    from nsa_flow.layers import _project_scaled_stiefel_ns
+    from nsa_flow import project_scaled_stiefel
+    torch.manual_seed(0)
+    for k in (3, 8, 32):
+        M = torch.randn(200, k, dtype=F64)
+        a, b = _project_scaled_stiefel_ns(M), project_scaled_stiefel(M)
+        assert torch.allclose(a, b, atol=1e-9), (k, (a - b).abs().max().item())
+
+
+def test_nonneg_flow_first_trial_is_accepted_each_step():
+    """The D-scaled step must not overshoot: a fallback would double the cost."""
+    import nsa_flow.layers as LY
+    torch.manual_seed(0)
+    Y = torch.randn(66, 5).clamp_min(0)
+    calls = {"n": 0}
+    orig = LY._gram_stats
+    def counting(Yv): calls["n"] += 1; return orig(Yv)
+    LY._gram_stats = counting
+    try:
+        LY._defect_flow_nonneg(Y, 1.0)
+    finally:
+        LY._gram_stats = orig
+    assert calls["n"] == 1 + LY._FLOW_STEPS, calls   # one initial Gram + one per step, no halvings

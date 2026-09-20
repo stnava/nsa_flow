@@ -54,15 +54,65 @@ import torch.nn.functional as F
 from .energy import grad_stiefel_defect, stiefel_defect_normalised
 from .project import project_scaled_stiefel
 
+
+#: Newton-Schulz iterations for the layer's polar factor.  From a Frobenius
+#: scaling every singular value lies in (0, 1]; the iteration multiplies small
+#: ones by ~1.5 per step until they approach 1, then converges cubically.
+_NS_ITERS = 12
+
+
+def _polar_ns(Y, iters=_NS_ITERS):
+    r"""Orthonormal polar factor ``U`` of ``[..., p, k]`` by Newton-Schulz.
+
+    ``Q <- Q (3I - Q'Q) / 2`` from ``Q0 = Y / ||Y||_F``: six small matmuls per
+    iteration, no eigendecomposition, plain autograd (no custom backward), and
+    native on MPS where ``eigh`` is unimplemented.  Accuracy after 12 iterations
+    is ~1e-10 in ``||U'U - I||`` for the well-conditioned weights a layer holds;
+    :func:`nsa_flow.polar_factor` (eigh + Sylvester backward) remains the exact
+    reference and is what ``project_scaled_stiefel`` uses.
+    """
+    k = Y.shape[-1]
+    eye = torch.eye(k, dtype=Y.dtype, device=Y.device)
+    Q = Y / Y.flatten(-2).norm(dim=-1).clamp_min(torch.finfo(Y.dtype).tiny).reshape(*Y.shape[:-2], 1, 1)
+    for _ in range(iters):
+        Q = Q @ (1.5 * eye - 0.5 * (Q.transpose(-2, -1) @ Q))
+    return Q
+
+
+def _project_scaled_stiefel_ns(Y):
+    """``(<U, Y> / k) U`` with ``U`` from :func:`_polar_ns` -- the same map as
+    :func:`nsa_flow.project_scaled_stiefel`, without the eigensolver."""
+    k = Y.shape[-1]
+    U = _polar_ns(Y)
+    c = (U * Y).sum((-2, -1)) / k
+    return c.reshape(*c.shape, 1, 1) * U
+
+
+def _project_scaled_stiefel_layer(Y):
+    """The blend's projection, by device.
+
+    Where ``eigh`` is native (CPU, CUDA) the exact eigh-based projection is both
+    more accurate and faster (k=5: 31 us against 152 us for twelve Newton-Schulz
+    iterations).  Where it is not (MPS), Newton-Schulz avoids the on-device
+    Jacobi fallback and halves the forward (1227 -> 717 us measured).
+    """
+    from .linalg import _has_native_eigh
+    if _has_native_eigh(Y):
+        return project_scaled_stiefel(Y)
+    return _project_scaled_stiefel_ns(Y)
+
 #: Maximum steps of the in-orthant defect flow (reached at ``w = 1``).  ``w``
 #: selects how many of these fixed-size steps run, so the ``w = 0.5`` iterate
 #: is literally a prefix of the ``w = 1`` path: the defect is non-increasing in
 #: ``w`` by construction, not by tuning.  Resolution in ``w`` is ``1/_FLOW_STEPS``.
 _FLOW_STEPS = 8
-#: Fraction of ``||Y||_F`` moved per flow step along ``-grad Dtilde``, before the
-#: accept-on-decrease halvings.  Measured: 8 steps at 0.2 take a random 66 x 5
-#: start from Dtilde 0.10 to 0.002 (hard) and 0.48 to 0.003 (softplus).
-_FLOW_TAU = 0.2
+#: Step length per flow step is ``_FLOW_TAU * ||Y||_F * sqrt(Dtilde)`` along the
+#: unit descent direction.  Scaling by ``sqrt(Dtilde)`` shrinks the step as the
+#: defect vanishes, so the first trial is accepted on every step (measured: 0/8
+#: halvings at tau = 2.0 against 2/8 for a fixed-length step) and the cost per
+#: step is deterministic.  Measured: 8 steps take a random 66 x 5 start from
+#: Dtilde 0.10 to 0.0024 (hard) and 0.48 to 0.003 (softplus).
+_FLOW_TAU = 2.0
 
 
 def _nonneg(W, mode):
@@ -75,17 +125,34 @@ def _nonneg(W, mode):
     raise ValueError(f"nonneg must be one of None/'none', 'softplus', 'hard'/True; got {mode!r}")
 
 
+def _gram_stats(Y):
+    """``(S, t, N)`` = ``(Y'Y, tr S, ||S||_F^2)`` for ``[..., p, k]``."""
+    S = Y.transpose(-2, -1) @ Y
+    t = S.diagonal(dim1=-2, dim2=-1).sum(-1)
+    N = (S * S).sum((-2, -1))
+    return S, t, N
+
+
 def _defect_flow_nonneg(Y, w, steps=_FLOW_STEPS, tau=_FLOW_TAU):
     r"""``round(w * steps)`` projected-gradient steps on ``Dtilde`` inside ``Y >= 0``.
 
-    Operates on ``[..., p, k]``.  Each step moves a fraction ``tau`` of
-    ``||Y||_F`` along ``-grad Dtilde`` (scale-free: ``grad D`` scales as
-    ``1/||Y||``), clamps to the orthant, and is kept only if ``Dtilde`` did not
-    increase (the full step, then two halvings, are tried).  The step size does
-    not depend on ``w``; ``w`` sets the number of steps, so the iterate at a
+    Operates on ``[..., p, k]``.  Each step moves ``tau * ||Y||_F * sqrt(Dtilde)``
+    along ``-grad Dtilde / ||grad Dtilde||`` (scale-free: ``grad D`` scales as
+    ``1/||Y||``; the ``sqrt(Dtilde)`` factor shrinks the step as the defect
+    vanishes), clamps to the orthant, and is kept only if ``Dtilde`` did not
+    increase (a half step is tried once if the full step fails; in practice it
+    never does).  The step size
+    does not depend on ``w``; ``w`` sets the number of steps, so the iterate at a
     smaller ``w`` is a prefix of the path at a larger one and the defect is
-    non-increasing in ``w`` exactly.  Differentiable a.e. through the accepted
-    branch.
+    non-increasing in ``w`` exactly.  Differentiable a.e.
+
+    Cost.  ``D``, ``Dtilde`` and ``grad Dtilde`` all come from one Gram
+    ``S = Y'Y``: ``D = ||S||_F^2 / (tr S)^2 - 1/k`` and
+    ``grad D = (4 / t^2)(Y S - (||S||_F^2 / t) Y)``.  The Gram of the accepted
+    trial is carried into the next step, so a step costs one ``[p,k]x[k,p]``
+    product for the trial plus ``k x k`` algebra -- the first version recomputed
+    the Gram five times per step (defect, gradient, three acceptance tests) and
+    issued 417 tensor ops at ``w = 1``.
     """
     k = Y.shape[-1]
     n_steps = int(round(float(w) * steps))
@@ -93,29 +160,32 @@ def _defect_flow_nonneg(Y, w, steps=_FLOW_STEPS, tau=_FLOW_TAU):
         return Y
     inv_k = 1.0 / (1.0 - 1.0 / k)
     tiny = torch.finfo(Y.dtype).tiny
-    D = stiefel_defect_normalised(Y)
+    S, t, N = _gram_stats(Y)
+    D = (N / (t * t).clamp_min(tiny) - 1.0 / k) * inv_k
     for _ in range(n_steps):
-        g = grad_stiefel_defect(Y) * inv_k
+        t_ = t.reshape(*t.shape, 1, 1)
+        N_ = N.reshape(*N.shape, 1, 1)
+        g = (4.0 * inv_k / t_.pow(2).clamp_min(tiny)) * (Y @ S - (N_ / t_.clamp_min(tiny)) * Y)
         gn = g.flatten(-2).norm(dim=-1).clamp_min(tiny)
-        yn = Y.flatten(-2).norm(dim=-1)
-        eta = (tau * yn / gn).reshape(*yn.shape, 1, 1)
-        accepted = None
-        for _h in range(3):                        # full step, then two halvings
-            Y_try = (Y - eta * g).clamp_min(0.0)
-            D_try = stiefel_defect_normalised(Y_try)
-            ok = D_try <= D
-            if accepted is None:
-                accepted, Y_acc, D_acc = ok, Y_try, D_try
-            else:
-                take = ok & ~accepted
-                Y_acc = torch.where(take.reshape(*take.shape, 1, 1), Y_try, Y_acc)
-                D_acc = torch.where(take, D_try, D_acc)
-                accepted = accepted | ok
-            if bool(accepted.all()):
-                break
-            eta = eta * 0.5
-        Y = torch.where(accepted.reshape(*accepted.shape, 1, 1), Y_acc, Y)
-        D = torch.where(accepted, D_acc, D)
+        eta = (tau * t.sqrt() * D.clamp_min(0.0).sqrt() / gn).reshape(*t.shape, 1, 1)
+        Y1 = (Y - eta * g).clamp_min(0.0)
+        S1, t1, N1 = _gram_stats(Y1)
+        D1 = (N1 / (t1 * t1).clamp_min(tiny) - 1.0 / k) * inv_k
+        ok1 = D1 <= D
+        if bool(ok1.all()):
+            Y, S, t, N, D = Y1, S1, t1, N1, D1
+            continue
+        Y2 = (Y - 0.5 * eta * g).clamp_min(0.0)                    # one half step
+        S2, t2, N2 = _gram_stats(Y2)
+        D2 = (N2 / (t2 * t2).clamp_min(tiny) - 1.0 / k) * inv_k
+        ok2 = D2 <= D
+        m1 = ok1.reshape(*ok1.shape, 1, 1)
+        m2 = (ok2 & ~ok1).reshape(*ok2.shape, 1, 1)
+        Y = torch.where(m1, Y1, torch.where(m2, Y2, Y))
+        S = torch.where(m1, S1, torch.where(m2, S2, S))
+        t = torch.where(ok1, t1, torch.where(ok2 & ~ok1, t2, t))
+        N = torch.where(ok1, N1, torch.where(ok2 & ~ok1, N2, N))
+        D = torch.where(ok1, D1, torch.where(ok2 & ~ok1, D2, D))
     return Y
 
 
@@ -126,7 +196,7 @@ class _NSAMixin:
         if self.nonneg in (None, False, "none"):
             if self.w > 0.0:
                 M = self._pk_view(W)
-                M = (1.0 - self.w) * M + self.w * project_scaled_stiefel(M)
+                M = (1.0 - self.w) * M + self.w * _project_scaled_stiefel_layer(M)
                 W = self._pk_unview(M, W)
             return W
         # non-negativity first, then the in-orthant defect flow (see module doc)
@@ -151,6 +221,26 @@ class _NSAMixin:
                        nonneg=nonneg, **kwargs)
         self.weight.copy_(self._pk_unview(res.Y.to(self.weight.dtype), self.weight))
         return res
+
+    def _effective_cached(self, W):
+        """In ``eval()`` the weight does not change between forwards, so the
+        effective weight is computed once and reused until the parameter's
+        version counter moves or the module returns to ``train()``.  Turns an
+        inference forward back into ``nn.Linear`` cost."""
+        if self.training:
+            return self._effective(W)
+        key = (W._version, self.w, str(self.nonneg), W.device, W.dtype)
+        cache = getattr(self, "_eff_cache", None)
+        if cache is not None and cache[0] == key:
+            return cache[1]
+        with torch.no_grad():
+            eff = self._effective(W)
+        self._eff_cache = (key, eff)
+        return eff
+
+    def train(self, mode=True):
+        self._eff_cache = None
+        return super().train(mode)
 
     def defect(self):
         """Normalised Stiefel defect of the effective weight, in ``[0, 1]``."""
@@ -198,7 +288,7 @@ class NSAFlowLinear(_NSAMixin, nn.Module):
         return M.transpose(-2, -1)
 
     def effective_weight(self):
-        return self._effective(self.weight)
+        return self._effective_cached(self.weight)
 
     def forward(self, x):
         return F.linear(x, self.effective_weight(), self.bias)
@@ -232,7 +322,7 @@ class NSAFlowConv2d(_NSAMixin, nn.Conv2d):
         return M.transpose(0, 1).reshape(like.shape)
 
     def effective_weight(self):
-        return self._effective(self.weight)
+        return self._effective_cached(self.weight)
 
     def forward(self, x):
         return self._conv_forward(x, self.effective_weight(), self.bias)
@@ -262,7 +352,7 @@ class NSAFlowLayer(nn.Module):
             )
         if self.nonneg in (None, False, "none"):
             if self.w > 0.0:
-                Y = (1.0 - self.w) * Y + self.w * project_scaled_stiefel(Y)
+                Y = (1.0 - self.w) * Y + self.w * _project_scaled_stiefel_layer(Y)
             return Y
         return _defect_flow_nonneg(_nonneg(Y, self.nonneg), self.w)
 

@@ -211,6 +211,20 @@ to ≈0.69 everywhere). At `w=0` the layer initialises exactly like `nn.Linear`.
 
 `NSAFlowLayer` applies the same map per sample to a `[B, p, k]` batch.
 
+**Cost** (66×5, one CPU thread; from `experiments`-style timing):
+
+```
+nn.Linear fwd 10 us
+nonneg=None     w=0.5: train fwd   61 us (was 58) | eval fwd 9 us
+nonneg=hard     w=0.5: train fwd  377 us (was 539) | eval fwd 9 us
+nonneg=hard     w=1.0: train fwd  731 us (was 719) | eval fwd 9 us
+nonneg=softplus w=1.0: train fwd  649 us (was 842) | eval fwd 9 us
+MPS blend w=0.5 831 us (was 1227) | MPS hard w=1 5383 us (was 6372)
+```
+
+In `eval()` the effective weight is cached until the parameter changes, so inference costs the same as `nn.Linear`. The blend uses the exact `eigh` projection where `eigh` is native and Newton–Schulz where it is not (MPS). The non-negative flow at `w=1` is ~8 fixed steps of ~30 tensor ops; its remaining cost is dispatch, not arithmetic — the same ceiling the solver hit — and `torch.compile` is the next lever for it, not threading.
+
+
 ## API
 
 | Class / Function | Purpose |
