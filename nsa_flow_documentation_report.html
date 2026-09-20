@@ -180,7 +180,7 @@
       <div class="stat-label">Strict -W Build Status</div>
     </div>
     <div class="stat-card">
-      <div class="stat-val">392 / 392</div>
+      <div class="stat-val">399 / 399</div>
       <div class="stat-label">Full Test Suite Passed</div>
     </div>
     <div class="stat-card">
@@ -203,7 +203,7 @@ AttributeError: 'function' object has no attribute 'NSAFlowLinear'
   </div>
 
   <div class="card">
-    <h2>2. Deep Dive: What <code>NSAFlowLinear</code> Does</h2>
+    <h2>2. Deep Dive: What <code>NSAFlowLinear</code> Does (v3.3.1 <code>operator="auto"</code>)</h2>
     <p><code>nsa_flow.layers.NSAFlowLinear</code> is a drop-in replacement for PyTorch's <code>nn.Linear</code> (matching weight shape <code>[out_features, in_features]</code> and <code>state_dict</code>) whose $k = \text{out\_features}$ filters are driven toward orthogonality and disjoint feature clustering:</p>
     <table>
       <thead>
@@ -211,21 +211,27 @@ AttributeError: 'function' object has no attribute 'NSAFlowLinear'
           <th>Mode</th>
           <th>Configuration</th>
           <th>Mathematical Mechanism</th>
-          <th>Execution Cost</th>
+          <th>Execution Cost & Properties</th>
         </tr>
       </thead>
       <tbody>
         <tr>
-          <td><strong>Forward Parameterization</strong></td>
-          <td><code>w &gt; 0, nonneg=None</code></td>
-          <td>Stiefel blend: $W_{\text{eff}} = (1-w)W + w P(W)$ via Newton-Schulz or polar factor</td>
-          <td>Fast; cached in <code>eval()</code></td>
+          <td><strong>Auto Signed (Default)</strong></td>
+          <td><code>operator="auto", nonneg=None</code></td>
+          <td>Closed-form Stiefel blend: $W_{\text{eff}} = (1-w)W + w P(W)$ via polar factor / Newton-Schulz</td>
+          <td>~60 &micro;s forward; fully differentiable, cached in <code>eval()</code></td>
         </tr>
         <tr>
-          <td><strong>Non-Negative Defect Blend</strong></td>
-          <td><code>w &gt; 0, nonneg="hard"</code></td>
-          <td>Continuous blend $W_{\text{eff}} = (1-w)\max(0, W) + w P_{\text{nonneg}}(W)$ with $P$ run for <code>n_steps</code> (default 8)</td>
-          <td>Branchless & compilable; strictly monotonic across full $[0, 1]$ range</td>
+          <td><strong>Auto Non-Negative (Default)</strong></td>
+          <td><code>operator="auto", nonneg="hard"</code></td>
+          <td>Exact anchored proximal solver <code>nsa_flow(mode="anchored", fidelity="anchor")</code> with STE gradients</td>
+          <td>Smooth soft-thresholding shrinkage; produces monotonic exact zeros across $[0, 1]$; reaches true manifold projection at $w \to 1.0$; cached in <code>eval()</code> (0.005 ms)</td>
+        </tr>
+        <tr>
+          <td><strong>Euler Flow Fallback</strong></td>
+          <td><code>operator="flow"</code></td>
+          <td>Continuous unrolled Euler blend $W_{\text{eff}} = (1-w)\max(0, W) + w P_{\text{nonneg}}(W)$</td>
+          <td>Fully in-graph autograd backward pass; non-zero support preserved</td>
         </tr>
         <tr>
           <td><strong>Penalty Regularizer</strong></td>
@@ -234,10 +240,10 @@ AttributeError: 'function' object has no attribute 'NSAFlowLinear'
           <td>$\mathcal{O}(p k^2)$ Gram algebra, 0 factorizations</td>
         </tr>
         <tr>
-          <td><strong>Exact Certified Solver</strong></td>
-          <td><code>operator="solver"</code></td>
-          <td>Exact anchored <code>nsa_flow(mode="anchored", fidelity="anchor")</code> prox in forward pass (identical to <code>project_()</code>) + STE for autograd</td>
-          <td>~0.5ms; 100% mathematical parity with <code>nsa_flow</code>, smooth support shrinkage across $[0,1]$</td>
+          <td><strong>In-Place Prox Projection</strong></td>
+          <td><code>layer.project_(w=...)</code></td>
+          <td>Exact anchored prox replacement of <code>layer.weight</code> between optimizer steps</td>
+          <td>Exact fixed point of anchored proximal gradient iteration</td>
         </tr>
       </tbody>
     </table>
