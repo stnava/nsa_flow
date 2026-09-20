@@ -340,3 +340,107 @@ def test_compiled_flow_matches_eager_for_every_layer():
     c = NSAFlowConv2d(3, 4, 3, w=0.5, nonneg="hard", compile=True)
     assert torch.isfinite(c(torch.randn(2, 3, 8, 8))).all()
     assert "compile=True" in repr(NSAFlowLinear(4, 2, compile=True))
+
+
+# ------------------------------------------------------------- operator=solver
+def test_operator_solver_parity_and_monotonicity_across_w():
+    from nsa_flow import nsa_flow
+    torch.manual_seed(42)
+    W0 = torch.randn(5, 30)
+
+    ds, zs = [], []
+    ws = [0.0, 0.1, 0.35, 0.5, 0.7, 0.9, 0.99]
+    for w in ws:
+        layer = NSAFlowLinear(30, 5, bias=False, w=w, nonneg="hard", operator="solver")
+        with torch.no_grad():
+            layer.weight.copy_(W0)
+        eff = layer.effective_weight()
+        ref = nsa_flow(W0.T.double(), w=w, mode="anchored", fidelity="anchor", nonneg=True).Y
+        assert torch.allclose(eff.T.double(), ref, atol=1e-5)
+        ds.append(layer.defect().item())
+        zs.append(float((eff == 0).float().mean()))
+
+    # Defect decreases monotonically across the entire range
+    assert all(ds[i + 1] <= ds[i] + 1e-12 for i in range(len(ds) - 1))
+    # Sparsity / zeros increases across w (no saturation at w=0.35)
+    assert zs[-1] > zs[2] > zs[0]
+    assert ds[-1] < 1e-4
+
+
+def test_operator_solver_gradients_flow_via_ste():
+    layer = NSAFlowLinear(20, 5, w=0.5, nonneg="hard", operator="solver")
+    x = torch.randn(4, 20, requires_grad=True)
+    out = layer(x)
+    out.sum().backward()
+    assert layer.weight.grad is not None and torch.isfinite(layer.weight.grad).all()
+    assert layer.weight.grad.abs().sum() > 0
+    assert x.grad is not None
+
+
+def test_operator_solver_eval_caching():
+    layer = NSAFlowLinear(20, 5, w=0.5, nonneg="hard", operator="solver")
+    layer.eval()
+    x = torch.randn(2, 20)
+    out1 = layer(x)
+    out2 = layer(x)
+    assert torch.equal(out1, out2)
+
+
+def test_operator_invalid_raises():
+    with pytest.raises(ValueError, match="operator must be 'flow' or 'solver'"):
+        NSAFlowLinear(20, 5, operator="invalid_op")
+    with pytest.raises(ValueError, match="operator must be 'flow' or 'solver'"):
+        NSAFlowConv2d(3, 4, 3, operator="invalid_op")
+    with pytest.raises(ValueError, match="operator must be 'flow' or 'solver'"):
+        NSAFlowLayer(operator="invalid_op")
+
+
+def test_flow_blends_smoothly_across_fine_grained_w():
+    """Under nonneg='hard', w is a continuous blend coefficient:
+    W_eff = (1 - w) max(0, W) + w P(max(0, W)).
+    Every change in w must produce a distinct, monotonically lower defect.
+    """
+    from nsa_flow import cosine_matrix
+    torch.manual_seed(42)
+    W0 = torch.randn(5, 40)
+    ws = [0.0, 0.05, 0.08, 0.20, 0.35, 0.60, 0.99]
+    ds, offs = [], []
+    for w in ws:
+        layer = NSAFlowLinear(40, 5, bias=False, w=w, nonneg="hard", operator="flow")
+        with torch.no_grad():
+            layer.weight.copy_(W0)
+        eff = layer.effective_weight()
+        assert (eff >= 0).all()
+        ds.append(layer.defect().item())
+        C = cosine_matrix(eff.T)
+        off = (C.sum() - torch.diagonal(C).sum()) / (5 * 4)
+        offs.append(off.item())
+
+    # Defect strictly decreases across every step (no flat saturation at w=0.35)
+    for i in range(len(ds) - 1):
+        assert ds[i + 1] < ds[i], f"Defect failed to strictly decrease between w={ws[i]} and w={ws[i+1]}: {ds}"
+        assert offs[i + 1] < offs[i], f"Overlap failed to strictly decrease between w={ws[i]} and w={ws[i+1]}: {offs}"
+
+
+def test_decoupled_n_steps():
+    """n_steps controls the flow iteration budget independently of w."""
+    torch.manual_seed(0)
+    W0 = torch.randn(5, 30)
+    layer1 = NSAFlowLinear(30, 5, bias=False, w=0.5, nonneg="hard", n_steps=2)
+    layer2 = NSAFlowLinear(30, 5, bias=False, w=0.5, nonneg="hard", n_steps=8)
+    with torch.no_grad():
+        layer1.weight.copy_(W0)
+        layer2.weight.copy_(W0)
+    # Both layers share w=0.5, but 8 steps pushes P further towards the manifold
+    assert layer2.defect().item() <= layer1.defect().item()
+
+
+def test_forward_solver_matches_project_call():
+    """operator='solver' forward pass and project_() evaluate the exact same operator."""
+    torch.manual_seed(42)
+    layer = NSAFlowLinear(30, 5, bias=False, w=0.4, nonneg="hard", operator="solver")
+    with torch.no_grad():
+        layer.weight.copy_(torch.randn(5, 30))
+    eff = layer.effective_weight()
+    layer.project_()
+    assert torch.allclose(layer.weight, eff, atol=1e-5)

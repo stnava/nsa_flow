@@ -12,7 +12,7 @@ own idea of what ``grad_map`` measured.  That is now one implementation per
 
 The contract
 ------------
-Every ``_<name>`` routine below takes
+Every ``_<name>`` routine below takes::
 
     (Y0, energy_fn, grad_fn, proj, *, max_iter, tol, ...)
 

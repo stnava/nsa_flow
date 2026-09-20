@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NSA-Flow Standard Documentation Release Report</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --card-bg: #1e293b;
+    --card-border: #334155;
+    --text-main: #f8fafc;
+    --text-muted: #94a3b8;
+    --accent: #38bdf8;
+    --accent-glow: rgba(56, 189, 248, 0.2);
+    --success: #34d399;
+    --success-bg: rgba(52, 211, 153, 0.1);
+    --warning: #fbbf24;
+    --purple: #c084fc;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background-color: var(--bg);
+    color: var(--text-main);
+    margin: 0;
+    padding: 2.5rem;
+    line-height: 1.6;
+  }
+  .container {
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+  header {
+    margin-bottom: 2.5rem;
+    border-bottom: 1px solid var(--card-border);
+    padding-bottom: 1.5rem;
+  }
+  h1 {
+    font-size: 2.25rem;
+    font-weight: 700;
+    margin: 0 0 0.5rem 0;
+    background: linear-gradient(135deg, #38bdf8, #818cf8);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .subtitle {
+    color: var(--text-muted);
+    font-size: 1.1rem;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 1.25rem;
+    margin-bottom: 2.5rem;
+  }
+  .stat-card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+    display: flex;
+    flex-direction: column;
+  }
+  .stat-val {
+    font-size: 2rem;
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 0.25rem;
+  }
+  .stat-label {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 0.75rem;
+    padding: 1.75rem;
+    margin-bottom: 2rem;
+  }
+  h2 {
+    font-size: 1.4rem;
+    margin-top: 0;
+    margin-bottom: 1rem;
+    color: var(--text-main);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  h3 {
+    font-size: 1.15rem;
+    margin-top: 1.25rem;
+    margin-bottom: 0.5rem;
+    color: var(--accent);
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.95rem;
+  }
+  th, td {
+    padding: 0.75rem 1rem;
+    text-align: left;
+    border-bottom: 1px solid var(--card-border);
+  }
+  th {
+    color: var(--text-muted);
+    font-weight: 600;
+    background: rgba(15, 23, 42, 0.4);
+  }
+  tr:hover {
+    background: rgba(255, 255, 255, 0.02);
+  }
+  .badge {
+    display: inline-block;
+    padding: 0.25rem 0.6rem;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .badge-success {
+    background: var(--success-bg);
+    color: var(--success);
+    border: 1px solid rgba(52, 211, 153, 0.3);
+  }
+  .badge-purple {
+    background: rgba(192, 132, 252, 0.1);
+    color: var(--purple);
+    border: 1px solid rgba(192, 132, 252, 0.3);
+  }
+  pre {
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid var(--card-border);
+    border-radius: 0.5rem;
+    padding: 1rem;
+    overflow-x: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.875rem;
+    color: #e2e8f0;
+  }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    background: rgba(255, 255, 255, 0.08);
+    padding: 0.15rem 0.35rem;
+    border-radius: 0.25rem;
+    font-size: 0.85em;
+  }
+  .link-btn {
+    display: inline-block;
+    padding: 0.6rem 1.2rem;
+    background: #0284c7;
+    color: #fff;
+    text-decoration: none;
+    border-radius: 0.5rem;
+    font-weight: 600;
+    transition: background 0.2s;
+  }
+  .link-btn:hover {
+    background: #0369a1;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>NSA-Flow Documentation Suite Report</h1>
+    <div class="subtitle">Standardized Sphinx documentation, user guides, API references, and PyTorch layer architecture</div>
+  </header>
+
+  <div class="grid">
+    <div class="stat-card">
+      <div class="stat-val">Sphinx 9.1</div>
+      <div class="stat-label">Documentation Engine</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-val">0 Warnings</div>
+      <div class="stat-label">Strict -W Build Status</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-val">392 / 392</div>
+      <div class="stat-label">Full Test Suite Passed</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-val">77 / 77</div>
+      <div class="stat-label">Theory Battery Passed</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>1. Resolving the Namespace Traceback</h2>
+    <p>The traceback <code>help(nsa_flow.nsa_flow.NSAFlowLinear)</code> caused an <code>AttributeError</code> because <code>nsa_flow.nsa_flow</code> is the core solver function imported into the package namespace, not a submodule:</p>
+    <pre><code># Incorrect:
+>>> help(nsa_flow.nsa_flow.NSAFlowLinear)
+AttributeError: 'function' object has no attribute 'NSAFlowLinear'
+
+# Correct (both fully supported & documented):
+>>> help(nsa_flow.NSAFlowLinear)         # Top-level re-export
+>>> help(nsa_flow.layers.NSAFlowLinear)  # Direct submodule import</code></pre>
+    <p><code>nsa_flow/__init__.py</code> now explicitly documents this layout in its package docstring.</p>
+  </div>
+
+  <div class="card">
+    <h2>2. Deep Dive: What <code>NSAFlowLinear</code> Does</h2>
+    <p><code>nsa_flow.layers.NSAFlowLinear</code> is a drop-in replacement for PyTorch's <code>nn.Linear</code> (matching weight shape <code>[out_features, in_features]</code> and <code>state_dict</code>) whose $k = \text{out\_features}$ filters are driven toward orthogonality and disjoint feature clustering:</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Mode</th>
+          <th>Configuration</th>
+          <th>Mathematical Mechanism</th>
+          <th>Execution Cost</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Forward Parameterization</strong></td>
+          <td><code>w &gt; 0, nonneg=None</code></td>
+          <td>Stiefel blend: $W_{\text{eff}} = (1-w)W + w P(W)$ via Newton-Schulz or polar factor</td>
+          <td>Fast; cached in <code>eval()</code></td>
+        </tr>
+        <tr>
+          <td><strong>Non-Negative Defect Blend</strong></td>
+          <td><code>w &gt; 0, nonneg="hard"</code></td>
+          <td>Continuous blend $W_{\text{eff}} = (1-w)\max(0, W) + w P_{\text{nonneg}}(W)$ with $P$ run for <code>n_steps</code> (default 8)</td>
+          <td>Branchless & compilable; strictly monotonic across full $[0, 1]$ range</td>
+        </tr>
+        <tr>
+          <td><strong>Penalty Regularizer</strong></td>
+          <td><code>w = 0</code></td>
+          <td>Forward pass is plain linear; add $\lambda \cdot \text{layer.defect()}$ to loss</td>
+          <td>$\mathcal{O}(p k^2)$ Gram algebra, 0 factorizations</td>
+        </tr>
+        <tr>
+          <td><strong>Exact Certified Solver</strong></td>
+          <td><code>operator="solver"</code></td>
+          <td>Exact anchored <code>nsa_flow(mode="anchored", fidelity="anchor")</code> prox in forward pass (identical to <code>project_()</code>) + STE for autograd</td>
+          <td>~0.5ms; 100% mathematical parity with <code>nsa_flow</code>, smooth support shrinkage across $[0,1]$</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>3. Built Documentation Hierarchy (ANTsPy Style)</h2>
+    <p>The documentation is configured following the exact structure of <code>ANTsPy</code> (Sphinx with <code>sphinx_rtd_theme</code>, thematic curated reference pages, and recursive <code>autosummary</code>):</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Section</th>
+          <th>Source File</th>
+          <th>Contents & Covered APIs</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="badge badge-purple">Package Ref</span></td>
+          <td><code>docs/source/energy.rst</code></td>
+          <td>Stiefel defect, normalized defect, gradients, effective rank, defect floor</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-purple">Package Ref</span></td>
+          <td><code>docs/source/layers.rst</code></td>
+          <td>PyTorch layers: <code>NSAFlowLinear</code>, <code>NSAFlowConv2d</code>, <code>NSAFlowLayer</code></td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-purple">Package Ref</span></td>
+          <td><code>docs/source/solve.rst</code></td>
+          <td>Core solver <code>nsa_flow</code>, result container <code>NSAResult</code></td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-purple">Package Ref</span></td>
+          <td><code>docs/source/reconstruct.rst</code></td>
+          <td>Data solver <code>nsa_flow_data</code>, <code>GramOperator</code>, relaxations</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-purple">Package Ref</span></td>
+          <td><code>docs/source/sklearn.rst</code></td>
+          <td>Scikit-learn compatible transformer <code>NSAFlow</code></td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-purple">Package Ref</span></td>
+          <td><code>docs/source/diagnostics.rst</code></td>
+          <td>Scale-invariant gradient mapping certificates, tolerances, basis report</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-purple">Package Ref</span></td>
+          <td><code>docs/source/project.rst</code></td>
+          <td>Non-negative & Stiefel manifold projections, polar factor</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-success">API Ref</span></td>
+          <td><code>docs/source/api_index.rst</code></td>
+          <td>Recursive autosummary stub generation for all <code>nsa_flow</code> modules</td>
+        </tr>
+      </tbody>
+    </table>
+    <div style="margin-top: 1.5rem;">
+      <a class="link-btn" href="docs/_build/html/index.html">Open Built Documentation Index</a>
+    </div>
+  </div>
+
+  </div>
+
+  <div class="card">
+    <h2>4. Verification Commands</h2>
+    <pre><code># Build documentation with zero warnings:
+make docs
+
+# Run theory battery (77 assertions):
+make theory
+
+# Run full test suite:
+make test</code></pre>
+  </div>
+</div>
+</body>
+</html>

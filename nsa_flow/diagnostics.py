@@ -97,7 +97,7 @@ def default_tol(dtype):
 
     Chosen by measurement, not by taste.  On the medium synthetic grid
     (anchored / data / signed x planted / random, k=10) against a reference
-    solved to ``1e-9``:
+    solved to ``1e-9``::
 
         tol     support Jaccard (min)   min |cos|   gradient evals saved
         1e-6           0.985            identical        30 - 50 %
@@ -223,25 +223,21 @@ def basis_report(Y, rel_tol=1e-8):
     Returned on *every* result from *every* mode, so a benchmark table never has
     to decide which defect it is looking at and can never mix two of them.
 
-    Keys
-    ----
-    ``defect_D``, ``defect_Cg``, ``defect_C``, ``defect_Coff``
-        The orthogonality functionals of :data:`ORTH`, all in ``[0, 1]``, all
-        evaluated on the *same* returned basis.  ``defect_D`` is the one to use
-        when comparing against PCA, NMF or sparse PCA, because it is the only
-        one of the four that is not invariant to column rescaling and is
-        therefore the strictest.
-    ``raw_defect``
-        Unnormalised ``D = ||G - I/k||_F^2``, in ``[0, 1 - 1/k]``.  Kept because
-        the theory bounds are stated for it.
-    ``effective_rank``
-        Participation ratio ``k / (k D + 1)``, in ``[1, k]``.
-    ``column_norm_ratio``
-        ``max_i ||y_i|| / min_i ||y_i||``.  ``D`` charges for this and the other
-        three functionals do not, which is the whole reason they differ.
-    ``sparsity``, ``max_support``, ``mean_support``, ``n_dead_columns``,
-    ``support_overlap``
-        From :func:`support_stats`.
+    Returns:
+        dict: Mapping containing canonical diagnostics:
+
+        - ``defect_D``, ``defect_Cg``, ``defect_C``, ``defect_Coff``: The orthogonality
+          functionals of :data:`ORTH`, all in ``[0, 1]``, all evaluated on the
+          *same* returned basis.  ``defect_D`` is the one to use when comparing
+          against PCA, NMF or sparse PCA, because it is the only one of the four
+          that is not invariant to column rescaling and is therefore the strictest.
+        - ``raw_defect``: Unnormalised ``D = ||G - I/k||_F^2``, in ``[0, 1 - 1/k]``.
+          Kept because the theory bounds are stated for it.
+        - ``effective_rank``: Participation ratio ``k / (k D + 1)``, in ``[1, k]``.
+        - ``column_norm_ratio``: ``max_i ||y_i|| / min_i ||y_i||``.  ``D`` charges for
+          this and the other three functionals do not, which is the whole reason they differ.
+        - ``sparsity``, ``max_support``, ``mean_support``, ``n_dead_columns``,
+          ``support_overlap``: From :func:`support_stats`.
     """
     out = {f"defect_{name}": float(fn(Y)) for name, (fn, _, _) in ORTH.items()}
     out["raw_defect"] = float(stiefel_defect(Y))

@@ -136,7 +136,7 @@ def _fid_and_grad(V, ops, c, trS=None):
 
 
 def reconstruction_fidelity(V, S, c, trS=None):
-    r"""``||X - X V V'||_F^2 / ||X||_F^2``, expanded as ``tr S - 2 tr(V'SV) + tr(V'SV . V'V)``.
+    r"""``||X - X V V'||_F^2 / ||X||_F^2``, expanded as ``tr S - 2 tr(V'SV) + tr(V'SV * V'V)``.
 
     ``S`` may be the ``p x p`` Gram matrix or a :class:`GramOperator` wrapping ``X``.
     """

@@ -1,4 +1,4 @@
-.PHONY: help install test theory experiments tables paper rmd-paper dist release clean
+.PHONY: help install test theory experiments tables paper rmd-paper dist release clean docs docs-clean
 
 help:
 	@echo "install      - editable install with experiment + test extras"
@@ -7,6 +7,8 @@ help:
 	@echo "experiments  - run all paper experiments -> paper/results, paper/figs"
 	@echo "tables       - rebuild paper/results/*.tex from the saved CSVs (cheap)"
 	@echo "new-benchmarks - run Tecator, Sonar & Prostate benchmarks + sweeps + tables"
+	@echo "docs         - build Sphinx HTML documentation -> docs/_build/html"
+	@echo "docs-clean   - remove Sphinx build artefacts"
 	@echo "paper        - build paper/nsaflow.pdf from existing results"
 	@echo "rmd-paper    - build paper/nsa_flow.pdf from Rmd"
 	@echo "dist         - build and check distribution wheels & sdist"
@@ -37,6 +39,12 @@ new-benchmarks:
 	PYTHONPATH=. python experiments/sweep_new_public_data.py
 	PYTHONPATH=. python experiments/plot_new_public_benchmarks.py
 	PYTHONPATH=. python experiments/build_new_public_tables.py
+
+docs:
+	PYTHONPATH=. sphinx-build -b html docs/source docs/_build/html
+
+docs-clean:
+	rm -rf docs/_build
 
 paper:
 	cd paper && latexmk -pdf -quiet nsaflow.tex

@@ -3,13 +3,13 @@ r"""Factorisations that stay on the device.
 The initialisers need the top-``k`` eigenvectors of ``S = X'X``.  The obvious
 calls do not survive a GPU:
 
-===================  ==========================================================
-``linalg.eigh``      ``NotImplementedError`` on MPS.
-``linalg.svd``       "works" on MPS only by *silently falling back to the CPU*
-                     (``aten::linalg_svd ... will fall back to run on the CPU``),
-                     so it is a hidden round trip, which is worse than an error.
-``linalg.matrix_rank``  built on ``svd``; same problem.
-===================  ==========================================================
+========================  ==========================================================
+``linalg.eigh``           ``NotImplementedError`` on MPS.
+``linalg.svd``            "works" on MPS only by *silently falling back to the CPU*
+                          (``aten::linalg_svd ... will fall back to run on the CPU``),
+                          so it is a hidden round trip, which is worse than an error.
+``linalg.matrix_rank``    built on ``svd``; same problem.
+========================  ==========================================================
 
 ``qr``, ``cholesky``, ``cholesky_solve`` and ``solve`` *are* native on MPS, and
 everything here is built from those plus elementwise algebra.  Nothing in this
@@ -79,7 +79,7 @@ def jacobi_eigh(A, sweeps=12, tol=None):
     convention so the two are drop-in interchangeable.
 
     Each round annihilates ``n/2`` disjoint off-diagonal pairs simultaneously.
-    For the pair ``(p, q)`` the rotation angle is the classical
+    For the pair ``(p, q)`` the rotation angle is the classical::
 
         theta = (a_qq - a_pp) / (2 a_pq),
         t = sign(theta) / (|theta| + sqrt(theta^2 + 1)),

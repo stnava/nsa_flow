@@ -133,35 +133,40 @@ def _gram_stats(Y):
     return S, t, N
 
 
-def _defect_flow_nonneg(Y, w, steps=_FLOW_STEPS, tau=_FLOW_TAU):
-    r"""``round(w * steps)`` projected-gradient steps on ``Dtilde`` inside ``Y >= 0``.
+def _defect_flow_nonneg(Y, steps=_FLOW_STEPS, tau=_FLOW_TAU):
+    r"""In-orthant projected-gradient defect flow on ``Dtilde`` inside ``Y >= 0``.
 
-    Operates on ``[..., p, k]``.  Each step moves ``tau * ||Y||_F * sqrt(Dtilde)``
-    along ``-grad Dtilde / ||grad Dtilde||`` (scale-free: ``grad D`` scales as
-    ``1/||Y||``; the ``sqrt(Dtilde)`` factor shrinks the step as the defect
-    vanishes), clamps to the orthant, and is kept only if ``Dtilde`` did not
-    increase (branchless ``where``, so the flow is a single compilable graph).  The step size
-    does not depend on ``w``; ``w`` sets the number of steps, so the iterate at a
-    smaller ``w`` is a prefix of the path at a larger one and the defect is
-    non-increasing in ``w`` exactly.  Differentiable a.e.
+    Operates on ``[..., p, k]``. Each step moves ``tau * ||Y||_F * sqrt(Dtilde)``
+    along ``-grad Dtilde / ||grad Dtilde||``, clamps to the orthant, and is kept
+    only if ``Dtilde`` did not increase (branchless ``where``, so the flow is a
+    single compilable graph). Differentiable a.e.
 
-    Cost.  ``D``, ``Dtilde`` and ``grad Dtilde`` all come from one Gram
-    ``S = Y'Y``: ``D = ||S||_F^2 / (tr S)^2 - 1/k`` and
-    ``grad D = (4 / t^2)(Y S - (||S||_F^2 / t) Y)``.  The Gram of the accepted
-    trial is carried into the next step, so a step costs one ``[p,k]x[k,p]``
-    product for the trial plus ``k x k`` algebra -- the first version recomputed
-    the Gram five times per step (defect, gradient, three acceptance tests) and
-    issued 417 tensor ops at ``w = 1``.
+    Cost. ``D``, ``Dtilde`` and ``grad Dtilde`` all come from one Gram
+    ``S = Y'Y``. Each accepted step costs one ``[p,k]x[k,p]`` product for the
+    trial plus ``k x k`` algebra.
+
+    Parameters
+    ----------
+    Y : Tensor
+        Input non-negative tensor.
+    steps : int or float, default 8
+        Number of flow iterations. If a float <= 1.0 is passed (for legacy
+        compatibility where w was passed), it is scaled by 8.
+    tau : float, default 0.5
+        Step size scaling factor.
     """
+    if isinstance(steps, float):
+        steps = int(round(steps * _FLOW_STEPS)) if steps <= 1.0 else int(round(steps))
+    else:
+        steps = int(steps)
     k = Y.shape[-1]
-    n_steps = int(round(float(w) * steps))
-    if n_steps <= 0 or k <= 1:
+    if steps <= 0 or k <= 1:
         return Y
     inv_k = 1.0 / (1.0 - 1.0 / k)
     tiny = torch.finfo(Y.dtype).tiny
     S, t, N = _gram_stats(Y)
     D = (N / (t * t).clamp_min(tiny) - 1.0 / k) * inv_k
-    for _ in range(n_steps):
+    for _ in range(steps):
         t_ = t.reshape(*t.shape, 1, 1)
         N_ = N.reshape(*N.shape, 1, 1)
         g = (4.0 * inv_k / t_.pow(2).clamp_min(tiny)) * (Y @ S - (N_ / t_.clamp_min(tiny)) * Y)
@@ -170,12 +175,6 @@ def _defect_flow_nonneg(Y, w, steps=_FLOW_STEPS, tau=_FLOW_TAU):
         Y1 = (Y - eta * g).clamp_min(0.0)
         S1, t1, N1 = _gram_stats(Y1)
         D1 = (N1 / (t1 * t1).clamp_min(tiny) - 1.0 / k) * inv_k
-        # Branchless acceptance: keep the trial where it did not increase the
-        # defect, else keep Y.  No Python `if` on a tensor, so torch.compile
-        # captures the whole flow as one graph (an `if bool(ok.all())` here was
-        # a graph break per step and made compilation a net loss).  With the
-        # D-scaled step the trial is accepted essentially always; the guard is
-        # what makes monotonicity a property rather than an observation.
         ok = D1 <= D
         okm = ok.reshape(*ok.shape, 1, 1)
         Y = torch.where(okm, Y1, Y)
@@ -190,21 +189,7 @@ _COMPILED_FLOW = None
 
 
 def _flow_fn(compile_):
-    """The defect flow, eagerly or as one compiled graph (cached process-wide).
-
-    The flow has no data-dependent control flow (fixed ``round(8w)`` steps,
-    branchless acceptance), so ``torch.compile(..., fullgraph=True)`` captures
-    all of it as a single kernel.  Measured on a 66 x 5 weight at ``w = 1``:
-    393 us eager -> 66 us compiled for the flow alone; 732 -> 154 us for the
-    whole layer forward.  Opt-in because the first call costs 1-5 s and the
-    graph is specialised per shape, dtype and ``w``.
-
-    Dynamo's default recompile limit is 8 graphs per function; a ``w`` sweep
-    alone has nine values, and hitting the limit under ``fullgraph=True``
-    *raises* from ``forward``.  Opting in raises the limit to 64, and any
-    compile-time failure falls back to eager with a warning -- a layer's
-    forward never fails because of the compiler.
-    """
+    """The defect flow, eagerly or as one compiled graph (cached process-wide)."""
     global _COMPILED_FLOW
     if not compile_:
         return _defect_flow_nonneg
@@ -214,35 +199,57 @@ def _flow_fn(compile_):
             getattr(torch._dynamo.config, "recompile_limit", 8), 64)
         compiled = torch.compile(_defect_flow_nonneg, fullgraph=True, dynamic=False)
 
-        def guarded(Y, w):
+        def guarded(Y, steps=_FLOW_STEPS):
             try:
-                return compiled(Y, w)
-            except Exception as exc:                    # compiler, never the maths
+                return compiled(Y, steps)
+            except Exception as exc:
                 import warnings
                 warnings.warn(
                     f"NSAFlow layer: torch.compile of the defect flow failed "
                     f"({type(exc).__name__}: {str(exc)[:80]}); using eager for "
                     "this call.", RuntimeWarning, stacklevel=2)
-                return _defect_flow_nonneg(Y, w)
+                return _defect_flow_nonneg(Y, steps)
         _COMPILED_FLOW = guarded
     return _COMPILED_FLOW
 
 
 class _NSAMixin:
-    """Shared effective-weight logic.  Subclasses provide ``_pk_view``."""
+    """Shared effective-weight logic. Subclasses provide ``_pk_view``."""
 
     compile = False
+    operator = "flow"
+    n_steps = _FLOW_STEPS
 
     def _effective(self, W):
+        if getattr(self, "operator", "flow") == "solver":
+            from .solve import nsa_flow
+            M = self._pk_view(W.detach())
+            nonneg = self.nonneg not in (None, False, "none")
+            res = nsa_flow(M.double(), w=self.w, mode="anchored", fidelity="anchor",
+                           nonneg=nonneg)
+            Y = res.Y.to(W.dtype)
+            W_eff = self._pk_unview(Y, W)
+            if self.training:
+                # Straight-Through Estimator (STE): forward pass uses the exact
+                # nsa_flow solver result; backward pass passes gradients directly
+                # through to W so optimizer updates the raw parameter.
+                return W + (W_eff - W).detach()
+            return W_eff
+
         if self.nonneg in (None, False, "none"):
             if self.w > 0.0:
                 M = self._pk_view(W)
                 M = (1.0 - self.w) * M + self.w * _project_scaled_stiefel_layer(M)
                 W = self._pk_unview(M, W)
             return W
-        # non-negativity first, then the in-orthant defect flow (see module doc)
-        M = self._pk_view(_nonneg(W, self.nonneg))
-        M = _flow_fn(self.compile)(M, self.w)
+        # Unified blend semantics: W_eff = (1 - w) max(0, W) + w P_nonneg(W)
+        M0 = self._pk_view(_nonneg(W, self.nonneg))
+        if self.w > 0.0:
+            n_steps = getattr(self, "n_steps", _FLOW_STEPS)
+            P = _flow_fn(self.compile)(M0, n_steps)
+            M = (1.0 - self.w) * M0 + self.w * P
+        else:
+            M = M0
         return self._pk_unview(M, W)
 
     @torch.no_grad()
@@ -270,7 +277,8 @@ class _NSAMixin:
         inference forward back into ``nn.Linear`` cost."""
         if self.training:
             return self._effective(W)
-        key = (W._version, self.w, str(self.nonneg), W.device, W.dtype)
+        key = (W._version, self.w, str(self.nonneg), getattr(self, "operator", "flow"),
+               getattr(self, "n_steps", _FLOW_STEPS), W.device, W.dtype)
         cache = getattr(self, "_eff_cache", None)
         if cache is not None and cache[0] == key:
             return cache[1]
@@ -289,30 +297,95 @@ class _NSAMixin:
 
 
 class NSAFlowLinear(_NSAMixin, nn.Module):
-    """``nn.Linear`` whose ``out_features`` filters are driven toward orthogonality.
+    r"""``nn.Linear`` whose ``out_features`` filters are driven toward orthogonality.
 
     Weight layout matches ``nn.Linear`` (``[out_features, in_features]``), so
-    ``state_dict`` is interchangeable.  Orthogonality is measured over the
-    ``out_features`` filters, i.e. on ``W'`` viewed as ``[p, k] = [in, out]``.
+    ``state_dict`` is 100% interchangeable with standard PyTorch models.
+    Orthogonality is measured over the ``out_features`` filters, i.e. on
+    ``W'`` viewed as ``[p, k] = [in_features, out_features]``.
+
+    Three usage patterns are supported:
+
+    1. **Parameterization in forward pass (w > 0)**:
+       When ``w > 0``, the effective weight is parameterized via a continuous
+       convex blend: :math:`W_{\text{eff}} = (1 - w) W_0 + w P(W_0)`.
+
+       - If ``nonneg=None`` (signed), :math:`W_0 = W` and :math:`P(W_0)` is the
+         scaled Stiefel projection.
+       - If ``nonneg="hard"`` or ``"softplus"``, :math:`W_0` is the non-negative
+         clamped/softplussed weight and :math:`P(W_0)` is the in-orthant defect
+         flow (run for ``n_steps`` iterations, default 8).
+       - If ``operator="solver"``, :math:`W_{\text{eff}}` is evaluated directly via
+         the exact certified anchored proximal solver :func:`nsa_flow.nsa_flow`,
+         matching :meth:`project_` identically with straight-through gradients.
+
+       In ``eval()`` mode, the effective weight is automatically cached so inference
+       runs at standard ``nn.Linear`` speed.
+
+    2. **Loss penalty regularization (w = 0)**:
+       Keep ``w = 0`` (the default) so the forward pass behaves identically to
+       ``nn.Linear``, and add ``lambda_reg * layer.defect()`` to the training loss.
+       ``defect()`` computes the normalized Stiefel defect :math:`\tilde{D} \in [0, 1]`
+       in :math:`O(p k^2)` with no matrix factorizations.
+
+    3. **Proximal updates (project_)**:
+       Call ``layer.project_()`` between optimizer steps to replace raw weights
+       in-place with their exact anchored proximal projection via :func:`nsa_flow.nsa_flow`.
+
+    Args:
+        in_features (int): Size of each input sample (:math:`p`).
+        out_features (int): Size of each output sample (:math:`k`).
+        bias (bool, optional): If ``False``, the layer will not learn an additive bias.
+            Default: ``True``.
+        w (float, optional): Continuous blend coefficient in :math:`[0, 1]`. Default: ``0.0``.
+        nonneg (str or bool or None, optional): Non-negativity constraint. Options are
+            ``None``/``False`` (unconstrained/signed), ``"hard"``/``True`` (clamped
+            non-negative), or ``"softplus"``. Default: ``None``.
+        compile (bool, optional): If ``True``, compiles the in-orthant defect flow
+            graph using ``torch.compile(fullgraph=True)``. Default: ``False``.
+        operator (str, optional): Operator mode for effective weight evaluation.
+            ``"flow"`` (default) uses the unrolled in-graph blend with full autograd.
+            ``"solver"`` evaluates the exact certified :func:`nsa_flow.nsa_flow`
+            anchored proximal solver (with caching in ``eval()`` and straight-through
+            gradient estimation in ``train()``), giving exact numerical and sparsity
+            parity with :func:`nsa_flow.nsa_flow` across the full range :math:`w \in [0, 1]`.
+        n_steps (int, optional): Number of defect-flow steps used when computing
+            :math:`P(W_0)` in ``operator="flow"``. Decoupled from ``w``. Default: ``8``.
+
+    Attributes:
+        weight (torch.nn.Parameter): Learnable weights of shape ``[out_features, in_features]``.
+        bias (torch.nn.Parameter or None): Learnable bias of shape ``[out_features]``.
+
+    Examples:
+        >>> import torch
+        >>> from nsa_flow import NSAFlowLinear
+        >>> # Forward parameterization with orthogonal filters:
+        >>> layer = NSAFlowLinear(64, 16, w=0.5)
+        >>> x = torch.randn(8, 64)
+        >>> y = layer(x)
+        >>> y.shape
+        torch.Size([8, 16])
+        >>> # Check filter defect (0 = perfectly orthogonal):
+        >>> print(f"Defect: {layer.defect().item():.4f}")
+        >>> # Exact solver operator matching nsa_flow:
+        >>> layer_solver = NSAFlowLinear(64, 16, w=0.5, nonneg="hard", operator="solver")
     """
 
     def __init__(self, in_features, out_features, bias=True, w=0.0, nonneg=None,
-                 compile=False):
+                 compile=False, operator="flow", n_steps=_FLOW_STEPS):
         super().__init__()
         if not 0.0 <= float(w) <= 1.0:
             raise ValueError(f"w must lie in [0, 1]; got {w}")
+        if operator not in ("flow", "solver"):
+            raise ValueError(f"operator must be 'flow' or 'solver'; got {operator!r}")
         self.in_features, self.out_features = in_features, out_features
-        self.w, self.nonneg, self.compile = float(w), nonneg, bool(compile)
+        self.w, self.nonneg, self.compile, self.operator = float(w), nonneg, bool(compile), str(operator)
+        self.n_steps = int(n_steps)
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         self.bias = nn.Parameter(torch.empty(out_features)) if bias else None
         self.reset_parameters()
 
     def reset_parameters(self):
-        # Orthogonal init is the right start only for the Stiefel BLEND
-        # (nonneg=None, w>0).  For w=0 this is a drop-in nn.Linear and must
-        # initialise like one; for the non-negative modes an orthogonal start
-        # is ~half negative and clamps to a random half-support, and softplus of
-        # its ~0.1-magnitude entries is ~0.69 everywhere -- dense and uniform.
         if self.w > 0.0 and self.nonneg in (None, False, "none"):
             nn.init.orthogonal_(self.weight)
         else:
@@ -338,21 +411,36 @@ class NSAFlowLinear(_NSAMixin, nn.Module):
     def extra_repr(self):
         return (f"in_features={self.in_features}, out_features={self.out_features}, "
                 f"bias={self.bias is not None}, w={self.w}, nonneg={self.nonneg!r}, "
-                f"compile={self.compile}")
+                f"compile={self.compile}, operator={self.operator!r}, n_steps={self.n_steps}")
 
 
 class NSAFlowConv2d(_NSAMixin, nn.Conv2d):
-    """``nn.Conv2d`` whose ``out_channels`` filters are driven toward orthogonality.
+    r"""``nn.Conv2d`` whose ``out_channels`` filters are driven toward orthogonality.
 
-    Filters are flattened to ``[out_channels, in_channels * kh * kw]`` and
-    measured as ``[p, k] = [in * kh * kw, out]``.
+    Filters are flattened to shape ``[out_channels, in_channels * kh * kw]`` and
+    evaluated as :math:`[p, k] = [\text{in\_channels} \times kh \times kw, \text{out\_channels}]`.
+
+    Args:
+        *args: Variable positional arguments forwarded to ``nn.Conv2d``.
+        w (float, optional): Continuous blend coefficient in :math:`[0, 1]`. Default: ``0.0``.
+        nonneg (str or bool or None, optional): Non-negativity constraint (``None``,
+            ``"hard"``/``True``, or ``"softplus"``). Default: ``None``.
+        compile (bool, optional): If ``True``, compiles the non-negative defect flow.
+            Default: ``False``.
+        operator (str, optional): Operator mode (``"flow"`` or ``"solver"``). Default: ``"flow"``.
+        n_steps (int, optional): Number of defect flow steps in ``operator="flow"``. Default: ``8``.
+        **kwargs: Keyword arguments forwarded to ``nn.Conv2d``.
     """
 
-    def __init__(self, *args, w=0.0, nonneg=None, compile=False, **kwargs):
+    def __init__(self, *args, w=0.0, nonneg=None, compile=False, operator="flow",
+                 n_steps=_FLOW_STEPS, **kwargs):
         super().__init__(*args, **kwargs)
         if not 0.0 <= float(w) <= 1.0:
             raise ValueError(f"w must lie in [0, 1]; got {w}")
-        self.w, self.nonneg, self.compile = float(w), nonneg, bool(compile)
+        if operator not in ("flow", "solver"):
+            raise ValueError(f"operator must be 'flow' or 'solver'; got {operator!r}")
+        self.w, self.nonneg, self.compile, self.operator = float(w), nonneg, bool(compile), str(operator)
+        self.n_steps = int(n_steps)
         if self.w > 0.0 and nonneg in (None, False, "none"):
             nn.init.orthogonal_(self.weight)          # else keep nn.Conv2d's init
 
@@ -370,22 +458,29 @@ class NSAFlowConv2d(_NSAMixin, nn.Conv2d):
     def forward(self, x):
         return self._conv_forward(x, self.effective_weight(), self.bias)
 
+    def extra_repr(self):
+        s = super().extra_repr()
+        return f"{s}, w={self.w}, nonneg={self.nonneg!r}, operator={self.operator!r}, n_steps={self.n_steps}"
+
 
 class NSAFlowLayer(nn.Module):
     """Per-sample NSA transform of a batch of matrices, ``[B, p, k] -> [B, p, k]``.
 
-    Each sample is transformed independently.  Input must be 3-D: a 2-D input is
+    Each sample is transformed independently. Input must be 3-D: a 2-D input is
     ambiguous (is the first axis samples or features?) and the old behaviour of
     treating a ``[N, k]`` batch as one ``[p, k]`` matrix coupled every sample to
-    its batch-mates, so that outputs depended on batch composition.  That is
+    its batch-mates, so that outputs depended on batch composition. That is
     rejected rather than guessed at.
     """
 
-    def __init__(self, w=0.5, nonneg=None, compile=False):
+    def __init__(self, w=0.5, nonneg=None, compile=False, operator="flow", n_steps=_FLOW_STEPS):
         super().__init__()
         if not 0.0 <= float(w) <= 1.0:
             raise ValueError(f"w must lie in [0, 1]; got {w}")
-        self.w, self.nonneg, self.compile = float(w), nonneg, bool(compile)
+        if operator not in ("flow", "solver"):
+            raise ValueError(f"operator must be 'flow' or 'solver'; got {operator!r}")
+        self.w, self.nonneg, self.compile, self.operator = float(w), nonneg, bool(compile), str(operator)
+        self.n_steps = int(n_steps)
 
     def forward(self, Y):
         if Y.ndim != 3:
@@ -393,14 +488,29 @@ class NSAFlowLayer(nn.Module):
                 f"NSAFlowLayer expects batched [B, p, k] input; got {tuple(Y.shape)}. "
                 "Add a leading batch axis to state the intended per-sample semantics."
             )
+        if getattr(self, "operator", "flow") == "solver":
+            from .solve import nsa_flow
+            nonneg = self.nonneg not in (None, False, "none")
+            res = [nsa_flow(Y[i].detach().double(), w=self.w, mode="anchored",
+                            fidelity="anchor", nonneg=nonneg).Y.to(Y.dtype)
+                   for i in range(Y.shape[0])]
+            Y_eff = torch.stack(res, dim=0)
+            if self.training:
+                return Y + (Y_eff - Y).detach()
+            return Y_eff
+
         if self.nonneg in (None, False, "none"):
             if self.w > 0.0:
                 Y = (1.0 - self.w) * Y + self.w * _project_scaled_stiefel_layer(Y)
             return Y
-        return _flow_fn(self.compile)(_nonneg(Y, self.nonneg), self.w)
+        Y0 = _nonneg(Y, self.nonneg)
+        if self.w > 0.0:
+            P = _flow_fn(self.compile)(Y0, getattr(self, "n_steps", _FLOW_STEPS))
+            return (1.0 - self.w) * Y0 + self.w * P
+        return Y0
 
     def defect(self, Y):
         return stiefel_defect_normalised(self.forward(Y))
 
     def extra_repr(self):
-        return f"w={self.w}, nonneg={self.nonneg!r}"
+        return f"w={self.w}, nonneg={self.nonneg!r}, operator={self.operator!r}, n_steps={self.n_steps}"

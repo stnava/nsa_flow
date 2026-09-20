@@ -45,7 +45,7 @@ def stiefel_defect(Y, eps=0.0):
     the second is what made that functional blind to conditioning, sensitive to
     the choice of basis, and minimised by rank-deficient matrices.
 
-    A consequence used for interpretability: since the first sum is at most ``D``,
+    A consequence used for interpretability: since the first sum is at most ``D``::
 
         max_{i != j} |<y_i, y_j>|  <=  sqrt(D) . ||Y||_F^2
 

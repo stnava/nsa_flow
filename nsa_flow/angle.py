@@ -12,14 +12,14 @@ column and ``k-1`` zero columns scores exactly ``0``, because a zero column is
 orthogonal to everything.  Pure off-diagonal orthogonality rewards total collapse.
 
 Normalise per column instead and penalise angles.  Write ``vhat_i = v_i / max(|v_i|,
-eps)`` and ``Ghat = Vhat' Vhat``; then
+eps)`` and ``Ghat = Vhat' Vhat``; then::
 
     C(V) = ||Ghat - I_k||_F^2 / (k(k-1))
 
          = (1/(k(k-1))) [ sum_{i != j} cos^2(v_i, v_j)
                           + sum_i (1 - min(1, |v_i|^2/eps^2))^2 ]
 
-with ``cos_ij = <v_i,v_j> / (|v_i||v_j|)``.  KEEP THE IDENTITY.  The second sum is
+with ``cos_ij = <v_i,v_j> / (||v_i|| * ||v_j||)``.  KEEP THE IDENTITY.  The second sum is
 exactly zero whenever every column has norm at least ``eps``, so the pairwise sum
 alone is the whole story in the generic case and looks like the definition -- but
 it is not, and an implementation written from the pairwise form alone reproduces
@@ -31,9 +31,9 @@ precisely the v1 collapse failure described above.  Each floored column is charg
 DISCONTINUOUS AT A ZERO COLUMN, and the optimiser has to respect that.  ``C``
 is a function of column DIRECTIONS only, so a column of norm ``1e-20``
 contributes the same O(1) cosines as one of norm 1.  There is no limit to
-recover: as ``|v_i| -> 0`` along a fixed direction the cosines stay O(1), while
+recover: as ``||v_i|| -> 0`` along a fixed direction the cosines stay O(1), while
 at exactly zero the floored norm makes them 0.  Measured, as one of four
-columns vanishes:
+columns vanishes::
 
     |v_3|      C (diagonal=False)
     0                  0.0910
@@ -117,9 +117,9 @@ def angle_defect(V, eps=_EPS, diagonal=True):
 def grad_angle_defect(V, eps=_EPS, diagonal=True):
     r"""Closed-form gradient of ``C``.
 
-    With ``u_i = v_i / |v_i|`` and ``M = U'U`` the cosine matrix, write
+    With ``u_i = v_i / \|v_i\|`` and ``M = U'U`` the cosine matrix, write
     ``B = M - I``.  Then ``dC/dU = 4 U B / (k(k-1))``, and the per-column
-    normalisation contributes the projection ``(I - u_i u_i') / |v_i|``, giving
+    normalisation contributes the projection ``(I - u_i u_i') / \|v_i\|``, giving::
 
         dC/dv_i = (1 / |v_i|) (I - u_i u_i') (dC/du_i).
 

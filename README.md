@@ -202,17 +202,13 @@ layer = NSAFlowLinear(256, 32, w=0.5, nonneg="hard")      # non-negative AND nea
 layer.project_()                                          # exact anchored prox, in place, no autograd
 ```
 
-**Non-negativity and `w` compose in one order only** (fixed in 3.2.1). With
-`nonneg="hard"` (or `True`) or `"softplus"`, non-negativity is applied first and
-`w` then drives a short projected-gradient flow on the defect *inside* the
-orthant — `round(8w)` fixed-size steps, each kept only if it lowers `D̃` — so the
-effective weight is non-negative exactly and `defect()` is non-increasing in `w`
-by construction (measured on a random 66×5 start: hard 0.104 → 0.002,
-softplus 0.481 → 0.003, sparsity 0.70 at `w=1`). Versions before 3.2.1 blended
-onto the Stiefel manifold and *then* clamped, which undid the orthogonalisation:
-`w` moved the defect from 0.53 to 0.50. `nonneg=True` now means the hard clamp
-(it used to mean softplus, which cannot produce a zero and maps the default init
-to ≈0.69 everywhere). At `w=0` the layer initialises exactly like `nn.Linear`.
+**Unified continuous blend semantics and decoupled steps (v3.3.0)**.
+Across all layers and sign modes, $w \in [0, 1]$ has one unified meaning as a continuous convex blend:
+$$W_{\text{eff}} = (1 - w) W_0 + w P(W_0)$$
+- **Signed (`nonneg=None`)**: $W_0 = W$, and $P(W_0) = \text{project\_scaled\_stiefel}(W_0)$.
+- **Non-negative (`nonneg="hard"` / `"softplus"`)**: $W_0 = \max(0, W)$, and $P(W_0)$ is the in-orthant defect flow run for `n_steps` iterations (default 8). This eliminates the 3-step quantization and premature plateau at $w \approx 0.19$–$0.35$; response across $w \in [0, 1]$ is strictly continuous and monotone.
+- **Exact certified solver (`operator="solver"`)**: Forward pass computes the exact anchored prox via `nsa_flow(mode="anchored", fidelity="anchor")` — identical to `layer.project_()` and linear SiMLR. A Straight-Through Estimator (STE) passes loss gradients directly to the unconstrained weights during training, while inference is cached in `eval()`.
+- **Decoupled iteration budget**: `n_steps` governs the flow iteration count independently of $w$. Because the flow graph does not vary with $w$, `compile=True` compiles a single static graph without Dynamo recompilation overhead across $w$ sweeps.
 
 `NSAFlowLayer` applies the same map per sample to a `[B, p, k]` batch.
 
@@ -224,10 +220,20 @@ nonneg=None     w=0.5: train fwd   61 us (was 58) | eval fwd 9 us
 nonneg=hard     w=0.5: train fwd  377 us (was 539) | eval fwd 9 us
 nonneg=hard     w=1.0: train fwd  731 us (was 719) | eval fwd 9 us
 nonneg=softplus w=1.0: train fwd  649 us (was 842) | eval fwd 9 us
+operator=solver w=0.5: train fwd ~500 us          | eval fwd 9 us
 MPS blend w=0.5 831 us (was 1227) | MPS hard w=1 5383 us (was 6372)
 ```
 
-What moved and what did not, stated plainly. In `eval()` the effective weight is cached until the parameter changes, so inference costs the same as `nn.Linear` (9 µs) — that is the real win. The blend uses the exact `eigh` projection where `eigh` is native and Newton–Schulz where it is not, which halves the MPS forward. The non-negative training forward improved 30% at `w=0.5` and **not at all at `w=1`** (731 vs 719 µs): sharing the Gram across steps and removing the halvings cut the arithmetic but the flow is ~8 steps × ~30 tensor ops and eager dispatch is the floor — the same ceiling the solver hit. `compile=True` on any of the three layers compiles the flow as one graph (`fullgraph=True`; possible because it has no data-dependent control flow): measured 732 → 154 µs for the `hard, w=1` training forward, 393 → 66 µs for the flow alone. Opt-in because the first call costs 1–5 s and specialises per shape and `w`. Threading is not a lever at these sizes.
+In `eval()` the effective weight is cached until the parameter changes, so inference costs the same as `nn.Linear` (9 µs). `compile=True` on any layer compiles the defect flow as one graph (`fullgraph=True`): measured 732 → 154 µs for the `hard, w=1` training forward, 393 → 66 µs for the flow alone.
+
+## Documentation (ANTsPy Style)
+
+Standard Sphinx documentation is built using `sphinx_rtd_theme`:
+```bash
+make docs        # builds HTML docs in docs/_build/html with 0 warnings
+make docs-clean  # removes build cache
+```
+The documentation includes thematic guides for layers, solvers, energy functionals, data-anchored reconstruction, scikit-learn estimators, and diagnostic certificates, plus recursive API references.
 
 
 ## API

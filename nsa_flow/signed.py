@@ -67,11 +67,11 @@ Measured over 18 dataset/k/w combinations (ADNI centred and raw, METABRIC):
 Every ``Coff`` failure is a line-search stall at 1e-02 to 1e-03 after 13 to 72
 iterations.  The remaining ``Cg`` cases were iteration budget, not traps, so the
 default ``max_iter`` is 20000: with that, ALL 18 combinations reach
-|Gmap| < 1e-09 with zero dead lobes, in 69 s for the whole grid.  The budget
+``|Gmap| < 1e-09`` with zero dead lobes, in 69 s for the whole grid.  The budget
 matters for the BASIS even where it does not matter for the objective -- between
-|Gmap| of 4.7e-05 and 1e-09 the reconstruction is identical to five decimals
+``|Gmap|`` of 4.7e-05 and 1e-09 the reconstruction is identical to five decimals
 while the largest basis entry moves 43%, one component rotates by 15 degrees
-(|cos| 0.967) and 2.7% of the support flips.  Since the interpretability claim
+(``|cos| 0.967``) and 2.7% of the support flips.  Since the interpretability claim
 is about supports, a loose certificate is not good enough.
 
 Two step-rule changes were tried and rejected on measurement.  Scaling the
@@ -136,8 +136,8 @@ one-signed component such as global atrophy should not be forced to carry a
 negative lobe.
 
 Choice of ``w``.  Moderate, and this matters more than it looks.  Across nine
-ADNI cognitive outcomes, 20 paired folds each, mean out-of-sample \(\Delta R^2\)
-against PCA over an age, sex, education and APOE4 baseline:
+ADNI cognitive outcomes, 20 paired folds each, mean out-of-sample :math:`\Delta R^2`
+against PCA over an age, sex, education and APOE4 baseline::
 
                         w = 0.5                 w = 0.75
     basis          linear      forest      linear      forest
@@ -281,6 +281,7 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="auto", orth="Cg", lobe=1.0,
     ----------
     init : {"auto", "split", "adaptive", "relax"} or Tensor, default "auto"
         Initialization strategy:
+
         - "auto" (default): Inspects data centering. On centered or signed data
           (colmeans ≈ 0 or min < 0), uses Direct SVD Contrast Splitting for
           140x faster convergence with exact subspace fidelity (V+ - V- = E) and

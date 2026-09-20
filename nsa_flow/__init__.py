@@ -12,8 +12,22 @@ floor ``D >= 1/r - 1/k`` at rank ``r``.
 
 ``w`` is a genuine convex weight: ``w = 0`` gives ``max(0, X0)`` and ``w = 1``
 gives orthogonal columns, which under non-negativity means disjoint supports --
-a hard clustering of the ``p`` features.  The solver is spectral projected
-gradient; ``continuation`` traces the path in ``w``.
+a hard clustering of the ``p`` features.
+
+Quick Access & Module Layout
+----------------------------
+* Core solver:
+  - :func:`nsa_flow.nsa_flow` (or :func:`nsa_flow.solve.nsa_flow`): main solver entry point.
+  - :class:`nsa_flow.NSAResult` (or :class:`nsa_flow.solve.NSAResult`): solver certificate and solution container.
+* PyTorch Neural Network Layers:
+  - :class:`nsa_flow.NSAFlowLinear` (or :class:`nsa_flow.layers.NSAFlowLinear`): orthogonal/non-negative linear layer.
+  - :class:`nsa_flow.NSAFlowConv2d` (or :class:`nsa_flow.layers.NSAFlowConv2d`): orthogonal conv2d layer.
+* Scikit-Learn Estimator:
+  - :class:`nsa_flow.NSAFlow` (lazy-loaded from :mod:`nsa_flow.sklearn`): transformer estimator.
+* Diagnostics & Projections:
+  - :mod:`nsa_flow.diagnostics`: gradient mapping certificate and convergence tests.
+  - :mod:`nsa_flow.project`: Stiefel and non-negative projections, polar factors.
+  - :mod:`nsa_flow.energy`: energy functionals, gradients, and effective rank.
 """
 from .energy import (
     gram,
@@ -40,7 +54,7 @@ from .subspace import (SubspaceAnchor, negative_mass, subspace_fidelity,
                        grad_subspace_fidelity)
 from .layers import NSAFlowLinear, NSAFlowConv2d, NSAFlowLayer
 
-__version__ = "3.2.6"
+__version__ = "3.3.0"
 
 
 def __getattr__(name):

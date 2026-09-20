@@ -74,7 +74,7 @@ def polar_factor(Y, eps=1e-30):
 
 
 def project_scaled_stiefel(Y, eps=1e-30):
-    r"""Euclidean projection onto ``R_{>0} . St(p, k)`` -- the zero set of ``D``.
+    r"""Euclidean projection onto ``R_{>0} * St(p, k)`` -- the zero set of ``D``.
 
     ``argmin_{c > 0, Q'Q = I} ||Y - cQ||_F^2`` is attained at ``Q = U`` (the polar
     factor) and ``c = (sum_i sigma_i) / k = <U, Y> / k``, giving
