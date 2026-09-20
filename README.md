@@ -90,11 +90,13 @@ When compiled, `nsa_flow._native._lbfgsb_cpu` executes fused iterations in C++ o
 eliminating Python interpreter and ATen dispatch overhead while achieving bit-exact numerical parity
 (`< 1e-12` energy difference) with pure PyTorch.
 
-- **Speedup:** ~4.3x on standard imaging shapes (e.g. ADNI cortical `300 x 66, k=5`: fit time drops from 95.8 ms to 22.1 ms).
-- **Zero dynamic allocations:** Active-set walks, Gauss-Jordan inversion, and Wolfe line search run entirely in stack buffers for small-to-moderate dimensions.
-- **Adaptive BLAS dispatch:** Automatically routes Gram products through BLAS GEMM when `p > 128`.
-- **Pure-Python fallback:** To force pure-Python execution, set `NSA_FLOW_DISABLE_NATIVE=1`.
-- **Torch compile:** When running pure PyTorch, pass `compile=True` for a 3–4x speedup via `torch.compile` at moderate sizes.
+- **Speedup:** 6–11× speedup on standard imaging shapes:
+  - ADNI cortical anchored (`p=66, k=5`): 10.7× speedup (5.2 ms vs 55.8 ms; 42.8 µs/iter vs 457.6 µs/iter).
+  - ADNI data-anchored (`300 x 66, k=5`): 8.2× speedup (11.1 ms vs 90.5 ms; 56.6 µs/iter vs 464.2 µs/iter).
+  - ADNI signed (`300 x 66, k=5`): 6.4× speedup (15.8 ms vs 100.9 ms; 86.7 µs/iter vs 542.7 µs/iter).
+  - Golub genomics (`72 x 2000, k=3`): 2.3× speedup (52.6 ms vs 121.9 ms).
+- **Direct CBLAS & Zero Inner Allocations:** Cauchy point, subspace minimization, compact quasi-Newton $M$ inversion, and line search operate on preallocated workspace buffers and direct CBLAS/LAPACK calls with stack solvers for small-to-moderate dimensions.
+- **Pure-Python fallback:** To force pure-Python execution, set `NSA_FLOW_DISABLE_NATIVE=1`. All reference instances match to $< 10^{-12}$.
 
 Empirically `E_w` has a unique optimum for `w < 1` — 24 random restarts agree to
 machine precision on every problem family tested — so there are no restarts,

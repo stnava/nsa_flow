@@ -68,7 +68,7 @@ __all__ = ["lbfgsb_minimize", "set_compile"]
 
 try:
     from . import _native
-except ImportError:
+except Exception:
     _native = None
 
 _COMPILED = {}
