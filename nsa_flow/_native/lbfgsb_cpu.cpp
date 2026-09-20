@@ -717,22 +717,32 @@ inline void lbfgsb_direction_core(
             }
         } else {
             scalar_t* Mc = ws.Mc.data();
-            cblas_gemv(CblasNoTrans, static_cast<int>(two_m), static_cast<int>(two_m),
-                       static_cast<scalar_t>(1), M_ptr, static_cast<int>(two_m),
-                       c, 1, static_cast<scalar_t>(0), Mc, 1);
+            for (int64_t r_idx = 0; r_idx < two_m; ++r_idx) {
+                scalar_t sum_val = 0;
+                for (int64_t k = 0; k < two_m; ++k) {
+                    sum_val += M_ptr[r_idx * two_m + k] * c[k];
+                }
+                Mc[r_idx] = sum_val;
+            }
 
-            // Pack W_free: rows 0..2m-1, columns 0..n_free-1
-            for (int64_t k = 0; k < two_m; ++k) {
-                const scalar_t* W_row = &W_ptr[k * n];
-                scalar_t* Wf_row = &W_free[k * n_free];
-                for (int64_t j = 0; j < n_free; ++j) {
-                    Wf_row[j] = W_row[free_idx[j]];
+            const scalar_t* eff_W_free = W_free;
+            int eff_stride = static_cast<int>(n_free);
+            if (n_free == n) {
+                eff_W_free = W_ptr;
+                eff_stride = static_cast<int>(n);
+            } else {
+                for (int64_t k = 0; k < two_m; ++k) {
+                    const scalar_t* W_row = &W_ptr[k * n];
+                    scalar_t* Wf_row = &W_free[k * n_free];
+                    for (int64_t j = 0; j < n_free; ++j) {
+                        Wf_row[j] = W_row[free_idx[j]];
+                    }
                 }
             }
 
             scalar_t* wmc = ws.wmc.data();
             cblas_gemv(CblasTrans, static_cast<int>(two_m), static_cast<int>(n_free),
-                       static_cast<scalar_t>(1), W_free, static_cast<int>(n_free),
+                       static_cast<scalar_t>(1), eff_W_free, eff_stride,
                        Mc, 1, static_cast<scalar_t>(0), wmc, 1);
 
             for (int64_t j = 0; j < n_free; ++j) {
@@ -749,29 +759,34 @@ inline void lbfgsb_direction_core(
             scalar_t* WfWf = ws.WfWf.data();
             cblas_gemm(CblasNoTrans, CblasTrans,
                        static_cast<int>(two_m), static_cast<int>(two_m), static_cast<int>(n_free),
-                       static_cast<scalar_t>(1), W_free, static_cast<int>(n_free),
-                       W_free, static_cast<int>(n_free),
+                       static_cast<scalar_t>(1), eff_W_free, eff_stride,
+                       eff_W_free, eff_stride,
                        static_cast<scalar_t>(0), WfWf, static_cast<int>(two_m));
 
             scalar_t* Wfr = ws.Wfr.data();
             cblas_gemv(CblasNoTrans, static_cast<int>(two_m), static_cast<int>(n_free),
-                       static_cast<scalar_t>(1), W_free, static_cast<int>(n_free),
+                       static_cast<scalar_t>(1), eff_W_free, eff_stride,
                        r_free, 1, static_cast<scalar_t>(0), Wfr, 1);
 
             scalar_t* v0 = ws.v0.data();
-            cblas_gemv(CblasNoTrans, static_cast<int>(two_m), static_cast<int>(two_m),
-                       static_cast<scalar_t>(1), M_ptr, static_cast<int>(two_m),
-                       Wfr, 1, static_cast<scalar_t>(0), v0, 1);
+            for (int64_t r_idx = 0; r_idx < two_m; ++r_idx) {
+                scalar_t sum_val = 0;
+                for (int64_t k = 0; k < two_m; ++k) {
+                    sum_val += M_ptr[r_idx * two_m + k] * Wfr[k];
+                }
+                v0[r_idx] = sum_val;
+            }
 
             scalar_t* N = ws.N.data();
             scalar_t inv_th = static_cast<scalar_t>(1.0) / th;
-            cblas_gemm(CblasNoTrans, CblasNoTrans,
-                       static_cast<int>(two_m), static_cast<int>(two_m), static_cast<int>(two_m),
-                       -inv_th, M_ptr, static_cast<int>(two_m),
-                       WfWf, static_cast<int>(two_m),
-                       static_cast<scalar_t>(0), N, static_cast<int>(two_m));
-            for (int64_t k = 0; k < two_m; ++k) {
-                N[k * two_m + k] += static_cast<scalar_t>(1.0);
+            for (int64_t r_idx = 0; r_idx < two_m; ++r_idx) {
+                for (int64_t c_idx = 0; c_idx < two_m; ++c_idx) {
+                    scalar_t sum_val = 0;
+                    for (int64_t k = 0; k < two_m; ++k) {
+                        sum_val += M_ptr[r_idx * two_m + k] * WfWf[k * two_m + c_idx];
+                    }
+                    N[r_idx * two_m + c_idx] = -inv_th * sum_val + (r_idx == c_idx ? static_cast<scalar_t>(1.0) : static_cast<scalar_t>(0.0));
+                }
             }
 
             scalar_t* v = ws.v.data();
@@ -782,7 +797,7 @@ inline void lbfgsb_direction_core(
 
             scalar_t* Wfv = ws.Wfv.data();
             cblas_gemv(CblasTrans, static_cast<int>(two_m), static_cast<int>(n_free),
-                       static_cast<scalar_t>(1), W_free, static_cast<int>(n_free),
+                       static_cast<scalar_t>(1), eff_W_free, eff_stride,
                        v, 1, static_cast<scalar_t>(0), Wfv, 1);
 
             scalar_t inv_th2 = static_cast<scalar_t>(1.0) / (th * th);
@@ -1634,6 +1649,7 @@ lbfgsb_solve_impl(const at::Tensor& x0_in,
     std::vector<double> E_win;
     std::vector<double> g_win;
     double eps = (sizeof(scalar_t) == sizeof(double)) ? std::numeric_limits<double>::epsilon() : std::numeric_limits<float>::epsilon();
+    double noise_floor = std::sqrt(eps);
 
     auto stalled = [&]() -> bool {
         if (g_win.size() < 5) return false;
@@ -1643,7 +1659,7 @@ lbfgsb_solve_impl(const at::Tensor& x0_in,
     };
 
     auto classify_stall = [&](double f_try) -> std::string {
-        if (!std::isfinite(gmap) || gmap > stall_slack * std::max(tol, 0.0)) {
+        if (!std::isfinite(gmap) || gmap > std::max(stall_slack * std::max(tol, 0.0), noise_floor)) {
             return "line_search";
         }
         if (stalled()) {
@@ -1781,13 +1797,8 @@ lbfgsb_solve_impl(const at::Tensor& x0_in,
         int64_t max_eval = std::min<int64_t>(20, remaining);
         int64_t ls_eval = 0;
         double a_prev = 0.0, f_prev = f, d_prev = g0_dir;
-        std::copy(xf.begin(), xf.end(), x_prev.begin());
-        std::copy(g.begin(), g.end(), g_prev.begin());
-
         double a_i = std::min(1.0, a_max);
         double a_lo_val = 0.0, a_hi_val = 0.0, f_lo_val = f, f_hi_val = 0.0, d_lo_val = g0_dir, d_hi_val = 0.0;
-        std::copy(xf.begin(), xf.end(), x_lo.begin());
-        std::copy(g.begin(), g.end(), g_lo.begin());
 
         bool has_bracket = false, has_f_hi = false;
         bool wolfe_success = false;
@@ -1800,15 +1811,25 @@ lbfgsb_solve_impl(const at::Tensor& x0_in,
             ls_eval += 1;
             if (!std::isfinite(f_i) || !std::isfinite(d_i)) {
                 a_lo_val = a_prev; f_lo_val = f_prev; d_lo_val = d_prev; a_hi_val = a_i;
-                std::copy(x_prev.begin(), x_prev.end(), x_lo.begin());
-                std::copy(g_prev.begin(), g_prev.end(), g_lo.begin());
+                if (ls_eval == 1) {
+                    std::copy(xf.begin(), xf.end(), x_lo.begin());
+                    std::copy(g.begin(), g.end(), g_lo.begin());
+                } else {
+                    std::copy(x_prev.begin(), x_prev.end(), x_lo.begin());
+                    std::copy(g_prev.begin(), g_prev.end(), g_lo.begin());
+                }
                 has_bracket = true; has_f_hi = false;
                 break;
             }
             if (f_i > f + c1 * a_i * g0_dir || (ls_eval > 1 && f_i >= f_prev)) {
                 a_lo_val = a_prev; f_lo_val = f_prev; d_lo_val = d_prev; a_hi_val = a_i;
-                std::copy(x_prev.begin(), x_prev.end(), x_lo.begin());
-                std::copy(g_prev.begin(), g_prev.end(), g_lo.begin());
+                if (ls_eval == 1) {
+                    std::copy(xf.begin(), xf.end(), x_lo.begin());
+                    std::copy(g.begin(), g.end(), g_lo.begin());
+                } else {
+                    std::copy(x_prev.begin(), x_prev.end(), x_lo.begin());
+                    std::copy(g_prev.begin(), g_prev.end(), g_lo.begin());
+                }
                 has_bracket = true; has_f_hi = false;
                 break;
             }
@@ -2006,7 +2027,7 @@ lbfgsb_solve_impl(const at::Tensor& x0_in,
         }
     }
 
-    if (stop == "max_iter" && std::isfinite(gmap) && gmap <= stall_slack * std::max(tol, 0.0) && stalled()) {
+    if (stop == "max_iter" && std::isfinite(gmap) && gmap <= std::max(stall_slack * std::max(tol, 0.0), noise_floor) && stalled()) {
         stop = "plateau";
     }
 

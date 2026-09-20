@@ -218,12 +218,13 @@ def _classify_stall(E, E_best_trial, g_window, gmap, tol, dtype, slack=64.0):
     quasi-Newton signature, which converges superlinearly and then stops
     abruptly, so its window still shows large improvement at the stall).
     """
-    if not (math.isfinite(gmap) and gmap <= STALL_SLACK * max(tol, 0.0)):
+    eps = float(torch.finfo(dtype).eps)
+    noise_floor = math.sqrt(eps)
+    if not (math.isfinite(gmap) and gmap <= max(STALL_SLACK * max(tol, 0.0), noise_floor)):
         return "line_search"
     if _gmap_stalled(g_window):
         return "plateau"
     if E_best_trial is not None and math.isfinite(E_best_trial):
-        eps = float(torch.finfo(dtype).eps)
         if (E_best_trial - E) <= slack * eps * (1.0 + abs(E)):
             return "plateau"
     return "line_search"
@@ -935,7 +936,9 @@ def _minimise(Y0, energy_fn, grad_fn, proj, *, optimizer, max_iter, tol, mask,
             "optimal, or the solve is trapped; result['converged'] and "
             "result['certificate'] say which.",
             RuntimeWarning, stacklevel=3)
-    if rep["stop"] != "grad_map" and rep["grad_map"] > max(tol, 0.0) * STALL_SLACK:
+    eps = float(torch.finfo(Y0.dtype).eps)
+    noise_floor = math.sqrt(eps)
+    if rep["stop"] != "grad_map" and rep["grad_map"] > max(max(tol, 0.0) * STALL_SLACK, noise_floor):
         warnings.warn(
             f"{caller or 'nsa_flow'}: {name} stopped with stop_reason="
             f"{rep['stop']!r} at |Gmap|={rep['grad_map']:.2e} against tol="

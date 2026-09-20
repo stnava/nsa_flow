@@ -538,6 +538,7 @@ def lbfgsb_minimize(x0, fun_grad, fun=None, *, lower=0.0, upper=None, mask=None,
     stop, it = "max_iter", 0
     E_win, g_win = [], []
     eps = float(torch.finfo(dtype).eps)
+    noise_floor = math.sqrt(eps)
 
     def _stalled():
         """Certificate no longer improving across the window (>= 5 samples)."""
@@ -548,11 +549,14 @@ def lbfgsb_minimize(x0, fun_grad, fun=None, *, lower=0.0, upper=None, mask=None,
 
     def _classify_stall(f_try):
         """A failed line search is the numerical floor only if the certificate
-        is within ``stall_slack`` of ``tol`` AND either it has stopped improving
-        or the best trial step moved f by less than float noise.  Otherwise the
-        iterate is trapped and no certificate is issued.  Same rule as
-        ``nsa_flow.optim._classify_stall`` so the two can never disagree."""
-        if not (math.isfinite(gmap) and gmap <= stall_slack * max(tol, 0.0)):
+        is within ``stall_slack`` of ``tol`` (or within the float noise floor)
+        AND either it has stopped improving or the best trial step moved f by less
+        than float noise.  Otherwise the iterate is trapped and no certificate
+        is issued.  Same rule as ``nsa_flow.optim._classify_stall`` so the two
+        can never disagree."""
+        eps = float(torch.finfo(dtype).eps)
+        noise_floor = math.sqrt(eps)
+        if not (math.isfinite(gmap) and gmap <= max(stall_slack * max(tol, 0.0), noise_floor)):
             return "line_search"
         if _stalled():
             return "plateau"
@@ -670,7 +674,7 @@ def lbfgsb_minimize(x0, fun_grad, fun=None, *, lower=0.0, upper=None, mask=None,
                 break
 
     if stop == "max_iter" and math.isfinite(gmap) \
-            and gmap <= stall_slack * max(tol, 0.0) and _stalled():
+            and gmap <= max(stall_slack * max(tol, 0.0), noise_floor) and _stalled():
         stop = "plateau"
     return dict(x=xf.reshape(shape), f=f, n_grad=n_grad, n_fun=n_fun,
                 iters=it, stop=stop, grad_map=gmap)
