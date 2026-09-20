@@ -140,8 +140,7 @@ def _defect_flow_nonneg(Y, w, steps=_FLOW_STEPS, tau=_FLOW_TAU):
     along ``-grad Dtilde / ||grad Dtilde||`` (scale-free: ``grad D`` scales as
     ``1/||Y||``; the ``sqrt(Dtilde)`` factor shrinks the step as the defect
     vanishes), clamps to the orthant, and is kept only if ``Dtilde`` did not
-    increase (a half step is tried once if the full step fails; in practice it
-    never does).  The step size
+    increase (branchless ``where``, so the flow is a single compilable graph).  The step size
     does not depend on ``w``; ``w`` sets the number of steps, so the iterate at a
     smaller ``w`` is a prefix of the path at a larger one and the defect is
     non-increasing in ``w`` exactly.  Differentiable a.e.
@@ -171,26 +170,47 @@ def _defect_flow_nonneg(Y, w, steps=_FLOW_STEPS, tau=_FLOW_TAU):
         Y1 = (Y - eta * g).clamp_min(0.0)
         S1, t1, N1 = _gram_stats(Y1)
         D1 = (N1 / (t1 * t1).clamp_min(tiny) - 1.0 / k) * inv_k
-        ok1 = D1 <= D
-        if bool(ok1.all()):
-            Y, S, t, N, D = Y1, S1, t1, N1, D1
-            continue
-        Y2 = (Y - 0.5 * eta * g).clamp_min(0.0)                    # one half step
-        S2, t2, N2 = _gram_stats(Y2)
-        D2 = (N2 / (t2 * t2).clamp_min(tiny) - 1.0 / k) * inv_k
-        ok2 = D2 <= D
-        m1 = ok1.reshape(*ok1.shape, 1, 1)
-        m2 = (ok2 & ~ok1).reshape(*ok2.shape, 1, 1)
-        Y = torch.where(m1, Y1, torch.where(m2, Y2, Y))
-        S = torch.where(m1, S1, torch.where(m2, S2, S))
-        t = torch.where(ok1, t1, torch.where(ok2 & ~ok1, t2, t))
-        N = torch.where(ok1, N1, torch.where(ok2 & ~ok1, N2, N))
-        D = torch.where(ok1, D1, torch.where(ok2 & ~ok1, D2, D))
+        # Branchless acceptance: keep the trial where it did not increase the
+        # defect, else keep Y.  No Python `if` on a tensor, so torch.compile
+        # captures the whole flow as one graph (an `if bool(ok.all())` here was
+        # a graph break per step and made compilation a net loss).  With the
+        # D-scaled step the trial is accepted essentially always; the guard is
+        # what makes monotonicity a property rather than an observation.
+        ok = D1 <= D
+        okm = ok.reshape(*ok.shape, 1, 1)
+        Y = torch.where(okm, Y1, Y)
+        S = torch.where(okm, S1, S)
+        t = torch.where(ok, t1, t)
+        N = torch.where(ok, N1, N)
+        D = torch.where(ok, D1, D)
     return Y
+
+
+_COMPILED_FLOW = None
+
+
+def _flow_fn(compile_):
+    """The defect flow, eagerly or as one compiled graph (cached process-wide).
+
+    The flow has no data-dependent control flow (fixed ``round(8w)`` steps,
+    branchless acceptance), so ``torch.compile(..., fullgraph=True)`` captures
+    all of it as a single kernel.  Measured on a 66 x 5 weight at ``w = 1``:
+    393 us eager -> 66 us compiled for the flow alone; 732 -> 154 us for the
+    whole layer forward.  Opt-in because the first call costs 1-5 s and the
+    graph is specialised per shape and per ``w``.
+    """
+    global _COMPILED_FLOW
+    if not compile_:
+        return _defect_flow_nonneg
+    if _COMPILED_FLOW is None:
+        _COMPILED_FLOW = torch.compile(_defect_flow_nonneg, fullgraph=True, dynamic=False)
+    return _COMPILED_FLOW
 
 
 class _NSAMixin:
     """Shared effective-weight logic.  Subclasses provide ``_pk_view``."""
+
+    compile = False
 
     def _effective(self, W):
         if self.nonneg in (None, False, "none"):
@@ -201,7 +221,7 @@ class _NSAMixin:
             return W
         # non-negativity first, then the in-orthant defect flow (see module doc)
         M = self._pk_view(_nonneg(W, self.nonneg))
-        M = _defect_flow_nonneg(M, self.w)
+        M = _flow_fn(self.compile)(M, self.w)
         return self._pk_unview(M, W)
 
     @torch.no_grad()
@@ -255,12 +275,13 @@ class NSAFlowLinear(_NSAMixin, nn.Module):
     ``out_features`` filters, i.e. on ``W'`` viewed as ``[p, k] = [in, out]``.
     """
 
-    def __init__(self, in_features, out_features, bias=True, w=0.0, nonneg=None):
+    def __init__(self, in_features, out_features, bias=True, w=0.0, nonneg=None,
+                 compile=False):
         super().__init__()
         if not 0.0 <= float(w) <= 1.0:
             raise ValueError(f"w must lie in [0, 1]; got {w}")
         self.in_features, self.out_features = in_features, out_features
-        self.w, self.nonneg = float(w), nonneg
+        self.w, self.nonneg, self.compile = float(w), nonneg, bool(compile)
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         self.bias = nn.Parameter(torch.empty(out_features)) if bias else None
         self.reset_parameters()
@@ -295,7 +316,8 @@ class NSAFlowLinear(_NSAMixin, nn.Module):
 
     def extra_repr(self):
         return (f"in_features={self.in_features}, out_features={self.out_features}, "
-                f"bias={self.bias is not None}, w={self.w}, nonneg={self.nonneg!r}")
+                f"bias={self.bias is not None}, w={self.w}, nonneg={self.nonneg!r}, "
+                f"compile={self.compile}")
 
 
 class NSAFlowConv2d(_NSAMixin, nn.Conv2d):
@@ -305,11 +327,11 @@ class NSAFlowConv2d(_NSAMixin, nn.Conv2d):
     measured as ``[p, k] = [in * kh * kw, out]``.
     """
 
-    def __init__(self, *args, w=0.0, nonneg=None, **kwargs):
+    def __init__(self, *args, w=0.0, nonneg=None, compile=False, **kwargs):
         super().__init__(*args, **kwargs)
         if not 0.0 <= float(w) <= 1.0:
             raise ValueError(f"w must lie in [0, 1]; got {w}")
-        self.w, self.nonneg = float(w), nonneg
+        self.w, self.nonneg, self.compile = float(w), nonneg, bool(compile)
         if self.w > 0.0 and nonneg in (None, False, "none"):
             nn.init.orthogonal_(self.weight)          # else keep nn.Conv2d's init
 
@@ -338,11 +360,11 @@ class NSAFlowLayer(nn.Module):
     rejected rather than guessed at.
     """
 
-    def __init__(self, w=0.5, nonneg=None):
+    def __init__(self, w=0.5, nonneg=None, compile=False):
         super().__init__()
         if not 0.0 <= float(w) <= 1.0:
             raise ValueError(f"w must lie in [0, 1]; got {w}")
-        self.w, self.nonneg = float(w), nonneg
+        self.w, self.nonneg, self.compile = float(w), nonneg, bool(compile)
 
     def forward(self, Y):
         if Y.ndim != 3:
@@ -354,7 +376,7 @@ class NSAFlowLayer(nn.Module):
             if self.w > 0.0:
                 Y = (1.0 - self.w) * Y + self.w * _project_scaled_stiefel_layer(Y)
             return Y
-        return _defect_flow_nonneg(_nonneg(Y, self.nonneg), self.w)
+        return _flow_fn(self.compile)(_nonneg(Y, self.nonneg), self.w)
 
     def defect(self, Y):
         return stiefel_defect_normalised(self.forward(Y))

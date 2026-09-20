@@ -969,104 +969,29 @@ inline double eval_data_objective_raw(
 
     std::fill(A, A + k * k, static_cast<scalar_t>(0));
 
-    if (p > 128) {
-        if (S != nullptr) {
-            cblas_gemm(CblasNoTrans, CblasNoTrans, static_cast<int>(p), static_cast<int>(k), static_cast<int>(p),
-                       static_cast<scalar_t>(1), S, static_cast<int>(p), V, static_cast<int>(k),
-                       static_cast<scalar_t>(0), SV, static_cast<int>(k));
-            cblas_gemm(CblasTrans, CblasNoTrans, static_cast<int>(k), static_cast<int>(k), static_cast<int>(p),
-                       static_cast<scalar_t>(1), V, static_cast<int>(k), SV, static_cast<int>(k),
-                       static_cast<scalar_t>(0), A, static_cast<int>(k));
-        } else if (X != nullptr && n_rows > 0) {
-            cblas_gemm(CblasNoTrans, CblasNoTrans, static_cast<int>(n_rows), static_cast<int>(k), static_cast<int>(p),
-                       static_cast<scalar_t>(1), X, static_cast<int>(p), V, static_cast<int>(k),
-                       static_cast<scalar_t>(0), XV, static_cast<int>(k));
-            cblas_gemm(CblasTrans, CblasNoTrans, static_cast<int>(k), static_cast<int>(k), static_cast<int>(n_rows),
-                       static_cast<scalar_t>(1), XV, static_cast<int>(k), XV, static_cast<int>(k),
-                       static_cast<scalar_t>(0), A, static_cast<int>(k));
-            if (eval_grad) {
-                cblas_gemm(CblasTrans, CblasNoTrans, static_cast<int>(p), static_cast<int>(k), static_cast<int>(n_rows),
-                           static_cast<scalar_t>(1), X, static_cast<int>(p), XV, static_cast<int>(k),
-                           static_cast<scalar_t>(0), SV, static_cast<int>(k));
-            }
-        }
+    if (S != nullptr) {
+        cblas_gemm(CblasNoTrans, CblasNoTrans, static_cast<int>(p), static_cast<int>(k), static_cast<int>(p),
+                   static_cast<scalar_t>(1), S, static_cast<int>(p), V, static_cast<int>(k),
+                   static_cast<scalar_t>(0), SV, static_cast<int>(k));
         cblas_gemm(CblasTrans, CblasNoTrans, static_cast<int>(k), static_cast<int>(k), static_cast<int>(p),
-                   static_cast<scalar_t>(1), V, static_cast<int>(k), V, static_cast<int>(k),
-                   static_cast<scalar_t>(0), B, static_cast<int>(k));
-    } else {
-        if (S != nullptr) {
-            std::fill(SV, SV + p * k, static_cast<scalar_t>(0));
-            for (int64_t i = 0; i < p; ++i) {
-                const scalar_t* S_row = &S[i * p];
-                scalar_t* SV_row = &SV[i * k];
-                for (int64_t r = 0; r < p; ++r) {
-                    scalar_t s_ir = S_row[r];
-                    const scalar_t* V_row = &V[r * k];
-                    for (int64_t j = 0; j < k; ++j) {
-                        SV_row[j] += s_ir * V_row[j];
-                    }
-                }
-            }
-            for (int64_t r = 0; r < p; ++r) {
-                const scalar_t* V_row = &V[r * k];
-                const scalar_t* SV_row = &SV[r * k];
-                for (int64_t i = 0; i < k; ++i) {
-                    scalar_t v_ri = V_row[i];
-                    scalar_t* A_row = &A[i * k];
-                    for (int64_t j = 0; j < k; ++j) {
-                        A_row[j] += v_ri * SV_row[j];
-                    }
-                }
-            }
-        } else if (X != nullptr && n_rows > 0) {
-            std::fill(XV, XV + n_rows * k, static_cast<scalar_t>(0));
-            for (int64_t i = 0; i < n_rows; ++i) {
-                const scalar_t* X_row = &X[i * p];
-                scalar_t* XV_row = &XV[i * k];
-                for (int64_t r = 0; r < p; ++r) {
-                    scalar_t x_ir = X_row[r];
-                    const scalar_t* V_row = &V[r * k];
-                    for (int64_t j = 0; j < k; ++j) {
-                        XV_row[j] += x_ir * V_row[j];
-                    }
-                }
-            }
-            for (int64_t i = 0; i < k; ++i) {
-                for (int64_t j = i; j < k; ++j) {
-                    scalar_t sum = 0;
-                    for (int64_t r = 0; r < n_rows; ++r) {
-                        sum += XV[r * k + i] * XV[r * k + j];
-                    }
-                    A[i * k + j] = sum;
-                    A[j * k + i] = sum;
-                }
-            }
-            if (eval_grad) {
-                std::fill(SV, SV + p * k, static_cast<scalar_t>(0));
-                for (int64_t r = 0; r < n_rows; ++r) {
-                    const scalar_t* X_row = &X[r * p];
-                    const scalar_t* XV_row = &XV[r * k];
-                    for (int64_t i = 0; i < p; ++i) {
-                        scalar_t x_ri = X_row[i];
-                        scalar_t* SV_row = &SV[i * k];
-                        for (int64_t j = 0; j < k; ++j) {
-                            SV_row[j] += x_ri * XV_row[j];
-                        }
-                    }
-                }
-            }
-        }
-        for (int64_t i = 0; i < k; ++i) {
-            for (int64_t j = i; j < k; ++j) {
-                scalar_t sum = 0;
-                for (int64_t r = 0; r < p; ++r) {
-                    sum += V[r * k + i] * V[r * k + j];
-                }
-                B[i * k + j] = sum;
-                B[j * k + i] = sum;
-            }
+                   static_cast<scalar_t>(1), V, static_cast<int>(k), SV, static_cast<int>(k),
+                   static_cast<scalar_t>(0), A, static_cast<int>(k));
+    } else if (X != nullptr && n_rows > 0) {
+        cblas_gemm(CblasNoTrans, CblasNoTrans, static_cast<int>(n_rows), static_cast<int>(k), static_cast<int>(p),
+                   static_cast<scalar_t>(1), X, static_cast<int>(p), V, static_cast<int>(k),
+                   static_cast<scalar_t>(0), XV, static_cast<int>(k));
+        cblas_gemm(CblasTrans, CblasNoTrans, static_cast<int>(k), static_cast<int>(k), static_cast<int>(n_rows),
+                   static_cast<scalar_t>(1), XV, static_cast<int>(k), XV, static_cast<int>(k),
+                   static_cast<scalar_t>(0), A, static_cast<int>(k));
+        if (eval_grad) {
+            cblas_gemm(CblasTrans, CblasNoTrans, static_cast<int>(p), static_cast<int>(k), static_cast<int>(n_rows),
+                       static_cast<scalar_t>(1), X, static_cast<int>(p), XV, static_cast<int>(k),
+                       static_cast<scalar_t>(0), SV, static_cast<int>(k));
         }
     }
+    cblas_gemm(CblasTrans, CblasNoTrans, static_cast<int>(k), static_cast<int>(k), static_cast<int>(p),
+               static_cast<scalar_t>(1), V, static_cast<int>(k), V, static_cast<int>(k),
+               static_cast<scalar_t>(0), B, static_cast<int>(k));
 
     scalar_t trA = 0;
     for (int64_t i = 0; i < k; ++i) trA += A[i * k + i];
@@ -1648,7 +1573,6 @@ lbfgsb_solve_impl(const at::Tensor& x0_in,
     std::vector<double> E_win;
     std::vector<double> g_win;
     double eps = (sizeof(scalar_t) == sizeof(double)) ? std::numeric_limits<double>::epsilon() : std::numeric_limits<float>::epsilon();
-    double eps_floor = (sizeof(scalar_t) == sizeof(double)) ? 1e-9 : 1e-5;
 
     auto stalled = [&]() -> bool {
         if (g_win.size() < 5) return false;
@@ -1658,7 +1582,7 @@ lbfgsb_solve_impl(const at::Tensor& x0_in,
     };
 
     auto classify_stall = [&](double f_try) -> std::string {
-        if (!std::isfinite(gmap) || gmap > stall_slack * std::max(tol, eps_floor)) {
+        if (!std::isfinite(gmap) || gmap > stall_slack * std::max(tol, 0.0)) {
             return "line_search";
         }
         if (stalled()) {
@@ -1676,6 +1600,10 @@ lbfgsb_solve_impl(const at::Tensor& x0_in,
     std::vector<uint8_t> fixed(n);
 
     int64_t mem_cap = std::max<int64_t>(memory, 1);
+    if (mem_cap > 32) {
+        PyErr_WarnEx(PyExc_RuntimeWarning, "L-BFGS-B memory capped at 32", 1);
+        mem_cap = 32;
+    }
     DirectionWorkspace<scalar_t> ws_dir;
     ws_dir.resize(n, mem_cap);
 
@@ -1800,7 +1728,7 @@ lbfgsb_solve_impl(const at::Tensor& x0_in,
         std::copy(xf.begin(), xf.end(), x_lo.begin());
         std::copy(g.begin(), g.end(), g_lo.begin());
 
-        bool has_bracket = false, has_f_hi = false, has_a_lo = false;
+        bool has_bracket = false, has_f_hi = false;
         bool wolfe_success = false;
         double accepted_f = f;
         double c1 = 1e-4, c2 = 0.9;
@@ -1813,14 +1741,14 @@ lbfgsb_solve_impl(const at::Tensor& x0_in,
                 a_lo_val = a_prev; f_lo_val = f_prev; d_lo_val = d_prev; a_hi_val = a_i;
                 std::copy(x_prev.begin(), x_prev.end(), x_lo.begin());
                 std::copy(g_prev.begin(), g_prev.end(), g_lo.begin());
-                has_bracket = true; has_f_hi = false; has_a_lo = true;
+                has_bracket = true; has_f_hi = false;
                 break;
             }
             if (f_i > f + c1 * a_i * g0_dir || (ls_eval > 1 && f_i >= f_prev)) {
                 a_lo_val = a_prev; f_lo_val = f_prev; d_lo_val = d_prev; a_hi_val = a_i;
                 std::copy(x_prev.begin(), x_prev.end(), x_lo.begin());
                 std::copy(g_prev.begin(), g_prev.end(), g_lo.begin());
-                has_bracket = true; has_f_hi = false; has_a_lo = true;
+                has_bracket = true; has_f_hi = false;
                 break;
             }
             if (std::abs(d_i) <= -c2 * g0_dir) {
@@ -1834,7 +1762,7 @@ lbfgsb_solve_impl(const at::Tensor& x0_in,
                 a_lo_val = a_i; f_lo_val = f_i; d_lo_val = d_i; a_hi_val = a_prev;
                 std::copy(x_trial.begin(), x_trial.end(), x_lo.begin());
                 std::copy(g_trial.begin(), g_trial.end(), g_lo.begin());
-                has_bracket = true; has_f_hi = false; has_a_lo = true;
+                has_bracket = true; has_f_hi = false;
                 break;
             }
             a_prev = a_i; f_prev = f_i; d_prev = d_i;
@@ -1881,14 +1809,7 @@ lbfgsb_solve_impl(const at::Tensor& x0_in,
                     }
                     a_lo_val = a_j; f_lo_val = f_j; d_lo_val = d_j;
                     std::copy(x_trial.begin(), x_trial.end(), x_lo.begin());
-                    std::copy(g_trial.begin(), g_trial.end(), g_lo.begin());
                 }
-            }
-            if (!wolfe_success && has_a_lo && f_lo_val < f) {
-                wolfe_success = true;
-                accepted_f = f_lo_val;
-                std::copy(x_lo.begin(), x_lo.end(), x_new.begin());
-                std::copy(g_lo.begin(), g_lo.end(), g_new.begin());
             }
         }
 
@@ -1907,7 +1828,7 @@ lbfgsb_solve_impl(const at::Tensor& x0_in,
                     double diff = static_cast<double>(val - xf[i]);
                     dn2 += diff * diff;
                 }
-                if (dn2 == 0.0) break;
+                if (dn2 == 0.0 || (sizeof(scalar_t) == sizeof(float) && dn2 <= 1e-16)) break;
                 double fb = eval_f_raw(x_trial.data());
                 if (!std::isfinite(fb)) {
                     step *= 0.5;
@@ -2024,7 +1945,7 @@ lbfgsb_solve_impl(const at::Tensor& x0_in,
         }
     }
 
-    if (stop == "max_iter" && std::isfinite(gmap) && gmap <= stall_slack * std::max(tol, eps_floor) && stalled()) {
+    if (stop == "max_iter" && std::isfinite(gmap) && gmap <= stall_slack * std::max(tol, 0.0) && stalled()) {
         stop = "plateau";
     }
 

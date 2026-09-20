@@ -315,3 +315,24 @@ def test_nonneg_flow_first_trial_is_accepted_each_step():
     finally:
         LY._gram_stats = orig
     assert calls["n"] == 1 + LY._FLOW_STEPS, calls   # one initial Gram + one per step, no halvings
+
+
+# ------------------------------------------------------------- compile (3.2.3)
+def test_compiled_flow_matches_eager_for_every_layer():
+    torch.manual_seed(0)
+    x = torch.randn(8, 30)
+    for nonneg in ("hard", "softplus"):
+        a = NSAFlowLinear(30, 6, w=1.0, nonneg=nonneg, compile=False)
+        b = NSAFlowLinear(30, 6, w=1.0, nonneg=nonneg, compile=True)
+        with torch.no_grad():
+            b.weight.copy_(a.weight); b.bias.copy_(a.bias)
+        assert torch.allclose(a(x), b(x), atol=1e-6)
+        ya = a(x).sum(); ya.backward(); yb = b(x).sum(); yb.backward()
+        # float32: a fused kernel reorders reductions; 1e-4 relative is the honest bound
+        assert torch.allclose(a.weight.grad, b.weight.grad, rtol=1e-4, atol=1e-5)
+    Y = torch.rand(3, 20, 4)
+    assert torch.allclose(NSAFlowLayer(w=0.75, nonneg="hard")(Y),
+                          NSAFlowLayer(w=0.75, nonneg="hard", compile=True)(Y), atol=1e-6)
+    c = NSAFlowConv2d(3, 4, 3, w=0.5, nonneg="hard", compile=True)
+    assert torch.isfinite(c(torch.randn(2, 3, 8, 8))).all()
+    assert "compile=True" in repr(NSAFlowLinear(4, 2, compile=True))
