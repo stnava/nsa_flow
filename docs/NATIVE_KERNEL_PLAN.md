@@ -203,3 +203,33 @@ deterministic and the kernel is a translation); only the clocks may move. Put
 the new speed table in README §"Speed against PCA" with the same columns, and
 state the µs/iteration and ops/iteration alongside, since that is the claim
 being made.
+
+## 6. Known parity failures in the native kernel (as of 7b923ad, 2026-09-20)
+
+Both pass on the Python fallback and fail with the native kernel; both are the
+same defect -- near the numerical floor the C++ line search stops earlier and
+less reproducibly than `lbfgsb.py` -- and both were exposed by suites run with
+the kernel active.
+
+1. `tests/test_solver.py::test_terminates_at_a_kkt_point[0.5]` and `[0.9]`
+   (`tol=1e-12`, float64): native returns `stop=line_search, |Gmap|=4.85e-09,
+   converged=False`; the Python path certifies. The Python `_classify_stall`
+   would also refuse to certify at 4.85e-9 with `tol=1e-12` -- so the Python
+   path reached `<= 1e-9` first and the kernel did not. Check the C++ Wolfe /
+   backtracking floors and the precision-floor test for a hard-coded `1e-12`
+   or an early `max_eval` exit.
+2. float32 signed 300x66: native 1365 gradients (`plateau`) vs Python 82
+   (`stationary`) -- trajectories identical for 40 iterations, then the kernel
+   exhausts the Wolfe budget (~20 evals/iteration) for 60 iterations instead
+   of classifying the stall. Port `_gmap_stalled` + precision-floor
+   classification exactly.
+3. pysimlr `tests/test_nsa_flow_hardening.py::test_retraction_is_invariant_to_the_candidates_scale[1e-3, 1e8]`:
+   two native anchored solves of the same problem at different input scales
+   differ by 1e-6 relative in `||Y||` (Python: <= 8.5e-7 at 1e-3 and exactly
+   0 at 1 and 10, see SIMLR_THEORY.md S8 footnotes). Same root cause: the
+   kernel's stopping point is not a deterministic function of the problem to
+   the precision the Python path achieves.
+
+Until fixed, the native kernel should be considered accurate to ~1e-6 in the
+iterate near the floor, not 1e-12; final energies are unaffected (they agree
+to 1e-13 on all reference instances).

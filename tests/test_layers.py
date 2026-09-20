@@ -192,3 +192,74 @@ def test_layers_reject_w_outside_unit_interval(bad_w):
         NSAFlowLinear(10, 4, w=bad_w)
     with pytest.raises(ValueError, match=r"\[0, 1\]"):
         NSAFlowLayer(w=bad_w)
+
+
+# ---------------------------------------------- non-negativity + w, fixed in 3.2.1
+def _defect_of(layer):
+    from nsa_flow.diagnostics import basis_report
+    return basis_report(layer._pk_view(layer.effective_weight().detach()).double())["defect_D"]
+
+
+@pytest.mark.parametrize("nonneg", ["hard", True, "softplus"])
+def test_w_reduces_the_defect_monotonically_under_nonneg(nonneg):
+    """Before 3.2.1 the layer orthogonalised THEN clamped/softplussed, and w did
+    nothing under non-negativity (defect 0.53 -> 0.50 over w in [0, 1]).  Now
+    non-negativity is applied first and w drives an in-orthant defect flow whose
+    iterates are prefix-consistent, so the defect is non-increasing in w by
+    construction and falls by an order of magnitude or more."""
+    torch.manual_seed(0)
+    W0 = torch.randn(5, 66)
+    ds = []
+    for w in (0.0, 0.25, 0.5, 0.75, 1.0):
+        layer = NSAFlowLinear(66, 5, w=w, nonneg=nonneg)
+        with torch.no_grad():
+            layer.weight.copy_(W0)
+        eff = layer.effective_weight()
+        assert (eff >= 0).all()
+        ds.append(_defect_of(layer))
+    assert all(ds[i + 1] <= ds[i] + 1e-12 for i in range(len(ds) - 1)), ds
+    assert ds[-1] < 0.1 * ds[0], ds
+
+
+def test_nonneg_true_is_the_hard_clamp_and_w0_is_the_identity_on_it():
+    layer = NSAFlowLinear(20, 4, w=0.0, nonneg=True)
+    with torch.no_grad():
+        layer.weight.copy_(torch.randn(4, 20))
+    assert torch.equal(layer.effective_weight(), layer.weight.clamp_min(0.0))
+    assert (layer.effective_weight() == 0).float().mean() > 0.3     # a clamp makes zeros; softplus never did
+
+
+def test_nonneg_flow_is_differentiable_and_conv2d_agrees():
+    layer = NSAFlowLinear(30, 6, w=0.5, nonneg="hard")
+    x = torch.randn(4, 30, requires_grad=True)
+    layer(x).sum().backward()
+    assert torch.isfinite(layer.weight.grad).all() and x.grad is not None
+    conv = NSAFlowConv2d(3, 8, 3, w=1.0, nonneg="hard")
+    w0 = NSAFlowConv2d(3, 8, 3, w=0.0, nonneg="hard")
+    with torch.no_grad():
+        w0.weight.copy_(conv.weight)
+    assert _defect_of(conv) <= _defect_of(w0) + 1e-12
+    assert (conv.effective_weight() >= 0).all()
+
+
+def test_project_returns_the_anchored_prox_fixed_point():
+    from nsa_flow import nsa_flow
+    layer = NSAFlowLinear(40, 5, w=0.5, nonneg="hard")
+    with torch.no_grad():
+        layer.weight.copy_(torch.randn(5, 40))
+    M0 = layer.weight.detach().T.double().clone()
+    res = layer.project_()
+    assert res.converged
+    ref = nsa_flow(M0, w=0.5, mode="anchored", fidelity="anchor", nonneg=True).Y
+    assert torch.allclose(layer.weight.detach().T.double(), ref, atol=1e-6)
+    assert (layer.weight >= 0).all()
+
+
+def test_w0_layer_initialises_like_nn_linear_not_orthogonally():
+    """A drop-in replacement at w=0 must not silently change the init."""
+    torch.manual_seed(0)
+    layer = NSAFlowLinear(64, 8, w=0.0)
+    W = layer.weight.detach().T
+    G = W.T @ W
+    off = (G - torch.diag(torch.diagonal(G))).abs().max().item()
+    assert off > 1e-3            # orthogonal_ would make this ~1e-7

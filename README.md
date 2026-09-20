@@ -188,18 +188,28 @@ Two routes, both sound:
 from nsa_flow import NSAFlowLinear, NSAFlowConv2d
 
 # (preferred) penalty: a standard layer plus a regulariser
-layer = NSAFlowLinear(256, 32)
-loss  = task_loss(layer(x), y) + 0.1 * layer.defect()
+layer = NSAFlowLinear(256, 32, w=0.0)
+loss = task_loss + 0.3 * layer.defect()        # defect() is O(p k^2), exact gradient
 
-# (parameterisation) effective weight is blended toward the projection
-layer = NSAFlowLinear(256, 32, w=0.5)   # w is the true blend fraction
+# parameterisation: the effective weight is driven toward the feasible set
+layer = NSAFlowLinear(256, 32, w=0.5)                     # Stiefel blend, exact at w=1
+layer = NSAFlowLinear(256, 32, w=0.5, nonneg="hard")      # non-negative AND near-orthogonal
+layer.project_()                                          # exact anchored prox, in place, no autograd
 ```
 
-`polar_factor` and `project_scaled_stiefel` carry an explicit
-Sylvester-equation derivative. Differentiating `torch.linalg.svd` divides by
-`sigma_i^2 - sigma_j^2` and returns NaN at repeated singular values — which is
-exactly what `nn.init.orthogonal_` produces. The polar factor is smooth wherever
-`Y` has full column rank; its derivative divides by `h_i + h_j > 0`.
+**Non-negativity and `w` compose in one order only** (fixed in 3.2.1). With
+`nonneg="hard"` (or `True`) or `"softplus"`, non-negativity is applied first and
+`w` then drives a short projected-gradient flow on the defect *inside* the
+orthant — `round(8w)` fixed-size steps, each kept only if it lowers `D̃` — so the
+effective weight is non-negative exactly and `defect()` is non-increasing in `w`
+by construction (measured on a random 66×5 start: hard 0.104 → 0.002,
+softplus 0.481 → 0.003, sparsity 0.70 at `w=1`). Versions before 3.2.1 blended
+onto the Stiefel manifold and *then* clamped, which undid the orthogonalisation:
+`w` moved the defect from 0.53 to 0.50. `nonneg=True` now means the hard clamp
+(it used to mean softplus, which cannot produce a zero and maps the default init
+to ≈0.69 everywhere). At `w=0` the layer initialises exactly like `nn.Linear`.
+
+`NSAFlowLayer` applies the same map per sample to a `[B, p, k]` batch.
 
 ## API
 
