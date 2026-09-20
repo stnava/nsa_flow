@@ -84,18 +84,23 @@ The inner loop forms one Gram product and two `[p,k] x [k,k]` products: `O(p k^2
 with **no SVD, eigendecomposition or QR**. Typical convergence is 15–300
 deterministic iterations.
 
-### Native C++ Kernel Acceleration (v3.2.0+)
+### Native C++ Kernel Acceleration (v3.2.6)
 
 When compiled, `nsa_flow._native._lbfgsb_cpu` executes fused iterations in C++ on CPU,
 eliminating Python interpreter and ATen dispatch overhead while achieving bit-exact numerical parity
 (`< 1e-12` energy difference) with pure PyTorch.
 
-- **Speedup:** 6–11× speedup on standard imaging shapes:
-  - ADNI cortical anchored (`p=66, k=5`): 10.7× speedup (5.2 ms vs 55.8 ms; 42.8 µs/iter vs 457.6 µs/iter).
-  - ADNI data-anchored (`300 x 66, k=5`): 8.2× speedup (11.1 ms vs 90.5 ms; 56.6 µs/iter vs 464.2 µs/iter).
-  - ADNI signed (`300 x 66, k=5`): 6.4× speedup (15.8 ms vs 100.9 ms; 86.7 µs/iter vs 542.7 µs/iter).
-  - Golub genomics (`72 x 2000, k=3`): 2.3× speedup (52.6 ms vs 121.9 ms).
+- **Speedup:** 5–12× speedup on standard problem shapes:
+  - Tall small data (`500 x 50, k=5`): 11.8× speedup (7.3 ms vs 86.6 ms; 49.8 µs/iter vs 601.7 µs/iter).
+  - ADNI cortical signed (`64 x 10, k=10`): 11.1× speedup (9.1 ms vs 101.1 ms; 61.4 µs/iter vs 683.1 µs/iter).
+  - Tall medium data (`1000 x 100, k=10`): 5.0× speedup (20.9 ms vs 104.9 ms; 142.4 µs/iter vs 723.7 µs/iter).
+  - Wide genomics data (`50 x 2000, k=5`): 1.8× speedup (185.5 ms vs 334.3 ms; 1.25 ms/iter vs 2.26 ms/iter).
 - **Direct CBLAS & Zero Inner Allocations:** Cauchy point, subspace minimization, compact quasi-Newton $M$ inversion, and line search operate on preallocated workspace buffers and direct CBLAS/LAPACK calls with stack solvers for small-to-moderate dimensions.
+- **v3.2.6 Optimizations:**
+  - *CBLAS SYRK:* Rank-k symmetric updates replace general matrix products for $A = X_V^T X_V$, $B = V^T V$, and $BW = W^T W$, cutting FLOPs by 50% for quadratic terms.
+  - *Zero-Copy Free Subspaces:* Direct contiguous pointer indexing for $W_{\text{free}}$ when all coordinates are free ($n_{\text{free}} == n$).
+  - *Lazy Line-Search Copies:* Defers workspace buffer copying until trial 1 fails Wolfe conditions, eliminating overhead on >85% of iterations.
+  - *Noise-Floor Stall Gating:* Anchors stall classification to `max(stall_slack * tol, sqrt(eps))` to certified plateaus at the float precision floor without false certification on far points.
 - **Pure-Python fallback:** To force pure-Python execution, set `NSA_FLOW_DISABLE_NATIVE=1`. All reference instances match to $< 10^{-12}$.
 
 Empirically `E_w` has a unique optimum for `w < 1` — 24 random restarts agree to
