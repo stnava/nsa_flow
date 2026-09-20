@@ -73,6 +73,28 @@ inline void cblas_gemv<float>(CBLAS_TRANSPOSE TransA, int M, int N,
 }
 
 template <typename T>
+inline void cblas_syrk(CBLAS_UPLO Uplo, CBLAS_TRANSPOSE Trans,
+                       int N, int K,
+                       T alpha, const T* A, int lda,
+                       T beta, T* C, int ldc);
+
+template <>
+inline void cblas_syrk<double>(CBLAS_UPLO Uplo, CBLAS_TRANSPOSE Trans,
+                               int N, int K,
+                               double alpha, const double* A, int lda,
+                               double beta, double* C, int ldc) {
+    cblas_dsyrk(CblasRowMajor, Uplo, Trans, N, K, alpha, A, lda, beta, C, ldc);
+}
+
+template <>
+inline void cblas_syrk<float>(CBLAS_UPLO Uplo, CBLAS_TRANSPOSE Trans,
+                              int N, int K,
+                              float alpha, const float* A, int lda,
+                              float beta, float* C, int ldc) {
+    cblas_ssyrk(CblasRowMajor, Uplo, Trans, N, K, alpha, A, lda, beta, C, ldc);
+}
+
+template <typename T>
 inline void lapack_gesv_raw(int n, int nrhs, T* a, int lda, int* ipiv, T* b, int ldb, int* info);
 
 template <>
@@ -980,18 +1002,28 @@ inline double eval_data_objective_raw(
         cblas_gemm(CblasNoTrans, CblasNoTrans, static_cast<int>(n_rows), static_cast<int>(k), static_cast<int>(p),
                    static_cast<scalar_t>(1), X, static_cast<int>(p), V, static_cast<int>(k),
                    static_cast<scalar_t>(0), XV, static_cast<int>(k));
-        cblas_gemm(CblasTrans, CblasNoTrans, static_cast<int>(k), static_cast<int>(k), static_cast<int>(n_rows),
-                   static_cast<scalar_t>(1), XV, static_cast<int>(k), XV, static_cast<int>(k),
+        cblas_syrk(CblasUpper, CblasTrans, static_cast<int>(k), static_cast<int>(n_rows),
+                   static_cast<scalar_t>(1), XV, static_cast<int>(k),
                    static_cast<scalar_t>(0), A, static_cast<int>(k));
+        for (int64_t i = 0; i < k; ++i) {
+            for (int64_t j = i + 1; j < k; ++j) {
+                A[j * k + i] = A[i * k + j];
+            }
+        }
         if (eval_grad) {
             cblas_gemm(CblasTrans, CblasNoTrans, static_cast<int>(p), static_cast<int>(k), static_cast<int>(n_rows),
                        static_cast<scalar_t>(1), X, static_cast<int>(p), XV, static_cast<int>(k),
                        static_cast<scalar_t>(0), SV, static_cast<int>(k));
         }
     }
-    cblas_gemm(CblasTrans, CblasNoTrans, static_cast<int>(k), static_cast<int>(k), static_cast<int>(p),
-               static_cast<scalar_t>(1), V, static_cast<int>(k), V, static_cast<int>(k),
+    cblas_syrk(CblasUpper, CblasTrans, static_cast<int>(k), static_cast<int>(p),
+               static_cast<scalar_t>(1), V, static_cast<int>(k),
                static_cast<scalar_t>(0), B, static_cast<int>(k));
+    for (int64_t i = 0; i < k; ++i) {
+        for (int64_t j = i + 1; j < k; ++j) {
+            B[j * k + i] = B[i * k + j];
+        }
+    }
 
     scalar_t trA = 0;
     for (int64_t i = 0; i < k; ++i) trA += A[i * k + i];
@@ -1046,33 +1078,46 @@ inline double eval_data_objective_raw(
         scalar_t factor_D_D = (k > 1) ? (4.0 / (scale_k_D * t)) : static_cast<scalar_t>(0);
         scalar_t factor_D_cg = (k > 1) ? (4.0 / (t * t * scale_k_cg)) : static_cast<scalar_t>(0);
         scalar_t scale_cg = (t > 0) ? (a2 / t) : static_cast<scalar_t>(0);
+        scalar_t one_minus_w = static_cast<scalar_t>(1.0 - w);
+        scalar_t w_s = static_cast<scalar_t>(w);
 
         for (int64_t r = 0; r < p; ++r) {
-            for (int64_t j = 0; j < k; ++j) {
-                scalar_t svb = 0, va = 0;
-                for (int64_t m = 0; m < k; ++m) {
-                    svb += SV[r * k + m] * B[m * k + j];
-                    va += V[r * k + m] * A[m * k + j];
-                }
-                scalar_t gF = factor_F * (-2.0 * SV[r * k + j] + svb + va);
+            const scalar_t* SV_r = &SV[r * k];
+            const scalar_t* V_r = &V[r * k];
+            scalar_t svb_row[64] = {0};
+            scalar_t va_row[64] = {0};
+            scalar_t v_mat_row[64] = {0};
 
+            for (int64_t m = 0; m < k; ++m) {
+                scalar_t svm = SV_r[m];
+                scalar_t vm = V_r[m];
+                const scalar_t* B_m = &B[m * k];
+                const scalar_t* A_m = &A[m * k];
+                for (int64_t j = 0; j < k; ++j) {
+                    svb_row[j] += svm * B_m[j];
+                    va_row[j] += vm * A_m[j];
+                }
+                if (k > 1 && w > 0.0) {
+                    const scalar_t* M_orth_m = is_orth_cg ? B_m : &G[m * k];
+                    for (int64_t j = 0; j < k; ++j) {
+                        v_mat_row[j] += vm * M_orth_m[j];
+                    }
+                }
+            }
+
+            scalar_t* grad_r = &grad_out[r * k];
+            for (int64_t j = 0; j < k; ++j) {
+                scalar_t gF = factor_F * (-2.0 * SV_r[j] + svb_row[j] + va_row[j]);
                 scalar_t gD = 0;
                 if (k > 1 && w > 0.0) {
                     if (is_orth_cg) {
-                        scalar_t v_off = 0;
-                        for (int64_t m = 0; m < k; ++m) {
-                            if (m != j) v_off += V[r * k + m] * B[m * k + j];
-                        }
-                        gD = factor_D_cg * (v_off - scale_cg * V[r * k + j]);
+                        scalar_t v_off = v_mat_row[j] - V_r[j] * B[j * k + j];
+                        gD = factor_D_cg * (v_off - scale_cg * V_r[j]);
                     } else {
-                        scalar_t vg = 0;
-                        for (int64_t m = 0; m < k; ++m) {
-                            vg += V[r * k + m] * G[m * k + j];
-                        }
-                        gD = factor_D_D * (vg - N2 * V[r * k + j]);
+                        gD = factor_D_D * (v_mat_row[j] - N2 * V_r[j]);
                     }
                 }
-                grad_out[r * k + j] = (1.0 - w) * gF + (w > 0.0 && k > 1 ? w * gD : static_cast<scalar_t>(0));
+                grad_r[j] = one_minus_w * gF + (w > 0.0 && k > 1 ? w_s * gD : static_cast<scalar_t>(0));
             }
         }
     }
@@ -1105,9 +1150,14 @@ inline double eval_signed_objective_raw(
     scalar_t* BW = ws.BW.data();
     scalar_t* GW = ws.GW.data();
 
-    cblas_gemm(CblasTrans, CblasNoTrans, static_cast<int>(two_k), static_cast<int>(two_k), static_cast<int>(p),
-               static_cast<scalar_t>(1), W, static_cast<int>(two_k), W, static_cast<int>(two_k),
+    cblas_syrk(CblasUpper, CblasTrans, static_cast<int>(two_k), static_cast<int>(p),
+               static_cast<scalar_t>(1), W, static_cast<int>(two_k),
                static_cast<scalar_t>(0), BW, static_cast<int>(two_k));
+    for (int64_t i = 0; i < two_k; ++i) {
+        for (int64_t j = i + 1; j < two_k; ++j) {
+            BW[j * two_k + i] = BW[i * two_k + j];
+        }
+    }
 
     scalar_t D = 0;
     scalar_t tW = 0;
@@ -1161,31 +1211,42 @@ inline double eval_signed_objective_raw(
         scalar_t factor_D_cg = 4.0 / (tW * tW * scale_k_cg);
         scalar_t scale_cg = (tW > 0) ? (a2 / tW) : static_cast<scalar_t>(0);
         scalar_t lobe_coef = static_cast<scalar_t>(w_val * lobe_val / c_val);
+        scalar_t one_minus_w_s = static_cast<scalar_t>(1.0 - w_val);
+        scalar_t w_s = static_cast<scalar_t>(w_val);
 
         for (int64_t r = 0; r < p; ++r) {
-            for (int64_t j = 0; j < two_k; ++j) {
-                scalar_t gD = 0;
-                if (w > 0.0) {
-                    if (orth == "D") {
-                        scalar_t wg = 0;
-                        for (int64_t m = 0; m < two_k; ++m) {
-                            wg += W[r * two_k + m] * GW[m * two_k + j];
-                        }
-                        gD = factor_D_D * (wg - N2 * W[r * two_k + j]);
-                    } else {
-                        scalar_t w_off = 0;
-                        for (int64_t m = 0; m < two_k; ++m) {
-                            if (m != j) w_off += W[r * two_k + m] * BW[m * two_k + j];
-                        }
-                        gD = factor_D_cg * (w_off - scale_cg * W[r * two_k + j]);
+            const scalar_t* W_r = &W[r * two_k];
+            const scalar_t* gV_r = &gV[r * k];
+            scalar_t* grad_r = &grad_out[r * two_k];
+            scalar_t w_mat_row[64] = {0};
+
+            if (w_val > 0.0) {
+                const scalar_t* Mat = (orth == "D") ? GW : BW;
+                for (int64_t m = 0; m < two_k; ++m) {
+                    scalar_t wm = W_r[m];
+                    const scalar_t* Mat_m = &Mat[m * two_k];
+                    for (int64_t j = 0; j < two_k; ++j) {
+                        w_mat_row[j] += wm * Mat_m[j];
                     }
                 }
-                scalar_t gW_F = (j < k) ? gV[r * k + j] : -gV[r * k + (j - k)];
+            }
+
+            for (int64_t j = 0; j < two_k; ++j) {
+                scalar_t gD = 0;
+                if (w_val > 0.0) {
+                    if (orth == "D") {
+                        gD = factor_D_D * (w_mat_row[j] - N2 * W_r[j]);
+                    } else {
+                        scalar_t w_off = w_mat_row[j] - W_r[j] * BW[j * two_k + j];
+                        gD = factor_D_cg * (w_off - scale_cg * W_r[j]);
+                    }
+                }
+                scalar_t gW_F = (j < k) ? gV_r[j] : -gV_r[j - k];
                 scalar_t g_lobe = 0;
                 if (lobe_val > 0.0 && w > 0.0) {
-                    g_lobe = lobe_coef * ((j < k) ? W[r * two_k + k + j] : W[r * two_k + (j - k)]);
+                    g_lobe = lobe_coef * ((j < k) ? W_r[k + j] : W_r[j - k]);
                 }
-                grad_out[r * two_k + j] = static_cast<scalar_t>(1.0 - w_val) * gW_F + static_cast<scalar_t>(w_val) * gD + g_lobe;
+                grad_r[j] = one_minus_w_s * gW_F + w_s * gD + g_lobe;
             }
         }
     }
