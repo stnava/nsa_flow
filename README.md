@@ -222,7 +222,7 @@ nonneg=softplus w=1.0: train fwd  649 us (was 842) | eval fwd 9 us
 MPS blend w=0.5 831 us (was 1227) | MPS hard w=1 5383 us (was 6372)
 ```
 
-In `eval()` the effective weight is cached until the parameter changes, so inference costs the same as `nn.Linear`. The blend uses the exact `eigh` projection where `eigh` is native and Newton–Schulz where it is not (MPS). The non-negative flow at `w=1` is ~8 fixed steps of ~30 tensor ops; its remaining cost is dispatch, not arithmetic — the same ceiling the solver hit — and `torch.compile` is the next lever for it, not threading.
+What moved and what did not, stated plainly. In `eval()` the effective weight is cached until the parameter changes, so inference costs the same as `nn.Linear` (9 µs) — that is the real win. The blend uses the exact `eigh` projection where `eigh` is native and Newton–Schulz where it is not, which halves the MPS forward. The non-negative training forward improved 30% at `w=0.5` and **not at all at `w=1`** (731 vs 719 µs): sharing the Gram across steps and removing the halvings cut the arithmetic but the flow is ~8 steps × ~30 tensor ops and eager dispatch is the floor — the same ceiling the solver hit. `torch.compile` is the next lever for it (the flow now has no data-dependent control flow); threading is not.
 
 
 ## API
