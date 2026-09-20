@@ -54,7 +54,7 @@ from .subspace import (SubspaceAnchor, negative_mass, subspace_fidelity,
                        grad_subspace_fidelity)
 from .layers import NSAFlowLinear, NSAFlowConv2d, NSAFlowLayer
 
-__version__ = "3.3.0"
+__version__ = "3.3.1"
 
 
 def __getattr__(name):

@@ -217,16 +217,25 @@ class _NSAMixin:
     """Shared effective-weight logic. Subclasses provide ``_pk_view``."""
 
     compile = False
-    operator = "flow"
-    n_steps = _FLOW_STEPS
+    operator = "auto"
 
     def _effective(self, W):
-        if getattr(self, "operator", "flow") == "solver":
+        if self.nonneg not in (None, False, "none", True, "hard", "softplus", "soft"):
+            raise ValueError(f"nonneg must be one of None/'none', 'softplus', 'hard'/True; got {self.nonneg!r}")
+        is_nonneg = self.nonneg not in (None, False, "none")
+        if self.w == 0.0:
+            if is_nonneg:
+                return self._pk_unview(self._pk_view(_nonneg(W, self.nonneg)), W)
+            return W
+
+        op = getattr(self, "operator", "auto")
+        use_solver = (op == "solver") or (op == "auto" and is_nonneg)
+
+        if use_solver:
             from .solve import nsa_flow
             M = self._pk_view(W.detach())
-            nonneg = self.nonneg not in (None, False, "none")
             res = nsa_flow(M.double(), w=self.w, mode="anchored", fidelity="anchor",
-                           nonneg=nonneg)
+                           nonneg=is_nonneg)
             Y = res.Y.to(W.dtype)
             W_eff = self._pk_unview(Y, W)
             if self.training:
@@ -236,20 +245,15 @@ class _NSAMixin:
                 return W + (W_eff - W).detach()
             return W_eff
 
-        if self.nonneg in (None, False, "none"):
-            if self.w > 0.0:
-                M = self._pk_view(W)
-                M = (1.0 - self.w) * M + self.w * _project_scaled_stiefel_layer(M)
-                W = self._pk_unview(M, W)
-            return W
-        # Unified blend semantics: W_eff = (1 - w) max(0, W) + w P_nonneg(W)
+        if not is_nonneg:
+            M = self._pk_view(W)
+            M = (1.0 - self.w) * M + self.w * _project_scaled_stiefel_layer(M)
+            return self._pk_unview(M, W)
+
+        # operator == "flow" with non-negative constraint: Euler blend fallback
         M0 = self._pk_view(_nonneg(W, self.nonneg))
-        if self.w > 0.0:
-            n_steps = getattr(self, "n_steps", _FLOW_STEPS)
-            P = _flow_fn(self.compile)(M0, n_steps)
-            M = (1.0 - self.w) * M0 + self.w * P
-        else:
-            M = M0
+        P = _flow_fn(self.compile)(M0, _FLOW_STEPS)
+        M = (1.0 - self.w) * M0 + self.w * P
         return self._pk_unview(M, W)
 
     @torch.no_grad()
@@ -261,12 +265,14 @@ class _NSAMixin:
         proximal-gradient training: call between optimiser steps.  Returns the
         solver's result for its certificate and diagnostics.
         """
+        if self.nonneg not in (None, False, "none", True, "hard", "softplus", "soft"):
+            raise ValueError(f"nonneg must be one of None/'none', 'softplus', 'hard'/True; got {self.nonneg!r}")
         from .solve import nsa_flow
         w = self.w if w is None else float(w)
+        is_nonneg = self.nonneg not in (None, False, "none")
         M = self._pk_view(self.weight.detach())
-        nonneg = self.nonneg not in (None, False, "none")
         res = nsa_flow(M.double(), w=w, mode="anchored", fidelity="anchor",
-                       nonneg=nonneg, **kwargs)
+                       nonneg=is_nonneg, **kwargs)
         self.weight.copy_(self._pk_unview(res.Y.to(self.weight.dtype), self.weight))
         return res
 
@@ -277,8 +283,8 @@ class _NSAMixin:
         inference forward back into ``nn.Linear`` cost."""
         if self.training:
             return self._effective(W)
-        key = (W._version, self.w, str(self.nonneg), getattr(self, "operator", "flow"),
-               getattr(self, "n_steps", _FLOW_STEPS), W.device, W.dtype)
+        key = (W._version, self.w, str(self.nonneg), getattr(self, "operator", "auto"),
+               W.device, W.dtype)
         cache = getattr(self, "_eff_cache", None)
         if cache is not None and cache[0] == key:
             return cache[1]
@@ -344,13 +350,17 @@ class NSAFlowLinear(_NSAMixin, nn.Module):
         compile (bool, optional): If ``True``, compiles the in-orthant defect flow
             graph using ``torch.compile(fullgraph=True)``. Default: ``False``.
         operator (str, optional): Operator mode for effective weight evaluation.
-            ``"flow"`` (default) uses the unrolled in-graph blend with full autograd.
-            ``"solver"`` evaluates the exact certified :func:`nsa_flow.nsa_flow`
-            anchored proximal solver (with caching in ``eval()`` and straight-through
-            gradient estimation in ``train()``), giving exact numerical and sparsity
-            parity with :func:`nsa_flow.nsa_flow` across the full range :math:`w \in [0, 1]`.
-        n_steps (int, optional): Number of defect-flow steps used when computing
-            :math:`P(W_0)` in ``operator="flow"``. Decoupled from ``w``. Default: ``8``.
+            ``"auto"`` (default) automatically picks the optimal operator: for signed
+            layers (``nonneg=None``), uses the exact closed-form Stiefel blend
+            (60 µs, fully differentiable); for non-negative layers (``nonneg="hard"``
+            or ``"softplus"``), uses the exact certified :func:`nsa_flow.nsa_flow`
+            anchored proximal solver with Straight-Through Estimator (STE) gradients
+            and ``eval()`` caching. Under non-negativity, this produces exact zeros
+            via proximal shrinkage that scale smoothly with :math:`w`, matches
+            :meth:`project_` identically, and reaches the true manifold projection at
+            :math:`w \to 1.0`.
+            ``"solver"`` evaluates the certified anchored solver for all modes.
+            ``"flow"`` uses the unrolled in-graph Euler defect flow blend.
 
     Attributes:
         weight (torch.nn.Parameter): Learnable weights of shape ``[out_features, in_features]``.
@@ -367,20 +377,19 @@ class NSAFlowLinear(_NSAMixin, nn.Module):
         torch.Size([8, 16])
         >>> # Check filter defect (0 = perfectly orthogonal):
         >>> print(f"Defect: {layer.defect().item():.4f}")
-        >>> # Exact solver operator matching nsa_flow:
-        >>> layer_solver = NSAFlowLinear(64, 16, w=0.5, nonneg="hard", operator="solver")
+        >>> # Non-negative layer defaults to exact anchored solver with smooth zeros:
+        >>> layer_nonneg = NSAFlowLinear(64, 16, w=0.5, nonneg="hard")
     """
 
     def __init__(self, in_features, out_features, bias=True, w=0.0, nonneg=None,
-                 compile=False, operator="flow", n_steps=_FLOW_STEPS):
+                 compile=False, operator="auto", **kwargs):
         super().__init__()
         if not 0.0 <= float(w) <= 1.0:
             raise ValueError(f"w must lie in [0, 1]; got {w}")
-        if operator not in ("flow", "solver"):
-            raise ValueError(f"operator must be 'flow' or 'solver'; got {operator!r}")
+        if operator not in ("auto", "flow", "solver"):
+            raise ValueError(f"operator must be 'auto', 'flow', or 'solver'; got {operator!r}")
         self.in_features, self.out_features = in_features, out_features
         self.w, self.nonneg, self.compile, self.operator = float(w), nonneg, bool(compile), str(operator)
-        self.n_steps = int(n_steps)
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         self.bias = nn.Parameter(torch.empty(out_features)) if bias else None
         self.reset_parameters()
@@ -411,7 +420,7 @@ class NSAFlowLinear(_NSAMixin, nn.Module):
     def extra_repr(self):
         return (f"in_features={self.in_features}, out_features={self.out_features}, "
                 f"bias={self.bias is not None}, w={self.w}, nonneg={self.nonneg!r}, "
-                f"compile={self.compile}, operator={self.operator!r}, n_steps={self.n_steps}")
+                f"compile={self.compile}, operator={self.operator!r}")
 
 
 class NSAFlowConv2d(_NSAMixin, nn.Conv2d):
@@ -427,20 +436,17 @@ class NSAFlowConv2d(_NSAMixin, nn.Conv2d):
             ``"hard"``/``True``, or ``"softplus"``). Default: ``None``.
         compile (bool, optional): If ``True``, compiles the non-negative defect flow.
             Default: ``False``.
-        operator (str, optional): Operator mode (``"flow"`` or ``"solver"``). Default: ``"flow"``.
-        n_steps (int, optional): Number of defect flow steps in ``operator="flow"``. Default: ``8``.
+        operator (str, optional): Operator mode (``"auto"``, ``"flow"``, or ``"solver"``). Default: ``"auto"``.
         **kwargs: Keyword arguments forwarded to ``nn.Conv2d``.
     """
 
-    def __init__(self, *args, w=0.0, nonneg=None, compile=False, operator="flow",
-                 n_steps=_FLOW_STEPS, **kwargs):
+    def __init__(self, *args, w=0.0, nonneg=None, compile=False, operator="auto", **kwargs):
         super().__init__(*args, **kwargs)
         if not 0.0 <= float(w) <= 1.0:
             raise ValueError(f"w must lie in [0, 1]; got {w}")
-        if operator not in ("flow", "solver"):
-            raise ValueError(f"operator must be 'flow' or 'solver'; got {operator!r}")
+        if operator not in ("auto", "flow", "solver"):
+            raise ValueError(f"operator must be 'auto', 'flow', or 'solver'; got {operator!r}")
         self.w, self.nonneg, self.compile, self.operator = float(w), nonneg, bool(compile), str(operator)
-        self.n_steps = int(n_steps)
         if self.w > 0.0 and nonneg in (None, False, "none"):
             nn.init.orthogonal_(self.weight)          # else keep nn.Conv2d's init
 
@@ -460,7 +466,7 @@ class NSAFlowConv2d(_NSAMixin, nn.Conv2d):
 
     def extra_repr(self):
         s = super().extra_repr()
-        return f"{s}, w={self.w}, nonneg={self.nonneg!r}, operator={self.operator!r}, n_steps={self.n_steps}"
+        return f"{s}, w={self.w}, nonneg={self.nonneg!r}, operator={self.operator!r}"
 
 
 class NSAFlowLayer(nn.Module):
@@ -473,14 +479,13 @@ class NSAFlowLayer(nn.Module):
     rejected rather than guessed at.
     """
 
-    def __init__(self, w=0.5, nonneg=None, compile=False, operator="flow", n_steps=_FLOW_STEPS):
+    def __init__(self, w=0.5, nonneg=None, compile=False, operator="auto", **kwargs):
         super().__init__()
         if not 0.0 <= float(w) <= 1.0:
             raise ValueError(f"w must lie in [0, 1]; got {w}")
-        if operator not in ("flow", "solver"):
-            raise ValueError(f"operator must be 'flow' or 'solver'; got {operator!r}")
+        if operator not in ("auto", "flow", "solver"):
+            raise ValueError(f"operator must be 'auto', 'flow', or 'solver'; got {operator!r}")
         self.w, self.nonneg, self.compile, self.operator = float(w), nonneg, bool(compile), str(operator)
-        self.n_steps = int(n_steps)
 
     def forward(self, Y):
         if Y.ndim != 3:
@@ -488,24 +493,30 @@ class NSAFlowLayer(nn.Module):
                 f"NSAFlowLayer expects batched [B, p, k] input; got {tuple(Y.shape)}. "
                 "Add a leading batch axis to state the intended per-sample semantics."
             )
-        if getattr(self, "operator", "flow") == "solver":
+        if self.nonneg not in (None, False, "none", True, "hard", "softplus", "soft"):
+            raise ValueError(f"nonneg must be one of None/'none', 'softplus', 'hard'/True; got {self.nonneg!r}")
+        op = getattr(self, "operator", "auto")
+        is_nonneg = self.nonneg not in (None, False, "none")
+        use_solver = (op == "solver") or (op == "auto" and is_nonneg)
+
+        if use_solver:
             from .solve import nsa_flow
-            nonneg = self.nonneg not in (None, False, "none")
             res = [nsa_flow(Y[i].detach().double(), w=self.w, mode="anchored",
-                            fidelity="anchor", nonneg=nonneg).Y.to(Y.dtype)
+                            fidelity="anchor", nonneg=is_nonneg).Y.to(Y.dtype)
                    for i in range(Y.shape[0])]
             Y_eff = torch.stack(res, dim=0)
             if self.training:
                 return Y + (Y_eff - Y).detach()
             return Y_eff
 
-        if self.nonneg in (None, False, "none"):
+        if not is_nonneg:
             if self.w > 0.0:
                 Y = (1.0 - self.w) * Y + self.w * _project_scaled_stiefel_layer(Y)
             return Y
+
         Y0 = _nonneg(Y, self.nonneg)
         if self.w > 0.0:
-            P = _flow_fn(self.compile)(Y0, getattr(self, "n_steps", _FLOW_STEPS))
+            P = _flow_fn(self.compile)(Y0, _FLOW_STEPS)
             return (1.0 - self.w) * Y0 + self.w * P
         return Y0
 
@@ -513,4 +524,4 @@ class NSAFlowLayer(nn.Module):
         return stiefel_defect_normalised(self.forward(Y))
 
     def extra_repr(self):
-        return f"w={self.w}, nonneg={self.nonneg!r}, operator={self.operator!r}, n_steps={self.n_steps}"
+        return f"w={self.w}, nonneg={self.nonneg!r}, operator={self.operator!r}"

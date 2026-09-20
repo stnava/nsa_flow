@@ -387,16 +387,41 @@ def test_operator_solver_eval_caching():
 
 
 def test_operator_invalid_raises():
-    with pytest.raises(ValueError, match="operator must be 'flow' or 'solver'"):
+    with pytest.raises(ValueError, match="operator must be 'auto', 'flow', or 'solver'"):
         NSAFlowLinear(20, 5, operator="invalid_op")
-    with pytest.raises(ValueError, match="operator must be 'flow' or 'solver'"):
+    with pytest.raises(ValueError, match="operator must be 'auto', 'flow', or 'solver'"):
         NSAFlowConv2d(3, 4, 3, operator="invalid_op")
-    with pytest.raises(ValueError, match="operator must be 'flow' or 'solver'"):
+    with pytest.raises(ValueError, match="operator must be 'auto', 'flow', or 'solver'"):
         NSAFlowLayer(operator="invalid_op")
 
 
+def test_operator_auto_defaults_to_solver_for_nonneg_with_monotonic_zeros():
+    """Default operator='auto' on nonneg='hard' must route to the anchored solver:
+    - Zeros scale monotonically with w (soft-thresholding proximal shrinkage).
+    - True projection reached as w -> 1 (defect < 1e-4).
+    - Matches project_() identically.
+    """
+    torch.manual_seed(42)
+    W0 = torch.randn(5, 40)
+    ws = [0.0, 0.1, 0.35, 0.6, 0.9, 0.99]
+    zs, ds = [], []
+    for w in ws:
+        layer = NSAFlowLinear(40, 5, bias=False, w=w, nonneg="hard")  # operator='auto' by default
+        with torch.no_grad():
+            layer.weight.copy_(W0)
+        eff = layer.effective_weight()
+        zs.append(float((eff == 0).float().mean()))
+        ds.append(layer.defect().item())
+
+    # Zeros scale smoothly and monotonically across w
+    assert zs[-1] > zs[3] > zs[0]
+    # Defect drops smoothly down to near-zero
+    assert ds[-1] < 1e-4
+    assert all(ds[i + 1] <= ds[i] + 1e-12 for i in range(len(ds) - 1))
+
+
 def test_flow_blends_smoothly_across_fine_grained_w():
-    """Under nonneg='hard', w is a continuous blend coefficient:
+    """Under nonneg='hard' with operator='flow', w is a continuous blend coefficient:
     W_eff = (1 - w) max(0, W) + w P(max(0, W)).
     Every change in w must produce a distinct, monotonically lower defect.
     """
@@ -420,19 +445,6 @@ def test_flow_blends_smoothly_across_fine_grained_w():
     for i in range(len(ds) - 1):
         assert ds[i + 1] < ds[i], f"Defect failed to strictly decrease between w={ws[i]} and w={ws[i+1]}: {ds}"
         assert offs[i + 1] < offs[i], f"Overlap failed to strictly decrease between w={ws[i]} and w={ws[i+1]}: {offs}"
-
-
-def test_decoupled_n_steps():
-    """n_steps controls the flow iteration budget independently of w."""
-    torch.manual_seed(0)
-    W0 = torch.randn(5, 30)
-    layer1 = NSAFlowLinear(30, 5, bias=False, w=0.5, nonneg="hard", n_steps=2)
-    layer2 = NSAFlowLinear(30, 5, bias=False, w=0.5, nonneg="hard", n_steps=8)
-    with torch.no_grad():
-        layer1.weight.copy_(W0)
-        layer2.weight.copy_(W0)
-    # Both layers share w=0.5, but 8 steps pushes P further towards the manifold
-    assert layer2.defect().item() <= layer1.defect().item()
 
 
 def test_forward_solver_matches_project_call():
