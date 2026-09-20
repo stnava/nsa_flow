@@ -247,3 +247,37 @@ def test_import_nsa_flow_does_not_import_sklearn():
          "from nsa_flow import NSAFlow; print(NSAFlow.__name__)"],
         capture_output=True, text=True, check=True).stdout.split()
     assert out == ["False", "NSAFlow"], out
+
+
+def test_nmf_init_is_normalised_and_solves():
+    pytest.importorskip("sklearn")
+    g = torch.Generator().manual_seed(0)
+    V = torch.zeros(66, 5, dtype=F64)
+    for j in range(5):
+        V[j * 13:(j + 1) * 13, j] = torch.rand(13, generator=g, dtype=F64) + 0.5
+    X = torch.rand(300, 5, generator=g, dtype=F64) @ V.T + 0.3 * torch.randn(300, 66, generator=g, dtype=F64)
+    X = X - X.min()
+    r = nsa_flow_data(X, k=5, w=0.5, init="nmf")
+    assert math.isfinite(r.energy) and r.converged, (r.energy, r.stop_reason)
+    # nmf deliberately lands in a different basin from clamp (see the init
+    # docstring); the contract is that it is a finite, certified solution
+    # reached from an O(1)-scaled start -- not that it equals clamp's optimum.
+    assert r["energy_start"] < 10.0, r["energy_start"]   # was 5.7e5 unnormalised
+
+
+def test_unusable_init_is_refused_not_iterated():
+    X = torch.rand(60, 20, dtype=F64)
+    huge = torch.full((20, 3), 1e160, dtype=F64)     # E overflows to inf
+    with pytest.raises(ValueError, match="starting point"):
+        nsa_flow_data(X, k=3, w=0.5, init=huge)
+
+
+def test_non_finite_trial_energy_never_accepted():
+    """A step that overflows is rejected by the line search, not returned."""
+    from nsa_flow.lbfgsb import lbfgsb_minimize
+    def fg(x):                                       # blows up past |x| > 3
+        f = (x ** 4).sum() if float(x.abs().max()) <= 3 else torch.tensor(float("inf"))
+        g = 4 * x ** 3
+        return float(f), g
+    out = lbfgsb_minimize(torch.full((4,), 2.5, dtype=F64), fg, lower=None, max_grad=200, tol=1e-9)
+    assert math.isfinite(out["f"]) and out["f"] < (2.5 ** 4) * 4

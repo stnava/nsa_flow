@@ -847,6 +847,13 @@ def _minimise(Y0, energy_fn, grad_fn, proj, *, optimizer, max_iter, tol, mask,
             f"optimizer must be one of {optimizer_names()} "
             f"(aliases: {tuple(_ALIASES)}); got {optimizer!r}")
     fn, supports_mask, _ = OPTIMIZERS[name]
+    E0_check = energy_fn(Y0)
+    if not math.isfinite(float(E0_check)):
+        raise ValueError(
+            f"{caller or 'nsa_flow'}: the energy at the starting point is "
+            f"{float(E0_check)}; the initialisation is not usable (non-finite "
+            "or overflowing -- typically an unnormalised init on the quartic "
+            "reconstruction term).  Nothing was solved.")
     if name == "torch_lbfgs":
         warnings.warn(
             "optimizer='torch_lbfgs' is deprecated: across every configuration in "

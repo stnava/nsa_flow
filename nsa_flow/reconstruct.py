@@ -359,6 +359,11 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="D", max_iter=None,
             nmf.fit(Xnn)
             V = torch.as_tensor(
                 nmf.components_.T.clip(0), dtype=Xt.dtype, device=Xt.device)
+            # NMF's components carry the data's scale (column norms of 10-30
+            # here); the reconstruction term is quartic in the scale of V, so
+            # that start sat at E = 5.7e5 and the first quasi-Newton step
+            # overflowed to NaN.  Every other init is O(1)-normalised; so is this.
+            V = V / V.norm(dim=0, keepdim=True).clamp_min(torch.finfo(V.dtype).tiny)
         elif init == "random":
             V = torch.rand(p, k, dtype=Xt.dtype, device=Xt.device)
         else:

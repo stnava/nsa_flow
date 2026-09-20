@@ -404,6 +404,11 @@ def _strong_wolfe(phi, a_max, f0, g0, c1=1e-4, c2=0.9, max_eval=20):
     while n_eval < max_eval:
         f_i, d_i = phi(a_i)
         n_eval += 1
+        if not (math.isfinite(f_i) and math.isfinite(d_i)):
+            # overflow along the segment: treat as "too far" and bracket below
+            a_lo, f_lo, d_lo, a_hi = a_prev, f_prev, d_prev, a_i
+            f_hi = d_hi = None
+            break
         if f_i > f0 + c1 * a_i * g0 or (n_eval > 1 and f_i >= f_prev):
             a_lo, f_lo, d_lo, a_hi = a_prev, f_prev, d_prev, a_i
             break
@@ -421,7 +426,8 @@ def _strong_wolfe(phi, a_max, f0, g0, c1=1e-4, c2=0.9, max_eval=20):
 
     # zoom: cubic interpolation between the bracketing points, bisection when
     # the cubic has no interior minimiser
-    f_hi = d_hi = None
+    f_hi = d_hi = locals().get("f_hi", None), locals().get("d_hi", None)
+    f_hi, d_hi = f_hi
     while n_eval < max_eval and abs(a_hi - a_lo) > 1e-16:
         a_j = None
         if f_hi is not None:
@@ -430,6 +436,9 @@ def _strong_wolfe(phi, a_max, f0, g0, c1=1e-4, c2=0.9, max_eval=20):
             a_j = 0.5 * (a_lo + a_hi)
         f_j, d_j = phi(a_j)
         n_eval += 1
+        if not (math.isfinite(f_j) and math.isfinite(d_j)):
+            a_hi, f_hi, d_hi = a_j, None, None
+            continue
         if f_j > f0 + c1 * a_j * g0 or f_j >= f_lo:
             a_hi, f_hi, d_hi = a_j, f_j, d_j
         else:
@@ -598,6 +607,9 @@ def lbfgsb_minimize(x0, fun_grad, fun=None, *, lower=0.0, upper=None, mask=None,
                 if dn2 == 0.0:
                     break
                 fb = f_only(x_new)
+                if not math.isfinite(fb):
+                    step *= 0.5
+                    continue
                 f_try = fb if f_try is None else min(f_try, fb)
                 if fb <= f - sigma * dn2 / step:
                     accepted = True
@@ -613,6 +625,9 @@ def lbfgsb_minimize(x0, fun_grad, fun=None, *, lower=0.0, upper=None, mask=None,
         else:
             x_new, g_new = state["x"], state["g"]
 
+        if not (math.isfinite(f_new) and bool(torch.isfinite(g_new).all())):
+            stop = "line_search"          # the accepted point is not finite: stop, do not step
+            break
         H.push(x_new - xf, g_new - g)
         xf, f, g = x_new, f_new, g_new
         gmap = (certificate(xf.reshape(shape), g.reshape(shape))
