@@ -197,13 +197,34 @@ def _flow_fn(compile_):
     all of it as a single kernel.  Measured on a 66 x 5 weight at ``w = 1``:
     393 us eager -> 66 us compiled for the flow alone; 732 -> 154 us for the
     whole layer forward.  Opt-in because the first call costs 1-5 s and the
-    graph is specialised per shape and per ``w``.
+    graph is specialised per shape, dtype and ``w``.
+
+    Dynamo's default recompile limit is 8 graphs per function; a ``w`` sweep
+    alone has nine values, and hitting the limit under ``fullgraph=True``
+    *raises* from ``forward``.  Opting in raises the limit to 64, and any
+    compile-time failure falls back to eager with a warning -- a layer's
+    forward never fails because of the compiler.
     """
     global _COMPILED_FLOW
     if not compile_:
         return _defect_flow_nonneg
     if _COMPILED_FLOW is None:
-        _COMPILED_FLOW = torch.compile(_defect_flow_nonneg, fullgraph=True, dynamic=False)
+        import torch._dynamo
+        torch._dynamo.config.recompile_limit = max(
+            getattr(torch._dynamo.config, "recompile_limit", 8), 64)
+        compiled = torch.compile(_defect_flow_nonneg, fullgraph=True, dynamic=False)
+
+        def guarded(Y, w):
+            try:
+                return compiled(Y, w)
+            except Exception as exc:                    # compiler, never the maths
+                import warnings
+                warnings.warn(
+                    f"NSAFlow layer: torch.compile of the defect flow failed "
+                    f"({type(exc).__name__}: {str(exc)[:80]}); using eager for "
+                    "this call.", RuntimeWarning, stacklevel=2)
+                return _defect_flow_nonneg(Y, w)
+        _COMPILED_FLOW = guarded
     return _COMPILED_FLOW
 
 
