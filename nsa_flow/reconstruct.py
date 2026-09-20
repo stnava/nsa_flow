@@ -406,9 +406,18 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="D", max_iter=None,
         return (1.0 - w) * f, (1.0 - w) * gf
 
     trace = [] if keep_trace else None
+    problem_spec = {
+        "mode": "data",
+        "S": ops.S,
+        "X": ops.X,
+        "c": float(c),
+        "w": float(w),
+        "orth": orth,
+    }
     rep = minimise(V, _energy, _grad_and_energy, project_nonneg,
                    optimizer=optimizer, max_iter=max_iter, tol=tol, sigma=sigma,
-                   verbose=verbose, trace=trace, caller="nsa_flow_data", w=w)
+                   verbose=verbose, trace=trace, caller="nsa_flow_data", w=w,
+                   problem_spec=problem_spec)
     V = rep.Y
     E_final, F_final, D_final = energy_of(V)
 

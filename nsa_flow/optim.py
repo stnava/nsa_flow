@@ -603,16 +603,63 @@ def _pqn(Y, energy_fn, grad_fn, proj, *, max_iter=2000, tol=1e-9, sigma=1e-4,
 # --------------------------------------------------------------------------
 def _tlbfgsb(Y, energy_fn, grad_fn, proj, *, max_iter=2000, tol=1e-9, sigma=1e-4,
              history_size=10, mask=None, bounded=True, trace=None, w=None,
-             verbose=False, **_):
-    """Adapter onto :func:`nsa_flow.lbfgsb.lbfgsb_minimize`.
+             verbose=False, problem_spec=None, **_):
+    """Adapter onto :func:`nsa_flow.lbfgsb.lbfgsb_minimize` or native :func:`lbfgsb_solve`.
 
     The bounds are the feasible set this package uses -- ``Y >= 0``, plus an
     optional fixed-support mask -- so ``proj`` is not needed for feasibility
     here; it is still passed to the certificate so the reported number is the
     same function every other loop reports.
     """
-    from .lbfgsb import lbfgsb_minimize
+    from .lbfgsb import _native, lbfgsb_minimize
     t0 = time.time()
+
+    if _native is not None and hasattr(_native, "lbfgsb_solve") and Y.is_cpu and problem_spec is not None:
+        mode = problem_spec.get("mode")
+        orth = problem_spec.get("orth", "D")
+        align = problem_spec.get("align", False)
+        fidelity = problem_spec.get("fidelity", "anchor")
+        if (mode in ("data", "signed") or (mode == "anchored" and fidelity in ("anchor", "subspace"))) and orth in ("D", "Cg") and not align:
+            if mask is not None:
+                mk = mask.to(Y.dtype)
+                Y0 = proj(Y) * mk
+                mask_t = mask.contiguous().reshape(-1)
+            else:
+                Y0 = proj(Y)
+                mask_t = None
+
+            lo = torch.zeros(Y0.numel(), dtype=Y0.dtype, device=Y0.device) if bounded else None
+            hi = None
+
+            def cb_native(it, f, gmap, n_grad, n_fun):
+                if trace is not None:
+                    row = dict(iter=it, energy=f, grad_map=gmap, step=float("nan"),
+                               seconds=time.time() - t0, n_grad=n_grad,
+                               n_energy=n_fun)
+                    if w is not None:
+                        row["w"] = float(w)
+                    trace.append(row)
+                if verbose and (it % 20 == 0 or it == 1):
+                    print(f"    [lbfgsb it={it:5d}] E={f:.8e} |Gmap|={gmap:.3e}")
+
+            x_opt, f_opt, n_grad, n_fun, iters, stop, gmap, E0, gmap0 = _native.lbfgsb_solve(
+                Y0,
+                problem_spec,
+                lo=lo,
+                hi=hi,
+                mask=mask_t,
+                max_grad=max(max_iter, 1),
+                tol=tol,
+                memory=history_size,
+                sigma=sigma,
+                patience=50,
+                rtol=1e-12,
+                stall_slack=STALL_SLACK,
+                callback=cb_native if (trace is not None or verbose) else None,
+            )
+            return _report(x_opt.reshape(Y.shape), f_opt, iters, stop, gmap,
+                           n_grad, n_fun, t0, E0=E0, gmap0=gmap0)
+
     cnt = _Counter(energy_fn, grad_fn)
 
     # The certificate must see the SAME feasible set the solver optimises over:

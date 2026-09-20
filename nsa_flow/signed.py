@@ -400,9 +400,19 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="auto", orth="Cg", lobe=1.0,
 
     trace = [] if keep_trace else None
     t0 = time.time()
+    problem_spec = {
+        "mode": "signed",
+        "S": ops.S,
+        "X": ops.X,
+        "c": float(c),
+        "w": float(w),
+        "orth": orth,
+        "lobe": float(lobe) if lobe else 0.0,
+    }
     rep = minimise(W, _energy, _grad_and_energy, project_nonneg,
                    optimizer=optimizer, max_iter=iter_cap, tol=tol, sigma=sigma,
-                   verbose=verbose, trace=trace, caller="nsa_flow_signed", w=w)
+                   verbose=verbose, trace=trace, caller="nsa_flow_signed", w=w,
+                   problem_spec=problem_spec)
     W = rep.Y
     n_grad, n_energy = rep.n_grad, rep.n_energy
     iters, stop, gmap = rep.iters, rep.stop, rep.grad_map
@@ -414,7 +424,8 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="auto", orth="Cg", lobe=1.0,
         rep2 = minimise(W, _energy, _grad_and_energy, project_nonneg,
                         optimizer=optimizer, max_iter=iter_cap, tol=tol,
                         sigma=sigma, mask=mask, verbose=False, trace=None,
-                        caller="nsa_flow_signed (consolidate)", w=w)
+                        caller="nsa_flow_signed (consolidate)", w=w,
+                        problem_spec=problem_spec)
         W = rep2.Y
         n_grad += rep2.n_grad
         n_energy += rep2.n_energy

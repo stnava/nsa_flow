@@ -66,6 +66,11 @@ import torch
 
 __all__ = ["lbfgsb_minimize", "set_compile"]
 
+try:
+    from . import _native
+except ImportError:
+    _native = None
+
 _COMPILED = {}
 
 
@@ -167,7 +172,10 @@ class _CompactLBFGS:
         th = self.theta
         self.W = torch.cat([Y, th * S], dim=1)       # [n, 2m]
 
-        fn = _COMPILED.get("K", _build_K)
+        if _native is not None and S.is_cpu:
+            fn = _native.lbfgsb_build_M
+        else:
+            fn = _COMPILED.get("K", _build_K)
         try:
             self.M = fn(S, Y, th)
         except Exception:                            # singular: drop the memory
@@ -559,9 +567,16 @@ def lbfgsb_minimize(x0, fun_grad, fun=None, *, lower=0.0, upper=None, mask=None,
             stop = "grad_map"
             break
 
-        x_cp, c, fixed = _cauchy_point(xf, g, lo, hi, H)
-        x_bar = _subspace_min(xf, g, x_cp, c, fixed, lo, hi, H)
-        d = x_bar - xf
+        if _native is not None and xf.is_cpu:
+            S_stack = torch.stack(H.S, dim=1) if H.m > 0 else torch.empty(xf.numel(), 0, dtype=dtype, device=device)
+            Y_stack = torch.stack(H.Yv, dim=1) if H.m > 0 else torch.empty(xf.numel(), 0, dtype=dtype, device=device)
+            d, a_max, fixed = _native.lbfgsb_direction(xf, g, lo, hi, S_stack, Y_stack, H.theta, H.M, 512)
+        else:
+            x_cp, c, fixed = _cauchy_point(xf, g, lo, hi, H)
+            x_bar = _subspace_min(xf, g, x_cp, c, fixed, lo, hi, H)
+            d = x_bar - xf
+            a_max = None
+
         if float((d * g).sum()) >= 0.0:
             # The model produced an ascent direction: the memory is stale, which
             # happens after an active-set change on a non-convex objective.
@@ -570,6 +585,7 @@ def lbfgsb_minimize(x0, fun_grad, fun=None, *, lower=0.0, upper=None, mask=None,
             d = clip(x_cp) - xf
             if float((d * g).sum()) >= 0.0:
                 d = -g / max(float(g.norm()), _tiny(g))
+            a_max = None
 
         # Both xf and x_bar are feasible and the box is convex, so the whole
         # segment is feasible and phi is smooth: no projection inside the search.
@@ -582,12 +598,13 @@ def lbfgsb_minimize(x0, fun_grad, fun=None, *, lower=0.0, upper=None, mask=None,
             state["x"], state["g"] = xa, ga
             return fa, float((ga * d).sum())
 
-        a_max = 1.0
-        if lo is not None:
-            neg = d < 0
-            if bool(neg.any()):
-                a_max = max(a_max, float(((lo - xf) / d.clamp_max(-_tiny(xf)))[neg]
-                                         .clamp_min(0.0).min()))
+        if a_max is None:
+            a_max = 1.0
+            if lo is not None:
+                neg = d < 0
+                if bool(neg.any()):
+                    a_max = max(a_max, float(((lo - xf) / d.clamp_max(-_tiny(xf)))[neg]
+                                             .clamp_min(0.0).min()))
         # Leave one evaluation in hand so the fallback's gradient still lands
         # within the budget; the cap is on gradient evaluations and it binds.
         remaining = max(max_grad - n_grad - 1, 1)

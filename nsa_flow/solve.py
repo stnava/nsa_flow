@@ -381,10 +381,21 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
             E_v, _, _, g_v = vg(Yc, X0, _w, denom, inv_k, eye_k, align)
             return float(E_v), g_v
 
+        problem_spec = {
+            "mode": "anchored",
+            "target": X0,
+            "denom": float(denom),
+            "w": float(wi),
+            "orth": orth,
+            "fidelity": fidelity,
+            "chol": (anchor.chol if fidelity == "subspace" else None),
+            "align": align,
+        }
         rep = minimise(Y, _anc_energy, _anc_grad_and_energy, proj,
                        optimizer=optimizer, max_iter=max_iter, tol=tol,
                        sigma=sigma, verbose=verbose, trace=trace,
-                       caller="nsa_flow (anchored)", w=wi)
+                       caller="nsa_flow (anchored)", w=wi,
+                       problem_spec=problem_spec)
         Y, stop, gmap = rep.Y, rep.stop, rep.grad_map
         total_iters += rep.iters
         n_grad += rep.n_grad
