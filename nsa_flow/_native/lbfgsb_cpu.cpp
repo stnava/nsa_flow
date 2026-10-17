@@ -337,8 +337,11 @@ inline bool lbfgsb_build_M_contiguous(int64_t n, int64_t m,
                                      double theta, scalar_t* M_out) {
     if (m == 0) return true;
     int64_t two_m = 2 * m;
-    scalar_t SY[32 * 32] = {0};
-    scalar_t SS[32 * 32] = {0};
+    scalar_t SY_stack[32 * 32] = {0};
+    scalar_t SS_stack[32 * 32] = {0};
+    std::vector<scalar_t> SY_heap, SS_heap;
+    scalar_t* SY = (m <= 32) ? SY_stack : (SY_heap.assign(m * m, 0), SY_heap.data());
+    scalar_t* SS = (m <= 32) ? SS_stack : (SS_heap.assign(m * m, 0), SS_heap.data());
 
     cblas_gemm(CblasNoTrans, CblasTrans,
                static_cast<int>(m), static_cast<int>(m), static_cast<int>(n),
@@ -397,8 +400,11 @@ at::Tensor lbfgsb_build_M_impl(const at::Tensor& S_in, const at::Tensor& Y_in, d
     const scalar_t* S_ptr = S.data_ptr<scalar_t>();
     const scalar_t* Y_ptr = Y.data_ptr<scalar_t>();
 
-    scalar_t SY[32 * 32] = {0};
-    scalar_t SS[32 * 32] = {0};
+    scalar_t SY_stack[32 * 32] = {0};
+    scalar_t SS_stack[32 * 32] = {0};
+    std::vector<scalar_t> SY_heap, SS_heap;
+    scalar_t* SY = (m <= 32) ? SY_stack : (SY_heap.assign(m * m, 0), SY_heap.data());
+    scalar_t* SS = (m <= 32) ? SS_stack : (SS_heap.assign(m * m, 0), SS_heap.data());
 
     cblas_gemm(CblasTrans, CblasNoTrans,
                static_cast<int>(m), static_cast<int>(m), static_cast<int>(n),
@@ -474,6 +480,10 @@ struct DirectionWorkspace {
     std::vector<scalar_t> d_raw;
     std::vector<scalar_t> r;
     std::vector<scalar_t> d_hat;
+    std::vector<scalar_t> p_buf;
+    std::vector<scalar_t> c_buf;
+    std::vector<scalar_t> w_col_buf;
+    std::vector<scalar_t> MW_i_buf;
 
     void resize(int64_t n, int64_t mem_cap) {
         int64_t max_2m = std::max<int64_t>(2 * mem_cap, 2);
@@ -501,6 +511,10 @@ struct DirectionWorkspace {
             v0.resize(max_2m);
             v.resize(max_2m);
             Mc.resize(max_2m);
+            p_buf.resize(max_2m);
+            c_buf.resize(max_2m);
+            w_col_buf.resize(max_2m);
+            MW_i_buf.resize(max_2m);
         }
     }
 };
@@ -559,8 +573,10 @@ inline void lbfgsb_direction_core(
         }
     }
 
-    scalar_t p[64] = {0};
-    scalar_t c[64] = {0};
+    scalar_t* p = ws.p_buf.data();
+    scalar_t* c = ws.c_buf.data();
+    std::fill(p, p + two_m, static_cast<scalar_t>(0));
+    std::fill(c, c + two_m, static_cast<scalar_t>(0));
 
     if (two_m > 0 && W_ptr) {
         cblas_gemv(CblasNoTrans, static_cast<int>(two_m), static_cast<int>(n),
@@ -636,11 +652,11 @@ inline void lbfgsb_direction_core(
             scalar_t fpp_prev = fpp;
 
             if (two_m > 0 && M_ptr && W_ptr) {
-                scalar_t w_col[64];
+                scalar_t* w_col = ws.w_col_buf.data();
                 for (int64_t k = 0; k < two_m; ++k) {
                     w_col[k] = W_ptr[k * n + i];
                 }
-                scalar_t MW_i[64] = {0};
+                scalar_t* MW_i = ws.MW_i_buf.data();
                 for (int64_t r_idx = 0; r_idx < two_m; ++r_idx) {
                     scalar_t sum_val = 0;
                     for (int64_t k = 0; k < two_m; ++k) {
@@ -956,12 +972,20 @@ struct ObjectiveWorkspace {
     std::vector<scalar_t> R;    // p * k
     std::vector<scalar_t> gF;   // p * k
 
+    std::vector<scalar_t> svb_row;
+    std::vector<scalar_t> va_row;
+    std::vector<scalar_t> v_mat_row;
+    std::vector<scalar_t> w_mat_row;
+
     void init_data(int64_t p, int64_t k, int64_t n_rows) {
         SV.assign(p * k, 0);
         if (n_rows > 0) XV.assign(n_rows * k, 0);
         A.assign(k * k, 0);
         B.assign(k * k, 0);
         G.assign(k * k, 0);
+        svb_row.assign(k, 0);
+        va_row.assign(k, 0);
+        v_mat_row.assign(k, 0);
     }
 
     void init_signed(int64_t p, int64_t k, int64_t n_rows) {
@@ -971,6 +995,7 @@ struct ObjectiveWorkspace {
         int64_t two_k = 2 * k;
         BW.assign(two_k * two_k, 0);
         GW.assign(two_k * two_k, 0);
+        w_mat_row.assign(two_k, 0);
     }
 
     void init_anchored(int64_t p, int64_t k, const std::string& fidelity) {
@@ -1096,12 +1121,16 @@ inline double eval_data_objective_raw(
         scalar_t one_minus_w = static_cast<scalar_t>(1.0 - w);
         scalar_t w_s = static_cast<scalar_t>(w);
 
+        scalar_t* svb_row = ws.svb_row.data();
+        scalar_t* va_row = ws.va_row.data();
+        scalar_t* v_mat_row = ws.v_mat_row.data();
+
         for (int64_t r = 0; r < p; ++r) {
             const scalar_t* SV_r = &SV[r * k];
             const scalar_t* V_r = &V[r * k];
-            scalar_t svb_row[64] = {0};
-            scalar_t va_row[64] = {0};
-            scalar_t v_mat_row[64] = {0};
+            std::fill(svb_row, svb_row + k, static_cast<scalar_t>(0));
+            std::fill(va_row, va_row + k, static_cast<scalar_t>(0));
+            std::fill(v_mat_row, v_mat_row + k, static_cast<scalar_t>(0));
 
             for (int64_t m = 0; m < k; ++m) {
                 scalar_t svm = SV_r[m];
@@ -1147,7 +1176,7 @@ inline double eval_signed_objective_raw(
     bool eval_grad, scalar_t* grad_out, ObjectiveWorkspace<scalar_t>& ws) {
 
     int64_t k = two_k / 2;
-    scalar_t c = static_cast<scalar_t>(c_val);
+    scalar_t k_s = static_cast<scalar_t>(std::max<int64_t>(k, 1));
     scalar_t w = static_cast<scalar_t>(w_val);
     const scalar_t tiny = std::numeric_limits<scalar_t>::min();
 
@@ -1216,7 +1245,7 @@ inline double eval_signed_objective_raw(
                 dot += W[r * two_k + j] * W[r * two_k + k + j];
             }
         }
-        E_lobe = static_cast<double>((w * static_cast<scalar_t>(lobe_val) / c) * dot);
+        E_lobe = static_cast<double>((w * static_cast<scalar_t>(lobe_val) / k_s) * dot);
     }
 
     double E = (1.0 - w_val) * F + w_val * static_cast<double>(D) + E_lobe;
@@ -1225,15 +1254,17 @@ inline double eval_signed_objective_raw(
         scalar_t factor_D_D = 4.0 / (scale_k_D * tW);
         scalar_t factor_D_cg = 4.0 / (tW * tW * scale_k_cg);
         scalar_t scale_cg = (tW > 0) ? (a2 / tW) : static_cast<scalar_t>(0);
-        scalar_t lobe_coef = static_cast<scalar_t>(w_val * lobe_val / c_val);
+        scalar_t lobe_coef = static_cast<scalar_t>(w_val * lobe_val / static_cast<double>(std::max<int64_t>(k, 1)));
         scalar_t one_minus_w_s = static_cast<scalar_t>(1.0 - w_val);
         scalar_t w_s = static_cast<scalar_t>(w_val);
+
+        scalar_t* w_mat_row = ws.w_mat_row.data();
 
         for (int64_t r = 0; r < p; ++r) {
             const scalar_t* W_r = &W[r * two_k];
             const scalar_t* gV_r = &gV[r * k];
             scalar_t* grad_r = &grad_out[r * two_k];
-            scalar_t w_mat_row[64] = {0};
+            std::fill(w_mat_row, w_mat_row + two_k, static_cast<scalar_t>(0));
 
             if (w_val > 0.0) {
                 const scalar_t* Mat = (orth == "D") ? GW : BW;

@@ -66,3 +66,19 @@ def test_sklearn_lbfgs_optimizer():
     scores = model.fit_transform(X)
     assert scores.shape == (40, 3)
     assert model.result_.converged
+
+
+def test_sklearn_set_params_and_clone_with_kwargs():
+    """set_params and clone preserve kwargs even when not passed at __init__."""
+    from sklearn.base import clone
+    np.random.seed(47)
+    X = np.random.rand(30, 10)
+    model = NSAFlow(n_components=3, w=0.5)
+    model.set_params(orth="Cg", n_components=2)
+    assert model.get_params()["orth"] == "Cg"
+    assert model.n_components == 2
+    cloned = clone(model)
+    assert cloned.get_params()["orth"] == "Cg"
+    scores = cloned.fit_transform(X)
+    assert scores.shape == (30, 2)
+    assert cloned.result_["orth"] == "Cg"

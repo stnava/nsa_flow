@@ -1038,21 +1038,42 @@ metrics_nns_g   <- compute_core_metrics(res_nns$Y, golub_scaled_ss)
 proj_basic <- golub_scaled_ss %*% res_basic$Y
 proj_nns   <- golub_scaled_ss %*% res_nns$Y
 
-## --- Classification Performance ---------------------------------------------
-cv_acc <- function(proj, labels) {
-  colnames(proj) <- paste0("V", seq_len(ncol(proj)))
-  ctrl <- trainControl(method = "repeatedcv", number = 5, repeats = 50)
-  tune_grid <- expand.grid(mtry = seq(1, ncol(proj), length.out = 5))  # Example: tune mtry over 5 values
-  model <- train(proj, labels, method = "rf",
-                 trControl = ctrl, tuneGrid = tune_grid)
-  tibble(Accuracy = model$results$Accuracy, AccuracySD = model$results$AccuracySD)
+## --- Classification Performance (Strictly In-Fold CV) -----------------------
+cv_acc_infold <- function(raw_df, labels, method_type = c("pca", "basic", "nsa_flow")) {
+  method_type <- match.arg(method_type)
+  raw_mat <- data.matrix(raw_df[, ss, drop = FALSE])
+  folds <- createMultiFolds(labels, k = 5, times = 10)
+  fold_accs <- vapply(folds, function(train_idx) {
+    X_tr_raw <- raw_mat[train_idx, , drop = FALSE]
+    X_te_raw <- raw_mat[-train_idx, , drop = FALSE]
+    mu <- colMeans(X_tr_raw)
+    sd_vec <- apply(X_tr_raw, 2, sd)
+    sd_vec[sd_vec == 0 | is.na(sd_vec)] <- 1
+    X_tr <- scale(X_tr_raw, center = mu, scale = sd_vec)
+    X_te <- scale(X_te_raw, center = mu, scale = sd_vec)
+    if (method_type == "pca") {
+      V_fold <- prcomp(X_tr, rank. = myk, center = FALSE, scale. = FALSE)$rotation
+    } else if (method_type == "basic") {
+      V_fold <- nsa_flow_pca(X_tr, myk, lambda = 0.1, alpha = myalph,
+                             max_iter = mxit, proximal_type = "basic", tol = 1e-5,
+                             nsa_w = omega_default, verbose = FALSE)$Y
+    } else {
+      V_fold <- nsa_flow_pca(X_tr, myk, lambda = 0.1, alpha = myalph,
+                             max_iter = mxit, proximal_type = "nsa_flow", tol = 1e-5,
+                             nsa_w = omega_default, nsa_flow_fn = nsa_default, verbose = FALSE)$Y
+    }
+    proj_tr <- data.frame(X_tr %*% V_fold)
+    proj_te <- data.frame(X_te %*% V_fold)
+    colnames(proj_tr) <- colnames(proj_te) <- paste0("V", seq_len(myk))
+    rf_fit <- randomForest::randomForest(x = proj_tr, y = as.factor(labels[train_idx]))
+    preds <- predict(rf_fit, newdata = proj_te)
+    mean(preds == as.factor(labels[-train_idx]))
+  }, numeric(1))
+  tibble(Accuracy = mean(fold_accs, na.rm = TRUE), AccuracySD = sd(fold_accs, na.rm = TRUE))
 }
-acc_std   <- cv_acc(proj_std, labels)
-acc_basic <- cv_acc(proj_basic, labels)
-acc_nns   <- cv_acc(proj_nns, labels)
-# acc_std
-# acc_basic
-# acc_nns
+acc_std   <- cv_acc_infold(golub_df, labels, "pca")
+acc_basic <- cv_acc_infold(golub_df, labels, "basic")
+acc_nns   <- cv_acc_infold(golub_df, labels, "nsa_flow")
 
 ## --- Integrated Results Table -----------------------------------------------
 golub_metrics <- tibble(
@@ -1060,9 +1081,8 @@ golub_metrics <- tibble(
   Explained_Var_Ratio = c(metrics_pca_g$Expl_Var, metrics_basic_g$Expl_Var, metrics_nns_g$Expl_Var),
   Sparsity            = c(metrics_pca_g$Sparsity,  metrics_basic_g$Sparsity,  metrics_nns_g$Sparsity),
   Orth_Residual       = c(metrics_pca_g$Orth_Residual, metrics_basic_g$Orth_Residual, metrics_nns_g$Orth_Residual),
-  CV_Accuracy         = c( mean(acc_std$Accuracy), mean(acc_basic$Accuracy), 
-    mean(acc_nns$Accuracy)),
-  CV_Accuracy_SD      = c( mean(acc_std$AccuracySD), mean(acc_basic$AccuracySD), mean(acc_nns$AccuracySD))
+  CV_Accuracy         = c(acc_std$Accuracy, acc_basic$Accuracy, acc_nns$Accuracy),
+  CV_Accuracy_SD      = c(acc_std$AccuracySD, acc_basic$AccuracySD, acc_nns$AccuracySD)
 )
 
 #####
@@ -1641,25 +1661,25 @@ mywws = seq(0.0, 0.5, by = 0.05 )
 # Loop over weight values
 for ( run in 1:2 )
 for (ww in mywws ) {
-# Run NSA (assumes nsa_default is a custom function)
+  # Full-sample projection kept only for post-CV visualizationchunks downstream
   M_nsa <- nsa_default( Y0_pca, w = ww, fidelity = "subspace" )
   Ymat <- M_nsa$Y
   proj_nsa <- as.matrix(X) %*% Ymat
   proj_pca <- as.matrix(X) %*% Y0_pca
-colnames(proj_nsa) <- paste0("nsa", 1:ncol(proj_nsa))
-colnames(proj_pca) <- paste0("pca", 1:ncol(proj_pca))
-# Combine data with covariates and projections
-  temp <- cbind(ppmiadni[, c("diagnosis", "AGE", "PTGENDER")], proj_nsa, proj_pca)
-  temp$AGE = antsrimpute( temp$AGE )
+  colnames(proj_nsa) <- paste0("nsa", 1:ncol(proj_nsa))
+  colnames(proj_pca) <- paste0("pca", 1:ncol(proj_pca))
+  # Prepare covariate frame aligned with X
+  meta_df <- ppmiadni[, c("diagnosis", "AGE", "PTGENDER")]
   dx2 <- "AD"
   dx1 <- "MCI"
   dx0 <- "CN"
-# Set diagnosis as a factor with three levels
-  temp$diagnosis <- factor(temp$diagnosis, levels = c(dx0, dx1, dx2))
-  temp <- temp[!is.na(temp$diagnosis), ] # Remove NA diagnoses
-# 4-fold cross-validation
+  meta_df$diagnosis <- factor(meta_df$diagnosis, levels = c(dx0, dx1, dx2))
+  valid_idx <- which(!is.na(meta_df$diagnosis))
+  meta_df <- meta_df[valid_idx, , drop = FALSE]
+  X_valid <- as.matrix(X)[valid_idx, , drop = FALSE]
+  # 4-fold cross-validation with strictly in-fold centering, PCA, and NSA-Flow
   nfold <- 4
-  folds <- createFolds(temp$diagnosis, k = nfold, list = TRUE, returnTrain = FALSE)
+  folds <- createFolds(meta_df$diagnosis, k = nfold, list = TRUE, returnTrain = FALSE)
   auc_nsa <- auc_pca <- auc_random <- numeric(nfold)
   
   # NEW: Initialize pairwise AUC vectors for NSA and PCA
@@ -1667,26 +1687,42 @@ colnames(proj_pca) <- paste0("pca", 1:ncol(proj_pca))
   auc_pca_cn_mci <- auc_pca_cn_ad <- auc_pca_mci_ad <- numeric(nfold)
   
 for (f in 1:nfold) {
-    train <- temp[-folds[[f]], ]
-    test <- temp[folds[[f]], ]
+    te_idx <- folds[[f]]
+    tr_idx <- setdiff(seq_len(nrow(meta_df)), te_idx)
+    X_tr_raw <- X_valid[tr_idx, , drop = FALSE]
+    X_te_raw <- X_valid[te_idx, , drop = FALSE]
+    mu_tr <- colMeans(X_tr_raw)
+    X_tr_c <- scale(X_tr_raw, center = mu_tr, scale = FALSE)
+    X_te_c <- scale(X_te_raw, center = mu_tr, scale = FALSE)
+    pca_fold <- prcomp(X_tr_c, rank. = netrank, center = FALSE, scale. = FALSE)
+    Y0_fold <- sweep(pca_fold$rotation, 2, sqrt(colSums(pca_fold$rotation^2)), FUN = "/")
+    Y_nsa_fold <- nsa_default(Y0_fold, w = ww, fidelity = "subspace")$Y
+    proj_nsa_tr <- X_tr_c %*% Y_nsa_fold
+    proj_nsa_te <- X_te_c %*% Y_nsa_fold
+    proj_pca_tr <- X_tr_c %*% Y0_fold
+    proj_pca_te <- X_te_c %*% Y0_fold
+    colnames(proj_nsa_tr) <- colnames(proj_nsa_te) <- paste0("nsa", seq_len(ncol(proj_nsa_tr)))
+    colnames(proj_pca_tr) <- colnames(proj_pca_te) <- paste0("pca", seq_len(ncol(proj_pca_tr)))
+    train_meta <- meta_df[tr_idx, , drop = FALSE]
+    test_meta  <- meta_df[te_idx, , drop = FALSE]
+    age_mean_tr <- mean(train_meta$AGE, na.rm = TRUE)
+    train_meta$AGE[is.na(train_meta$AGE)] <- age_mean_tr
+    test_meta$AGE[is.na(test_meta$AGE)]   <- age_mean_tr
+    train <- cbind(train_meta, proj_nsa_tr, proj_pca_tr)
+    test  <- cbind(test_meta,  proj_nsa_te, proj_pca_te)
 # Calculate random assignment accuracy for this fold
     class_props <- prop.table(table(test$diagnosis))
     auc_random[f] <- sum(class_props^2)
 # Skip fold if fewer than two classes
 if (length(unique(test$diagnosis)) < 2) {
-# cat("Warning: Fold", f, "for weight", ww, "has fewer than 2 classes. Skipping AUC calculation.\n")
       auc_nsa[f] <- NA
       auc_pca[f] <- NA
-      
-      # NEW: Skip pairwise too
       auc_nsa_cn_mci[f] <- auc_nsa_cn_ad[f] <- auc_nsa_mci_ad[f] <- NA
       auc_pca_cn_mci[f] <- auc_pca_cn_ad[f] <- auc_pca_mci_ad[f] <- NA
-      
 next
     }
     mlfun = multinom; ptype="probs"
     mlfun = randomForest; ptype='prob'
-# mlfun = imbalanced
 # Base model (AGE and PTGENDER)
     base_mod <- tryCatch(
       mlfun(as.formula("diagnosis ~ AGE + PTGENDER"), data = train, trace = FALSE),
@@ -1697,7 +1733,7 @@ return(NULL)
 )
     covarsbin <- "AGE + PTGENDER"
 # NSA full model
-    full_nsa_form <- paste("diagnosis ~", covarsbin, "+", paste(colnames(proj_nsa), collapse = "+"))
+    full_nsa_form <- paste("diagnosis ~", covarsbin, "+", paste(colnames(proj_nsa_tr), collapse = "+"))
     full_nsa <- tryCatch(
       mlfun(as.formula(full_nsa_form), data = train, trace = FALSE),
 error = function(e) {
@@ -2006,15 +2042,25 @@ pairwise_df <- data.frame(
 # Add Mean column
 pairwise_df$Mean <- rowMeans(pairwise_df[, 3:6], na.rm = TRUE)
 
-# Overall rows
+# Overall rows computed dynamically from log_results_df
+paired_tt <- tryCatch(
+  t.test(log_results_df$auc_nsa, log_results_df$auc_pca, paired = TRUE),
+  error = function(e) list(statistic = NA_real_, p.value = NA_real_)
+)
 overall_rows <- data.frame(
   Comparison = c("Multi-class", "Multi-class", "Random Accuracy", "t-statistic (NSA>PCA)", "p-value (NSA>PCA)"),
   Method = c("NSA", "PCA", "", "", ""),
-  `Fold 1` = NA,
-  `Fold 2` = NA,
-  `Fold 3` = NA,
-  `Fold 4` = NA,
-  Mean = c(0.765, 0.719, 0.406, 16.479, 1.731e-13),
+  `Fold 1` = c(auc_nsa[1], auc_pca[1], NA, NA, NA),
+  `Fold 2` = c(auc_nsa[2], auc_pca[2], NA, NA, NA),
+  `Fold 3` = c(auc_nsa[3], auc_pca[3], NA, NA, NA),
+  `Fold 4` = c(auc_nsa[4], auc_pca[4], NA, NA, NA),
+  Mean = c(
+    mean(log_results_df$auc_nsa, na.rm = TRUE),
+    mean(log_results_df$auc_pca, na.rm = TRUE),
+    mean(log_results_df$random_accuracy, na.rm = TRUE),
+    as.numeric(paired_tt$statistic),
+    as.numeric(paired_tt$p.value)
+  ),
   check.names = FALSE
 )
 
@@ -2423,9 +2469,9 @@ p3 <- ggplot(comparison_df, aes(x = w, y = log_p_diff, color = better_method)) +
 
 To evaluate the generalization of NSA-Flow across diverse data geometries and ensure strict computational reproducibility on public benchmarks beyond the neuroimaging and leukemia cohorts, we conducted rigorous, leak-free 5-fold cross-validation evaluations across three well-established OpenML benchmarks:
 
-1. **Tecator NIR Optical Meat Spectroscopy** ($n=240, p=100$, OpenML ID 505; @borggaard1992optimal): Continuous absorbance spectra measuring $850$--$1050$\,nm channels to predict chemical fat percentage ($0.9\%$--$49.8\%$). In optical spectroscopy, absorbance is governed by the Beer-Lambert law, which dictates an additive non-negative linear combination of pure constituent spectra ($V \ge 0$). Dense PCA yields unphysical negative loadings, while traditional Non-Negative Matrix Factorization (NMF) collapses into catastrophic collinearity ($D = 0.943$, Ridge $R^2 = 0.386$). Non-Negative NSA-Flow ($w=0.5$) completely eliminates this collinearity defect ($D = 0.000$) while enforcing $V \ge 0$, recovering $R^2 = 0.878$, while Consolidated Signed NSA-Flow matches dense PCA ($R^2 = 0.903$ vs $0.911$) with clean, non-overlapping spectral bands.
-2. **Sonar Frequency Return Acoustics** ($n=208, p=60$, OpenML ID 40; @gorman1988analysis): Continuous acoustic sensor energy bands ($X \in [0, 1]$) classifying cylindrical metal mines from rock targets. This benchmark avoids saturation ceilings. Signed NSA-Flow matches dense PCA ($\text{ROC-AUC} = 0.819$ at $w=0.0$ and $0.813$ at $w=0.5$), and consolidated signed flow achieves $\text{ROC-AUC} = 0.810$ with strictly non-overlapping frequency modules.
-3. **High-Dimensional Prostate Cancer Transcriptomics** ($n=102, p=12{,}600$, OpenML ID 45099; @singh2002gene): Gene expression contrast separating 52 prostate tumor specimens from 50 non-tumor prostate tissues, with variance filtering to the top 2000 genes executed strictly inside each cross-validation fold. Consolidated Signed NSA-Flow outperforms dense PCA on Balanced Accuracy ($0.822 \pm 0.133$ vs $0.805 \pm 0.132$) while producing $83.3\%$ exact zero loadings ($V_j \cdot V_l = 0$) and zero frame defect ($D = 0.000$). In this regime, hard disjoint assignment acts as an effective structural regularizer by stripping out dense, non-specific stromal background noise.
+1. **Tecator NIR Optical Meat Spectroscopy** ($n=240, p=100$, OpenML ID 505; @borggaard1992optimal): Continuous absorbance spectra measuring $850$--$1050$\,nm channels to predict chemical fat percentage ($0.9\%$--$49.8\%$). In optical spectroscopy, absorbance is governed by the Beer-Lambert law, which dictates an additive non-negative linear combination of pure constituent spectra ($V \ge 0$). Dense PCA yields unphysical negative loadings, while traditional Non-Negative Matrix Factorization (NMF) collapses into catastrophic collinearity ($D = 0.943$, Ridge $R^2 = 0.386$). Non-Negative NSA-Flow ($w=0.5$) drastically reduces this collinearity defect ($D = 0.006$) while enforcing $V \ge 0$, recovering $R^2 = 0.853$, while Signed ($R^2 = 0.918$) and Consolidated Signed NSA-Flow ($R^2 = 0.907$) match or exceed dense PCA ($R^2 = 0.911$) with clean, non-overlapping spectral bands.
+2. **Sonar Frequency Return Acoustics** ($n=208, p=60$, OpenML ID 40; @gorman1988analysis): Continuous acoustic sensor energy bands ($X \in [0, 1]$) classifying cylindrical metal mines from rock targets. This benchmark avoids saturation ceilings. Signed NSA-Flow matches dense PCA ($\text{ROC-AUC} = 0.819$ at $w=0.0$ and $0.809$ at $w=0.5$), and consolidated signed flow achieves $\text{ROC-AUC} = 0.812$ with strictly non-overlapping frequency modules ($83.3\%$ sparsity, $D = 0.000$).
+3. **High-Dimensional Prostate Cancer Transcriptomics** ($n=102, p=12{,}600$, OpenML ID 45099; @singh2002gene): Gene expression contrast separating 52 prostate tumor specimens from 50 non-tumor prostate tissues, with variance filtering to the top 2000 genes executed strictly inside each cross-validation fold. Consolidated Signed NSA-Flow ($w=0.5$) outperforms dense PCA on Balanced Accuracy ($0.824 \pm 0.088$ vs $0.805 \pm 0.132$) while producing $86.7\%$ exact zero loadings ($V_j \cdot V_l = 0$) and near-zero frame defect ($D = 0.022$). In this regime, hard disjoint assignment acts as an effective structural regularizer by stripping out dense, non-specific stromal background noise.
 
 The parametric trade-off across orthogonality weights $w \in [0.0, 0.95]$ demonstrates smooth, monotone convergence toward disjoint support without performance cliffs, identifying $w \in [0.25, 0.5]$ as an optimal operational sweet spot.
 
@@ -2451,9 +2497,9 @@ NSA-Flow's tunability via \( w \in [0,1] \) enables practitioners to prioritize 
 
 Across diverse empirical domains, the performance characteristics of NSA-Flow can be understood through the lens of data geometry and downstream estimator capacity:
 
-- **Continuous Clinical Disease Progression**: On the Alzheimer's Disease Neuroimaging Initiative (ADNI) cohort, when predicting continuous Clinical Dementia Rating Sum of Boxes (CDRSB) from bilateral cortical thickness after covarying age, sex, education, and APOE4, Consolidated Signed NSA-Flow ($w=0.5$) outperforms dense PCA under linear models ($R^2 = 0.346 \pm 0.103$ vs $0.306 \pm 0.109$, $p=3.5 \times 10^{-5}$) and achieves an **18.1 percentage-point leap** in explained variance under Random Forest regression ($R^2 = 0.463$ vs $0.281$; $R^2 = 0.369 \pm 0.139$ in 30-fold CV, $p=2.4 \times 10^{-6}$). Furthermore, across the 9-outcome continuous cognitive battery (CDRSB, ADAS13, ADASQ4, MMSE, FAQ, mPACCdigit, LDELTOTAL, etc.), Consolidated NSA-Flow beats dense PCA on 7 of the 9 outcomes under tree ensembles, with an average gain of $\Delta R^2 \approx +0.044$. Mechanistically, dense PCA conflates global intracranial volume across all components (mean lobe overlap $3.992$), creating severe collinear crosstalk; Consolidated NSA-Flow enforces strictly disjoint anatomical lobes (overlap $0.000$), allowing tree models to evaluate non-linear regional staging without interference from global scale.
-- **High-Dimensional Cancer Transcriptomics**: On Prostate cancer microarray profiling ($p=12,600$), Consolidated Signed NSA-Flow outperforms dense PCA on Balanced Accuracy ($0.822 \pm 0.133$ vs $0.805 \pm 0.132$) while achieving $83.3\%$ exact disjoint sparsity and zero frame defect ($D=0.000$), because modular partitioning filters out diffuse stromal background expression. On the Golub leukemia benchmark, Signed NSA-Flow achieves Balanced Accuracy of $0.757 \pm 0.119$ vs PCA's $0.728 \pm 0.130$ on 3-class multiclass distinction under Random Forest.
-- **Physical Non-Negative Spectroscopy**: In Tecator NIR optical spectrometry, where physical absorption requires $V \ge 0$, standard NMF suffers catastrophic collinearity ($D = 0.943$, Ridge $R^2 = 0.386$). Non-negative NSA-Flow eliminates collinearity ($D = 0.000$) while preserving $V \ge 0$ to recover $R^2 = 0.878$, and Consolidated Signed flow matches dense PCA ($R^2 = 0.903$ vs $0.911$) with non-overlapping spectral bands.
+- **Continuous Clinical Disease Progression**: On the Alzheimer's Disease Neuroimaging Initiative (ADNI) cohort, when predicting continuous Clinical Dementia Rating Sum of Boxes (CDRSB) from bilateral cortical thickness after covarying age, sex, education, and APOE4 across 20 repeated 80/20 splits, Consolidated Signed NSA-Flow ($w=0.5$) outperforms dense PCA under linear models ($\Delta R^2 = +0.023$, $95\%$ CI $[0.003, 0.043]$, $0.236 \pm 0.255$ vs $0.213 \pm 0.256$) and achieves a **12.3 percentage-point mean gain** in explained variance under Random Forest regression ($\Delta R^2 = +0.123$, $95\%$ CI $[0.065, 0.182]$, $0.258 \pm 0.238$ vs $0.135 \pm 0.284$, winning $17/20$ splits). Furthermore, across the 9-outcome continuous cognitive battery (CDRSB, ADAS13, ADASQ4, MMSE, FAQ, mPACCdigit, LDELTOTAL, etc.), Consolidated NSA-Flow beats dense PCA on 7 of the 9 outcomes under tree ensembles, with an average gain of $\Delta R^2 \approx +0.044$. Mechanistically, dense PCA conflates global intracranial volume across all components (mean lobe overlap $3.992$), creating severe collinear crosstalk; Consolidated NSA-Flow enforces strictly disjoint anatomical lobes (overlap $0.000$), allowing tree models to evaluate non-linear regional staging without interference from global scale.
+- **High-Dimensional Cancer Transcriptomics**: On Prostate cancer microarray profiling ($p=12,600$), Consolidated Signed NSA-Flow ($w=0.5$) outperforms dense PCA on Balanced Accuracy ($0.824 \pm 0.088$ vs $0.805 \pm 0.132$) while achieving $86.7\%$ exact disjoint sparsity and near-zero frame defect ($D=0.022$), because modular partitioning filters out diffuse stromal background expression. On the Golub 3-class leukemia benchmark, Signed NSA-Flow ($w=0.5$) achieves Balanced Accuracy of $0.748 \pm 0.161$ (Linear) and $0.680 \pm 0.091$ (Random Forest) vs PCA's $0.698 \pm 0.133$ (Linear) and $0.660 \pm 0.061$ (Random Forest).
+- **Physical Non-Negative Spectroscopy**: In Tecator NIR optical spectrometry, where physical absorption requires $V \ge 0$, standard NMF suffers catastrophic collinearity ($D = 0.943$, Ridge $R^2 = 0.386$). Non-negative NSA-Flow ($w=0.5$) eliminates almost all collinearity ($D = 0.006$) while preserving $V \ge 0$ to recover $R^2 = 0.853$, and Signed ($R^2 = 0.918$) and Consolidated Signed flow ($R^2 = 0.907$) match or exceed dense PCA ($R^2 = 0.911$) with non-overlapping spectral bands.
 - **Gross Binary Diagnosis Ceilings**: On gross binary classifications using unregularized linear models (such as ADNI CN vs DEM or Golub ALL vs AML), global variance accounts for the vast majority of separation, and linear models are rotationally invariant over the principal subspace. Here, dense PCA defines the variance ceiling, and imposing non-negativity sacrifices a modest $2$--$4\%$ in AUC to buy interpretable, near-disjoint factors.
 
 ## Limitations

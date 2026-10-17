@@ -18,17 +18,18 @@ arbitrary order:
     gives ``D = 0`` exactly.
 
 ``nonneg="hard"`` (also ``True``) or ``"softplus"``
-    Non-negativity FIRST -- ``relu(W)`` or ``softplus(W)`` -- and then ``w``
-    controls a short *projected-gradient flow on the defect inside the
-    non-negative orthant*: a few steps of ``Y <- max(0, Y - eta grad Dtilde(Y))``
-    where ``w`` sets how many fixed-size steps run (``round(8 w)``), each kept
-    only if it lowers ``Dtilde``.  Every step is differentiable (almost everywhere), keeps
-    ``Y >= 0`` exactly, and cannot increase the defect, so ``defect()`` is
-    non-increasing in ``w`` at fixed ``W``.  ``w = 0`` returns ``relu(W)`` /
-    ``softplus(W)`` unchanged.
+    By default (``operator="auto"``), evaluates the exact certified anchored
+    proximal operator :func:`nsa_flow.nsa_flow` with ``fidelity="anchor"`` and
+    Straight-Through Estimator (STE) gradients during training (cached in
+    ``eval()`` mode).  When ``nonneg="softplus"``, ``softplus(W)`` is applied
+    first so the anchor is strictly positive and smooth gradients flow through
+    the softplus reparameterisation.  When ``operator="flow"`` is requested,
+    applies non-negativity first and blends with an 8-step unrolled projected-
+    gradient defect flow inside the non-negative orthant.  ``w = 0`` returns
+    ``relu(W)`` / ``softplus(W)`` unchanged.
 
-    Why not the blend here.  Versions before 3.2.1 blended onto the Stiefel
-    manifold and *then* applied the non-negativity map.  A clamp or softplus
+    Why not the post-clamp Stiefel blend.  Versions before 3.2.1 blended onto the
+    Stiefel manifold and *then* applied the non-negativity map.  A clamp or softplus
     after an orthogonalisation destroys the orthogonality just paid for:
     measured on a random 66 x 5 start, ``defect_D`` of the effective weight
     was 0.528 at ``w = 0`` and 0.497 at ``w = 1`` under softplus, 0.134 and
@@ -74,7 +75,10 @@ def _polar_ns(Y, iters=_NS_ITERS):
     k = Y.shape[-1]
     eye = torch.eye(k, dtype=Y.dtype, device=Y.device)
     Q = Y / Y.flatten(-2).norm(dim=-1).clamp_min(torch.finfo(Y.dtype).tiny).reshape(*Y.shape[:-2], 1, 1)
-    for _ in range(iters):
+    # Increase iterations slightly when k is large so 1/sqrt(k) initial singular
+    # values reach the quadratic convergence basin of Newton-Schulz.
+    n_iters = max(int(iters), int(math.ceil(math.log(max(k, 1)) / math.log(2.25))) + 10)
+    for _ in range(n_iters):
         Q = Q @ (1.5 * eye - 0.5 * (Q.transpose(-2, -1) @ Q))
     return Q
 
@@ -233,16 +237,17 @@ class _NSAMixin:
 
         if use_solver:
             from .solve import nsa_flow
-            M = self._pk_view(W.detach())
+            W_base = F.softplus(W) if self.nonneg in ("softplus", "soft") else W
+            M = self._pk_view(W_base.detach())
             res = nsa_flow(M.double(), w=self.w, mode="anchored", fidelity="anchor",
                            nonneg=is_nonneg)
             Y = res.Y.to(W.dtype)
             W_eff = self._pk_unview(Y, W)
             if self.training:
                 # Straight-Through Estimator (STE): forward pass uses the exact
-                # nsa_flow solver result; backward pass passes gradients directly
-                # through to W so optimizer updates the raw parameter.
-                return W + (W_eff - W).detach()
+                # nsa_flow solver result; backward pass passes gradients through
+                # W_base (so softplus reparameterisation scales gradients smoothly).
+                return W_base + (W_eff - W_base).detach()
             return W_eff
 
         if not is_nonneg:
@@ -501,12 +506,13 @@ class NSAFlowLayer(nn.Module):
 
         if use_solver:
             from .solve import nsa_flow
-            res = [nsa_flow(Y[i].detach().double(), w=self.w, mode="anchored",
+            Y_base = F.softplus(Y) if self.nonneg in ("softplus", "soft") else Y
+            res = [nsa_flow(Y_base[i].detach().double(), w=self.w, mode="anchored",
                             fidelity="anchor", nonneg=is_nonneg).Y.to(Y.dtype)
                    for i in range(Y.shape[0])]
             Y_eff = torch.stack(res, dim=0)
             if self.training:
-                return Y + (Y_eff - Y).detach()
+                return Y_base + (Y_eff - Y_base).detach()
             return Y_eff
 
         if not is_nonneg:

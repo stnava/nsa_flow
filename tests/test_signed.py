@@ -49,14 +49,23 @@ def test_gradient_of_the_signed_objective_matches_autograd(data):
     W = torch.rand(p, 2 * k, dtype=F64, requires_grad=True)
     Vp, Vm = W[:, :k], W[:, k:]
     E = ((1 - w) * reconstruction_fidelity(Vp - Vm, S, c)
-         + w * angle_defect(W, diagonal=False) + lobe * (Vp * Vm).sum() / c)
+         + w * angle_defect(W, diagonal=False) + (w * lobe / k) * (Vp * Vm).sum())
     E.backward()
     Wd = W.detach()
     Vp, Vm = Wd[:, :k], Wd[:, k:]
     gV = (1 - w) * grad_reconstruction_fidelity(Vp - Vm, S, c)
     g = (torch.cat([gV, -gV], -1) + w * grad_angle_defect(Wd, diagonal=False)
-         + (lobe / c) * torch.cat([Vm, Vp], -1))
+         + (w * lobe / k) * torch.cat([Vm, Vp], -1))
     assert (W.grad - g).abs().max() < 1e-12
+
+
+def test_signed_objective_is_data_scale_invariant(data):
+    """Scaling X -> alpha X must leave the signed basis V, energy, and lobe_overlap invariant."""
+    r1 = nsa_flow_signed(data, k=4, w=0.5, lobe=1.0, tol=1e-10)
+    r2 = nsa_flow_signed(data * 1e3, k=4, w=0.5, lobe=1.0, tol=1e-10)
+    assert abs(r1.energy - r2.energy) < 1e-8
+    assert abs(r1["lobe_overlap"] - r2["lobe_overlap"]) < 1e-8
+    assert torch.allclose(r1.Y, r2.Y, atol=1e-6)
 
 
 # ------------------------------------------------------------------ capacity

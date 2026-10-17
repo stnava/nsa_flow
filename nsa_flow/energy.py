@@ -114,11 +114,19 @@ def procrustes_rotation(X0, Y):
     M = X0.transpose(-2, -1) @ Y
     # Q = U V' is the orthogonal polar factor of M, i.e. M (M'M)^{-1/2}.  Taking
     # it from a symmetric eigendecomposition of the k x k matrix M'M rather than
-    # from an SVD keeps this on-device: svd is unimplemented on MPS and silently
-    # falls back to the host elsewhere.  The k x k eigenproblem is also cheaper.
+    # from an SVD keeps this on-device when M has full rank: svd is unimplemented
+    # on MPS and silently falls back to the host elsewhere.  When M is rank-
+    # deficient, M(M'M)^{-1/2} maps the nullspace to 0 rather than an orthogonal
+    # completion, so we fall back to SVD on the k x k matrix M to guarantee Q in O(k).
     from .linalg import safe_eigh
     lam, V = safe_eigh(M.transpose(-2, -1) @ M)
-    inv_sqrt = lam.clamp_min(torch.finfo(M.dtype).tiny).rsqrt()
+    eps = torch.finfo(M.dtype).eps
+    tiny = torch.finfo(M.dtype).tiny
+    if bool((lam.min(dim=-1).values <= eps * lam.max(dim=-1).values.clamp_min(tiny)).any()):
+        M_cpu = M.cpu() if M.device.type == "mps" else M
+        U, _, Vh = torch.linalg.svd(M_cpu, full_matrices=False)
+        return (U @ Vh).to(M.device)
+    inv_sqrt = lam.clamp_min(tiny).rsqrt()
     Q = M @ ((V * inv_sqrt.unsqueeze(-2)) @ V.transpose(-2, -1))
     # Forming M'M squares the condition number, which costs ~1e-12 of
     # orthogonality in float64; one Newton-Schulz step Q <- Q (3I - Q'Q) / 2

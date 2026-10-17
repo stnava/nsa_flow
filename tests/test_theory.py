@@ -389,3 +389,15 @@ def test_signed_lobe_overlap_is_monotone_in_w():
             f"Overlap non-monotone at w={ws[i]}: "
             f"overlaps[{i}]={overlaps[i]:.4f} > overlaps[{i-1}]={overlaps[i-1]:.4f}; "
             f"full sequence: {[f'{o:.4f}' for o in overlaps]}")
+
+
+def test_procrustes_rotation_is_orthogonal_even_when_rank_deficient():
+    """procrustes_rotation(X0, Y) must return Q in O(k) even when X0'Y is singular."""
+    from nsa_flow.energy import procrustes_rotation
+    torch.manual_seed(0)
+    X0 = torch.randn(20, 4, dtype=torch.float64)
+    Y = torch.zeros(20, 4, dtype=torch.float64)
+    Y[:, 0] = X0[:, 0]  # rank 1: 3 zero columns
+    Q = procrustes_rotation(X0, Y)
+    eye = torch.eye(4, dtype=torch.float64)
+    assert torch.allclose(Q.T @ Q, eye, atol=1e-12)

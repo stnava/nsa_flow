@@ -377,10 +377,11 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="auto", orth="Cg", lobe=1.0,
         d = o_val(Wv)
         e = (1.0 - w) * f + w * d
         if lobe and w > 0.0:
-            # Lobe overlap penalty scaled by w: at w=0 the reconstruction
-            # term already suppresses self-cancellation; the penalty grows
-            # smoothly with w, ensuring a monotone overlap vs w response.
-            e = e + w * lobe * (Vp * Vm).sum() / c
+            # Lobe overlap penalty scaled by w / k: at w=0 the reconstruction
+            # term already suppresses self-cancellation; normalising by k (the
+            # optimal ||V||_F^2 scale) keeps the penalty dimensionless, O(1),
+            # and strictly invariant to data rescaling X -> alpha X.
+            e = e + (w * lobe / k) * (Vp * Vm).sum()
         return e, f, d
 
     def parts_grad(Wv):
@@ -390,7 +391,7 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="auto", orth="Cg", lobe=1.0,
         if w != 0.0:
             g = g + w * o_grad(Wv)
         if lobe and w > 0.0:
-            g = g + (w * lobe / c) * torch.cat([Vm, Vp], dim=-1)
+            g = g + (w * lobe / k) * torch.cat([Vm, Vp], dim=-1)
         return g
 
     def _energy(Wv):
@@ -421,8 +422,9 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="auto", orth="Cg", lobe=1.0,
     if consolidate:
         # Round to exactly disjoint supports, then keep optimising with the
         # support held fixed.  Same optimiser, same certificate, same budget.
-        mask = (consolidate_supports(W) != 0).to(W.dtype)
-        rep2 = minimise(W, _energy, _grad_and_energy, project_nonneg,
+        Wc = consolidate_supports(W)
+        mask = (Wc != 0).to(W.dtype)
+        rep2 = minimise(Wc, _energy, _grad_and_energy, project_nonneg,
                         optimizer=optimizer, max_iter=iter_cap, tol=tol,
                         sigma=sigma, mask=mask, verbose=False, trace=None,
                         caller="nsa_flow_signed (consolidate)", w=w,
@@ -430,7 +432,8 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="auto", orth="Cg", lobe=1.0,
         W = rep2.Y
         n_grad += rep2.n_grad
         n_energy += rep2.n_energy
-        iters, stop, gmap = rep2.iters, rep2.stop, rep2.grad_map
+        iters += rep2.iters
+        stop, gmap = rep2.stop, rep2.grad_map
 
     E_final, F_final, D_final = parts_energy(W)
     Vp, Vm = _split(W)
@@ -451,7 +454,7 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="auto", orth="Cg", lobe=1.0,
     # silently mixing the two as the "defect" field once did.
     r["parts"] = W
     r["parts_report"] = basis_report(W)
-    r["lobe_overlap"] = float((Vp * Vm).sum() / c)   # normalised by ||X||_F^2
+    r["lobe_overlap"] = float((Vp * Vm).sum() / k)   # normalised by k (scale-invariant)
     r["consolidated"] = bool(consolidate)
     r.update({f"parts_{key}": val for key, val in part_sparsity(W).items()
               if key != "nnz_per_part"})

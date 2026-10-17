@@ -11,13 +11,13 @@
 Dense PCA & 0.911 & 0.000 & 0.819 & 0.769 & 0.805 & 0.0\% \\
 NMF (Non-negative) & 0.386 & 0.943 & 0.802 & 0.695 & --- & --- \\
 \midrule
-NSA-Flow Nonneg ($w=0.0$) & 0.876 & 0.009 & --- & --- & --- & --- \\
-NSA-Flow Nonneg ($w=0.5$) & 0.878 & 0.000 & 0.765 & 0.679 & --- & --- \\
-NSA-Flow Signed ($w=0.0$) & --- & --- & 0.819 & 0.765 & 0.794 & 0.0\% \\
-NSA-Flow Signed ($w=0.5$) & 0.906 & 0.000 & 0.813 & 0.765 & 0.803 & 0.0\% \\
-NSA-Flow Consol ($w=0.5$) & \textbf{0.903} & \textbf{0.000} & \textbf{0.810} & \textbf{0.749} & \textbf{0.812} & \textbf{83.3\%} \\
+NSA-Flow Nonneg ($w=0.0$) & 0.787 & 0.217 & --- & --- & --- & --- \\
+NSA-Flow Nonneg ($w=0.5$) & 0.853 & 0.000 & 0.768 & 0.690 & --- & --- \\
+NSA-Flow Signed ($w=0.0$) & --- & --- & 0.819 & 0.769 & 0.805 & 0.0\% \\
+NSA-Flow Signed ($w=0.5$) & 0.918 & 0.051 & 0.809 & 0.755 & 0.814 & 38.4\% \\
+NSA-Flow Consol ($w=0.5$) & \textbf{0.907} & \textbf{0.000} & \textbf{0.812} & \textbf{0.749} & \textbf{0.824} & \textbf{86.7\%} \\
 \bottomrule
 \end{tabular}
-\caption{Cross-validated benchmark evaluation across three public datasets: Tecator NIR spectroscopy ($n=240, p=100$, predicting chemical fat \%), Sonar acoustic frequency returns ($n=208, p=60$, classifying mines vs.\ rocks), and Prostate cancer microarray ($n=102, p=12{,}600$, top 2000 in-fold genes classifying tumor vs.\ normal). All feature scaling, gene selection, and representation learning are executed strictly inside each fold. Defect $D = \|G - I/k\|_F^2$ measures deviation from the scaled Stiefel manifold ($D=0$ is strictly orthogonal). Consolidated NSA-Flow attains 83.3\% exact zero loadings with zero crosstalk ($V_j \cdot V_l = 0$) while matching or slightly exceeding PCA accuracy.}
+\caption{Cross-validated benchmark evaluation across three public datasets: Tecator NIR spectroscopy ($n=240, p=100$, predicting chemical fat \%), Sonar acoustic frequency returns ($n=208, p=60$, classifying mines vs.\ rocks), and Prostate cancer microarray ($n=102, p=12{,}600$, top 2000 in-fold genes classifying tumor vs.\ normal). All feature scaling, gene selection, and representation learning are executed strictly inside each fold. Defect $D = \|G - I/k\|_F^2 / (1 - 1/k)$ measures deviation from the scaled Stiefel manifold. Consolidated NSA-Flow attains 86.7\% exact zero loadings with zero lobe overlap while matching or slightly exceeding PCA accuracy.}
 \label{tab:new_public_benchmarks}
 \end{table}

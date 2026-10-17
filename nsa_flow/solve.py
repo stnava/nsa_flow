@@ -247,8 +247,8 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
         Worth 3-4x at moderate sizes; costs a few seconds on first call.
     tol : float, optional
         Stop when the projected-gradient mapping norm falls below this.  The
-        default is derived from the working precision -- ``1e-9`` in float64 and
-        ``1e-6`` in float32 -- because a fixed ``1e-9`` is below float32 machine
+        default is derived from the working precision -- ``1e-6`` in float64 and
+        ``1e-4`` in float32 -- because a fixed ``1e-9`` is below float32 machine
         epsilon (``1.2e-7``) and so can never be met, which would silently turn
         every single-precision call into a ``max_iter`` run.
 
@@ -460,17 +460,18 @@ def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=None,
         Execution mode. Default 'auto' detects from data signs and arguments.
     consolidate : bool, default False
         Guarantees exact disjoint supports per component in signed mode.
-    optimizer : {"torch_lbfgs", "spg", "lbfgs"}, default "torch_lbfgs"
+    optimizer : {"lbfgsb", "lbfgsb_cpp", "spg", "scipy_lbfgsb"}, default "lbfgsb"
         Optimization algorithm:
-        - "torch_lbfgs": Native pure PyTorch quasi-Newton via quadratic reparameterization (default).
+        - "lbfgsb": Bound-constrained L-BFGS-B with C++ acceleration when available (default).
+        - "lbfgsb_cpp": Explicit C++ L-BFGS-B kernel.
         - "spg": Spectral projected gradient (alternating Barzilai-Borwein).
-        - "lbfgs": SciPy L-BFGS-B (box constrained).
+        - "scipy_lbfgsb": SciPy L-BFGS-B reference solver.
     init : str or Tensor, optional
         Initial point strategy or tensor.
     max_iter : int, optional
-        Maximum iterations. Default adapted to method.
+        Maximum gradient evaluations (default 20000).
     tol : float, optional
-        Stationarity tolerance.
+        Stationarity tolerance on the scale-invariant gradient mapping.
     fidelity : {"auto", "anchor", "subspace"}, default "auto"
         Anchored mode only: which notion of "close to the target" to use.
         ``"anchor"`` is the entrywise Euclidean distance -- the one that makes

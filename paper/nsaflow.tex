@@ -69,32 +69,36 @@ normalisation the trade-off weight $w$ is a genuine convex weight needing no
 data-dependent calibration, and $\ip{\nabla D}{Y} = 0$ identically, so scale is
 pinned by the fidelity term alone.
 
-The resulting objective is minimised by spectral projected gradient. The inner
-loop is factorisation-free at $O(pk^2)$, and the solver is deterministic:
+The resulting objective is minimised by bound-constrained L-BFGS-B (or spectral
+projected gradient) certified by a scale-invariant projected gradient mapping.
+The inner loop is factorisation-free at $O(pk^2)$, and the solver is deterministic:
 empirically, random restarts reach the same optimum to machine precision for
 $w \le 0.9$ on every problem family we tried, so there are no restarts,
 schedules or learning-rate heuristics to tune. Conditioning degrades as
 $w\to1$---iteration counts grow from tens to thousands, and at $w=1$ the scale
 is genuinely unconstrained, which the method reports rather than conceals.
 
-NSA-Flow refines a supplied basis, and on synthetic data with a planted
-non-negative basis it improves every basis it is handed on every metric we
-measure --- PCA, NMF and sparse PCA loadings alike. Across extensive empirical
-evaluations spanning clinical neuroimaging, oncology transcriptomics, acoustic
-sensors, and NIR spectroscopy, we characterize the exact representation trade-offs:
-on gross binary classifications under linear models (where raw variance dominates
-and linear models span the eigenspace), PCA achieves the variance ceiling and
-NSA-Flow trades a modest $2$--$4\%$ AUC for factor readability, reducing support
-overlap from about four to near zero. In contrast, on continuous clinical cognitive
-progression (ADNI CDRSB, $+0.18$ $R^2$ gain under Random Forest over PCA, and
+NSA-Flow refines a supplied basis (or fits directly to the data covariance
+without sign truncation via a signed contrast lifting $V = V_+ - V_-$), and on
+synthetic data with a planted non-negative basis it improves every basis it is
+handed on every metric we measure --- PCA, NMF and sparse PCA loadings alike.
+Across extensive empirical evaluations spanning clinical neuroimaging, oncology
+transcriptomics, acoustic sensors, and NIR spectroscopy, we characterize the
+exact representation trade-offs: on gross binary classifications under linear
+models (where raw variance dominates and linear models span the eigenspace),
+PCA achieves the variance ceiling and NSA-Flow trades a modest $2$--$4\%$ AUC
+for factor readability, reducing support overlap from about four to near zero.
+In contrast, on continuous clinical cognitive progression (ADNI CDRSB,
+$\Delta R^2 = +0.123$ [95\% CI $0.065, 0.182$] under Random Forest and $+0.023$
+[$0.003, 0.043$] under linear models across 20 repeated 80/20 splits, plus
 consistent advantages across a 9-outcome cognitive battery), high-dimensional
-cancer transcriptomics (Prostate cancer, $0.822$ vs $0.805$ Balanced Accuracy
-with $83.3\%$ exact disjoint sparsity), Golub multiclass leukemia, and physical
-spectroscopy, Consolidated NSA-Flow structurally outperforms dense PCA. Disjoint,
-modular factors eliminate global volume confounding and collinear background noise,
-allowing non-linear estimators to isolate independent disease staging.
-All claims in the paper are asserted executably in the accompanying test suite
-($152$ assertions across theory and numerical robustness batteries).
+cancer transcriptomics (Prostate cancer, $0.824$ vs.\ $0.805$ Balanced Accuracy
+with $86.7\%$ exact disjoint sparsity), Golub multiclass leukemia, and physical
+spectroscopy, Consolidated Signed NSA-Flow structurally outperforms dense PCA.
+Disjoint, modular factors eliminate global volume confounding and collinear
+background noise, allowing non-linear estimators to isolate independent disease
+staging. All claims in the paper are asserted executably in the accompanying
+test suite ($403$ assertions across theory and numerical robustness batteries).
 \end{abstract}
 
 \section{Introduction}
@@ -388,24 +392,70 @@ $w=1$ exactly ranged over four orders of magnitude (up to $\sim\!10^4$). The
 solver warns at $w=1$ and reports the realised ratio rather than silently
 rescaling; see Remark~\ref{rem:w1}.
 
-\section{Algorithm}\label{sec:algorithm}
+\section{Algorithm and Extensions}\label{sec:algorithm}
 
 $E_w$ is continuously differentiable on $\{Y \ne 0\}$ with
 $\nabla E_w = 2(1-w)(Y-X_0)/\Fnorm{X_0}^2 + \frac{w}{1-1/k}\nabla D$, and
-$\mathcal{C}$ is closed and convex with trivial projection. We therefore use
-spectral projected gradient \citep{birgin2000}: Barzilai--Borwein step lengths
-\citep{barzilai1988} safeguarded by an Armijo backtracking line search on the
-projected step,
+$\mathcal{C}$ is closed and convex with trivial projection. We provide two
+bound-constrained first-order solvers that share the same factorisation-free
+inner loop and termination certificate:
+
+\paragraph{Spectral projected gradient (SPG) and bound-constrained L-BFGS-B.}
+In the reference SPG solver \citep{birgin2000}, Barzilai--Borwein step lengths
+\citep{barzilai1988} are safeguarded by a non-monotone Grippo--Lampariello--Lucidi
+(GLL) Armijo line search on the projected step,
 \begin{equation}
   Y^{j+1} = \mathcal{P}_\mathcal{C}\!\big(Y^j - t_j \nabla E_w(Y^j)\big),
   \qquad
-  E_w(Y^{j+1}) \le E_w(Y^j) - \frac{\sigma}{t_j}\Fnorm{Y^{j+1}-Y^j}^2 ,
+  E_w(Y^{j+1}) \le \max_{0 \le r < M} E_w(Y^{j-r}) - \frac{\sigma}{t_j}\Fnorm{Y^{j+1}-Y^j}^2 ,
 \end{equation}
-with $\sigma = 10^{-4}$ and $t_j$ halved until the condition holds. This is the
-standard setting in which every accumulation point is a stationary point of the
-constrained problem \citep[Ch.~10]{beck2017}, and the gradient-mapping norm
-$\Fnorm{Y^{j+1}-Y^j}/t_j$ is a computable stationarity certificate, which we
-report rather than asserting convergence.
+with $\sigma = 10^{-4}$, memory $M=10$, and $t_j$ halved until the condition
+holds. As default in v3.3, we also provide a pure-C++ bound-constrained
+L-BFGS-B solver \citep{byrd1995limited} with exact piecewise-quadratic Cauchy
+point computation along the projected gradient path, active-set subspace
+visualisation via the compact Byrd--Nocedal--Schnabel representation, and
+projected Armijo backtracking. Because $\nabla E_w(Y)$ scales as
+$\Fnorm{Y}^{-1}$, a raw projected-gradient norm would change under rescaling of
+$X_0$; both solvers therefore certify stationarity via the dimensionless,
+scale-invariant projected gradient mapping
+\begin{equation}\label{eq:gradmap}
+  g_{\text{map}}(Y)
+  = \frac{\Fnorm{\mathcal{P}_{\mathcal{C}}\!\big(Y - \Fnorm{Y}^2 \nabla E_w(Y)\big) - Y}}{\Fnorm{Y}} ,
+\end{equation}
+which is invariant under $(Y, X_0) \mapsto (\alpha Y, \alpha X_0)$ for all
+$\alpha > 0$ and vanishes if and only if $Y$ satisfies the first-order KKT
+conditions on $\mathcal{C}$.
+
+\paragraph{Direct data-reconstruction fidelity and signed contrast lifting.}
+Beyond refining a pre-computed loading matrix $X_0 \in \R^{p \times k}$ (target
+mode), NSA-Flow supports fitting orthogonal non-negative or signed loadings
+directly to a centered data matrix $X \in \R^{n \times p}$ without an
+intermediate target rotation. Replacing target fidelity $F(Y)$ with the
+normalised symmetric subspace reconstruction error
+\begin{equation}\label{eq:fdata}
+  F_{\text{data}}(V) = \frac{\Fnorm{X - X V V^\top}^2}{\Fnorm{X}^2}
+  = 1 - \frac{2\tr(V^\top X^\top X V) - \tr\!\big((V^\top X^\top X V)(V^\top V)\big)}{\Fnorm{X}^2}
+\end{equation}
+yields a scale-invariant objective in $X$ whose gradient requires only
+$(X(XV))$ and $(V^\top V)$ at $O(npk + pk^2)$ cost. When signed loadings
+$V \in \R^{p \times k}$ are desired without truncating negative half-waves,
+\texttt{nsa\_flow\_signed} lifts $V = V_+ - V_-$ into $2k$ non-negative columns
+$W = [V_+ \mid V_-] \in \Rpos^{p \times 2k}$. Mutual orthogonality among all
+$2k$ positive and negative half-columns (which simultaneously enforces
+$V_+ \odot V_- = 0$ and $V_i^\top V_j = 0$ for $i \ne j$ without forcing all
+$2k$ half-columns to carry equal norm) is driven by the scale-invariant
+off-diagonal Gram penalty
+\begin{equation}\label{eq:signed}
+  \tilde C_g(W) = \frac{\Fnorm{G_W - \operatorname{diag}(G_W)}^2}{1 - 1/(2k)},
+  \qquad G_W = \frac{W^\top W}{\tr(W^\top W)},
+\end{equation}
+augmented by a dimensionless lobe-overlap penalty
+$\frac{w\,\lambda_{\text{lobe}}}{k}\ip{V_+}{V_-}$. Finally, when exact support
+disjointness ($V_j \cdot V_l = 0$ for all $j \ne l$) is required, a two-phase
+\emph{support consolidation} step assigns each feature $i \in \{1,\dots,p\}$ to
+its dominant component $j^\star(i) = \arg\max_j |V_{ij}|$ and re-optimises the
+active entries under the fixed sparsity mask so column norms and scores
+re-equilibrate cleanly.
 
 \paragraph{Cost.} $\nabla E_w$ requires the Gram product $Y^\top Y$ and the
 product $YG$: $O(pk^2)$, with \emph{no} SVD, eigendecomposition or QR in the
@@ -626,18 +676,25 @@ there --- PCA reaches AUC $0.961$ rather than $0.992$, so the high-variance gene
 carry most of the signal --- and the gap between PCA and NSA-PCA closes to
 nothing: the best NSA-PCA setting attains $0.962$ against PCA's $0.961$, a
 difference far inside the cross-validation spread. The readability gain is
-unchanged (overlap $3.99 \to 0.17$). The honest summary is therefore that
+unchanged (overlap $3.99 \to 0.17$). The honest summary is therefore that on
+binary leukemia classification, NSA-Flow trades a small margin of discriminative
+power on variance-filtered features for near-disjoint gene signatures, and
+matches PCA when all genes are retained.
+
 \paragraph{Multiclass 3-class leukemia.} To test representation quality beyond
 binary classification, we evaluated a 3-class task separating B-cell acute
 lymphoblastic leukemia (B-ALL, $n=38$), T-cell acute lymphoblastic leukemia
-(T-ALL, $n=9$), and acute myeloid leukemia (AML, $n=25$). Under repeated stratified
+(T-ALL, $n=9$), and acute myeloid leukemia (AML, $n=25$). Under stratified
 5-fold cross-validation with all gene filtering ($p=2000$) and representation
-learning executed strictly inside each fold, Random Forest classification on
-Signed NSA-Flow features ($w=0.0$) achieves Balanced Accuracy of $0.757 \pm 0.119$
-compared to $0.728 \pm 0.130$ for Standard PCA, with Consolidated Signed flow
-attaining $0.678 \pm 0.082$ at $66.7\%$ exact disjoint sparsity. Isolating signed
-contrast directions enhances non-linear tree partitioning across multi-subtype
-lineages compared to dense variance projection.
+learning executed strictly inside each fold (\texttt{results/rapid\_golub\_3class.csv}),
+Standard PCA and Signed NSA-Flow at $w=0.0$ achieve identical performance
+($0.698 \pm 0.133$ Linear Balanced Accuracy and $0.660 \pm 0.061$ Random Forest
+Balanced Accuracy, confirming exact subspace equivalence at $w=0$), whereas
+Signed NSA-Flow at $w=0.5$ improves to $0.748 \pm 0.161$ (Linear) and
+$0.680 \pm 0.091$ (Random Forest) with $33.6\%$ sparsity, and Consolidated
+Signed flow ($w=0.5$) achieves $0.735 \pm 0.153$ (Linear) at $66.7\%$ exact
+disjoint sparsity. Isolating signed contrast directions improves class separation
+across multi-subtype lineages compared to dense variance projection.
 
 \input{results/e4_table.tex}
 
@@ -692,14 +749,14 @@ components nameable.}
 
 The preceding diagnosis analysis evaluates gross binary discrimination between extreme clinical endpoints (such as cognitively normal controls vs.\ clinical dementia). In that setting, extensive brain-wide volumetric reduction dominates, and linear models are rotationally invariant over the principal subspace. A critical clinical question in neurodegenerative disease, however, is predicting \emph{continuous longitudinal cognitive progression} from regional cortical morphology, where disease stages spread along localized anatomical networks rather than uniform global shrinkage.
 
-To test whether modular representation improves continuous disease tracking, we evaluated baseline ADNI cortical thickness across bilateral regions predicting the Clinical Dementia Rating Sum of Boxes (CDRSB) and a comprehensive 9-outcome cognitive battery \citep{petersen2010}. All models adjust for demographic covariates (age, sex, education, and APOE4 carrier status). Feature scaling, component extraction, and predictive estimators were strictly encapsulated inside each training fold across both a 30-fold cross-validation protocol and an independent 80/20 held-out test split ($k=5$). Table~\ref{tab:cdrsb_progression} reports the results.
+To test whether modular representation improves continuous disease tracking, we evaluated baseline ADNI cortical thickness across bilateral regions predicting the Clinical Dementia Rating Sum of Boxes (CDRSB) and a comprehensive 9-outcome cognitive battery \citep{petersen2010}. All models adjust for demographic covariates (age, sex, education, and APOE4 carrier status). Feature scaling, component extraction, and predictive estimators were strictly encapsulated inside each training split across both 20 repeated 80/20 random train/test splits and the primary 80/20 held-out test split ($k=5$). Table~\ref{tab:cdrsb_progression} reports the results.
 
 \input{results/cdrsb_cognitive_table.tex}
 
 \paragraph{Continuous CDRSB progression.}
-In linear models, Consolidated Signed NSA-Flow ($w=0.5$) improves out-of-sample $R^2$ by $+0.039$ over dense PCA in 30-fold CV ($0.346 \pm 0.103$ vs.\ $0.306 \pm 0.109$, paired $t = 4.89, p = 3.5 \times 10^{-5}$) and by $+0.037$ on the held-out test split ($0.379$ vs.\ $0.342$).
+In linear models across 20 repeated 80/20 train/test splits, Consolidated Signed NSA-Flow ($w=0.5$) improves out-of-sample $R^2$ by $+0.023$ over dense PCA ($0.236 \pm 0.255$ vs.\ $0.213 \pm 0.256$, $95\%$ CI $[0.003, 0.043]$, winning $14/20$ splits) and achieves $0.335$ vs.\ $0.342$ on the primary 80/20 test split.
 
-Under non-linear Random Forest estimators, the advantage expands dramatically: Consolidated Signed NSA-Flow achieves out-of-sample $R^2 = 0.369 \pm 0.139$ in 30-fold CV compared to $0.242 \pm 0.160$ for dense PCA---a statistically decisive gain of $\Delta R^2 = +0.127$ ($t = 5.85, p = 2.4 \times 10^{-6}$). On the held-out test split, Consolidated Signed NSA-Flow reaches $R^2 = 0.463$ versus PCA's $0.281$---an \textbf{18.1 percentage-point jump} in explained clinical variance. This gain is achieved with \emph{zero} anatomical lobe overlap ($0.000$ vs.\ $3.992$ for PCA) and zero frame defect ($D = 0.000$).
+Under non-linear Random Forest estimators, the advantage expands substantially: across the 20 repeated 80/20 splits, Consolidated Signed NSA-Flow achieves out-of-sample $R^2 = 0.258 \pm 0.238$ compared to $0.135 \pm 0.284$ for dense PCA---a statistically decisive mean gain of $\Delta R^2 = +0.123$ ($95\%$ CI $[0.065, 0.182]$, winning $17/20$ splits). On the primary 80/20 held-out split, Consolidated Signed NSA-Flow reaches $R^2 = 0.309$ (and Signed NSA-Flow at $w=0.25$ reaches $0.369$) versus PCA's $0.281$. This gain is achieved with \emph{zero} anatomical lobe overlap ($0.000$ vs.\ $3.992$ for PCA, $80.0\%$ exact zero loadings) and zero frame defect ($D = 0.000$).
 
 \paragraph{The 9-outcome cognitive battery.}
 To ensure that this finding is not specific to CDRSB, we evaluated nine distinct continuous cognitive instruments: CDRSB, ADAS13, ADASQ4, MMSE, FAQ, mPACCdigit, LDELTOTAL, EcogPtTotal, and EcogSPTotal across repeated 5-fold cross-validation. Under non-linear Random Forest models, Consolidated NSA-Flow outperforms dense PCA on 7 of the 9 outcomes: CDRSB ($\Delta R^2 = +0.117$ in data mode, $+0.085$ in subspace mode), FAQ ($+0.113$), ADASQ4 ($+0.069$), ADAS13 ($+0.045$), MMSE ($+0.046$), mPACCdigit ($+0.040$), and LDELTOTAL ($+0.023$). Across outcomes, modular networks provide an average gain of $\Delta R^2 \approx +0.044$ over dense PCA.
@@ -718,9 +775,9 @@ Evaluating NSA-Flow across diverse modalities reveals a consistent, principled t
 
 \begin{enumerate}\itemsep2pt
   \item \textbf{Gross binary discrimination in linear models (Ceiling regime):} When separating distant endpoints (e.g., ADNI CN vs.\ DEM, Golub ALL vs.\ AML) with linear models, unregularized classifiers are rotation-invariant over the subspace. Dense PCA captures maximal variance and defines the ceiling. Imposing non-negativity truncates negative loadings, sacrificing $2$--$4\%$ in AUC ($0.859 \to 0.813$ on ADNI CN/DEM; $0.986 \to 0.961$ on Golub) to achieve readable, disjoint factors. Here, the sign constraint is what costs accuracy, not the orthogonality flow.
-  \item \textbf{Continuous disease progression in non-linear models (Modularity win):} On continuous clinical targets (ADNI CDRSB and the 9-outcome battery), where true pathology spreads across discrete anatomical modules, dense PCA's variance mixing introduces severe collinear crosstalk. Consolidated NSA-Flow's strictly disjoint supports eliminate lobe overlap ($3.99 \to 0.00$), unlocking gains of $+0.127$ to $+0.181$ $R^2$ under Random Forest ensembles.
-  \item \textbf{High-dimensional transcriptomics with background noise (Regularization win):} In high-dimensional microarray data (Prostate cancer, $p=12{,}600$; \citealt{singh2002gene}), dense PCA loadings absorb non-specific stromal and benign tissue co-expression. Consolidated Signed NSA-Flow achieves $83.3\%$ exact disjoint sparsity and improves Balanced Accuracy ($0.822 \pm 0.133$ vs.\ $0.805 \pm 0.132$) by acting as a structural regularizer that discards diffuse background noise.
-  \item \textbf{Physical non-negative spectroscopy (Physical consistency):} In NIR spectroscopy (Tecator, $p=100$; \citealt{borggaard1992optimal}), where Beer-Lambert absorption physics requires $V \ge 0$, standard NMF suffers catastrophic collinearity ($D = 0.943$, Ridge $R^2 = 0.386$). Non-negative NSA-Flow eliminates the frame defect ($D = 0.000$) while maintaining $V \ge 0$, recovering $R^2 = 0.878$, and Consolidated Signed flow matches dense PCA ($R^2 = 0.903$ vs.\ $0.911$) with clean, non-overlapping spectral bands.
+  \item \textbf{Continuous disease progression in non-linear models (Modularity win):} On continuous clinical targets (ADNI CDRSB and the 9-outcome battery), where true pathology spreads across discrete anatomical modules, dense PCA's variance mixing introduces severe collinear crosstalk. Consolidated NSA-Flow's strictly disjoint supports eliminate lobe overlap ($3.99 \to 0.00$), unlocking a mean gain of $\Delta R^2 = +0.123$ ($95\%$ CI $[0.065, 0.182]$) under Random Forest ensembles across repeated splits.
+  \item \textbf{High-dimensional transcriptomics with background noise (Regularization win):} In high-dimensional microarray data (Prostate cancer, $p=12{,}600$; \citealt{singh2002gene}), dense PCA loadings absorb non-specific stromal and benign tissue co-expression. Consolidated Signed NSA-Flow ($w=0.5$) achieves $86.7\%$ exact disjoint sparsity and improves Balanced Accuracy ($0.824 \pm 0.088$ vs.\ $0.805 \pm 0.132$) by acting as a structural regularizer that discards diffuse background noise.
+  \item \textbf{Physical non-negative spectroscopy (Physical consistency):} In NIR spectroscopy (Tecator, $p=100$; \citealt{borggaard1992optimal}), where Beer-Lambert absorption physics requires $V \ge 0$, standard NMF suffers catastrophic collinearity ($D = 0.943$, Ridge $R^2 = 0.386$). Non-negative NSA-Flow ($w=0.5$) drastically reduces the frame defect ($D = 0.006$) while maintaining $V \ge 0$ and recovering $R^2 = 0.853$, while Signed ($R^2 = 0.918$) and Consolidated Signed flow ($R^2 = 0.907$) match or exceed dense PCA ($R^2 = 0.911$) with clean spectral bands.
 \end{enumerate}
 
 \subsection{Uniqueness of the optimum}\label{sec:exp-uniqueness}
@@ -776,9 +833,9 @@ End-to-end time to convergence on matched problems.}
 
 To assess the method's behavior across distinct data geometries and verify reproducibility on open benchmarks beyond the original paper's datasets, we evaluated NSA-Flow across three diverse OpenML public datasets under strictly leak-free 5-fold cross-validation:
 \begin{enumerate}\itemsep1pt
-  \item \textbf{Tecator NIR meat spectrometry} ($n=240, p=100$, OpenML ID 505; \citealt{borggaard1992optimal}): Continuous optical absorption spectra measuring $850$--$1050$\,nm channels ($X \ge 0$) to predict continuous chemical fat percentage ($0.9\%$--$49.8\%$). In optical spectrometry, the Beer-Lambert law states that absorbance is an additive non-negative linear mixture of pure constituent spectra; dense PCA produces unphysical negative loadings, while standard NMF fails catastrophically due to ill-conditioned collinearity ($D = 0.943$, Ridge $R^2 = 0.386$). In contrast, non-negative NSA-Flow ($w=0.5$) eliminates the collinearity defect ($D = 0.000$) while maintaining physical non-negativity ($V \ge 0$) and recovering $R^2 = 0.878$, while Consolidated Signed NSA-Flow matches dense PCA ($R^2 = 0.903$ vs $0.911$) with non-overlapping spectral bands.
-  \item \textbf{Sonar chirp frequency energy} ($n=208, p=60$, OpenML ID 40; \citealt{gorman1988analysis}): Continuous acoustic sensor energy bands ($X \in [0, 1]$) classifying metal cylinders (mines) versus rocks. This benchmark avoids ceiling effects (dense PCA achieves $\text{ROC-AUC} = 0.819$). Signed NSA-Flow matches dense PCA ($\text{ROC-AUC} = 0.819$ at $w=0.0$ and $0.813$ at $w=0.5$), and consolidated signed flow achieves $\text{ROC-AUC} = 0.810$ with strictly disjoint frequency band modules.
-  \item \textbf{Prostate cancer transcriptomics} ($n=102, p=12{,}600$, OpenML ID 45099; \citealt{singh2002gene}): Clinical contrast between 52 prostate tumors and 50 normal tissue samples, filtering to the top 2000 variance genes strictly inside each training fold. Consolidated Signed NSA-Flow achieves Balanced Accuracy of $0.812 \pm 0.125$ at $w=0.5$ and $0.822 \pm 0.133$ at $w=0.75$ (compared to dense PCA's $0.805 \pm 0.132$) while producing $83.3\%$ exact zero loadings ($V_j \cdot V_l = 0$) and zero frame defect ($D = 0.000$). Here, hard disjoint assignment acts as a structural regularizer by stripping out collinear stromal and benign background noise.
+  \item \textbf{Tecator NIR meat spectrometry} ($n=240, p=100$, OpenML ID 505; \citealt{borggaard1992optimal}): Continuous optical absorption spectra measuring $850$--$1050$\,nm channels ($X \ge 0$) to predict continuous chemical fat percentage ($0.9\%$--$49.8\%$). In optical spectrometry, the Beer-Lambert law states that absorbance is an additive non-negative linear mixture of pure constituent spectra; dense PCA produces unphysical negative loadings, while standard NMF fails catastrophically due to ill-conditioned collinearity ($D = 0.943$, Ridge $R^2 = 0.386$). In contrast, non-negative NSA-Flow ($w=0.5$) eliminates almost all collinearity ($D = 0.006$) while maintaining physical non-negativity ($V \ge 0$) and recovering $R^2 = 0.853$, while Signed ($R^2 = 0.918$) and Consolidated Signed NSA-Flow ($R^2 = 0.907$) match or exceed dense PCA ($R^2 = 0.911$) with non-overlapping spectral bands.
+  \item \textbf{Sonar chirp frequency energy} ($n=208, p=60$, OpenML ID 40; \citealt{gorman1988analysis}): Continuous acoustic sensor energy bands ($X \in [0, 1]$) classifying metal cylinders (mines) versus rocks. This benchmark avoids ceiling effects (dense PCA achieves $\text{ROC-AUC} = 0.819$). Signed NSA-Flow matches dense PCA ($\text{ROC-AUC} = 0.819$ at $w=0.0$ and $0.809$ at $w=0.5$), and consolidated signed flow achieves $\text{ROC-AUC} = 0.812$ with strictly disjoint frequency band modules ($83.3\%$ sparsity, $D = 0.000$).
+  \item \textbf{Prostate cancer transcriptomics} ($n=102, p=12{,}600$, OpenML ID 45099; \citealt{singh2002gene}): Clinical contrast between 52 prostate tumors and 50 normal tissue samples, filtering to the top 2000 variance genes strictly inside each training fold. Consolidated Signed NSA-Flow ($w=0.5$) achieves Balanced Accuracy of $0.824 \pm 0.088$ (compared to dense PCA's $0.805 \pm 0.132$) while producing $86.7\%$ exact zero loadings ($V_j \cdot V_l = 0$) and near-zero frame defect ($D = 0.022$). Here, hard disjoint assignment acts as a structural regularizer by stripping out collinear stromal and benign background noise.
 \end{enumerate}
 
 Table~\ref{tab:new_public_benchmarks} summarizes the cross-validated metrics across methods, and Figure~\ref{fig:new_public_wsweep} displays the parametric trade-off curves as $w$ varies across $[0.0, 0.95]$. Across all three domains, the trade-off surface is monotonic, with $w \in [0.25, 0.5]$ representing the empirical sweet spot where frame defect vanishes without compromising representation power.
@@ -788,7 +845,7 @@ Table~\ref{tab:new_public_benchmarks} summarizes the cross-validated metrics acr
 \begin{figure}[t]
 \centering
 \includegraphics[width=0.98\textwidth]{figs/fig_new_public_wsweep.pdf}
-\caption{Parametric sweep of $w \in [0.0, 0.95]$ across diverse public benchmark modalities. (a) Tecator NIR spectroscopy ($k=5$): Non-negative flow ($V \ge 0$) drives frame defect to zero with stable $R^2 \approx 0.88$, while consolidated signed flow matches dense PCA ($R^2 \approx 0.907$) with disjoint spectral supports. (b) Sonar acoustic chirps ($k=6$): ROC-AUC remains steady across $w$ with zero cliff-drop. (c) Prostate cancer transcriptomics ($k=6$): Consolidated signed flow achieves $83.3\%$ exact disjoint sparsity and slightly outperforms dense PCA on balanced accuracy by eliminating collinear background gene noise.}
+\caption{Parametric sweep of $w \in [0.0, 0.95]$ across diverse public benchmark modalities. (a) Tecator NIR spectroscopy ($k=5$): Non-negative flow ($V \ge 0$) drives frame defect to near zero with stable $R^2 \approx 0.85$--$0.88$, while consolidated signed flow matches dense PCA ($R^2 \approx 0.907$) with disjoint spectral supports. (b) Sonar acoustic chirps ($k=6$): ROC-AUC remains steady across $w$ with zero cliff-drop. (c) Prostate cancer transcriptomics ($k=6$): Consolidated signed flow achieves $86.7\%$ exact disjoint sparsity and outperforms dense PCA on balanced accuracy by eliminating collinear background gene noise.}
 \label{fig:new_public_wsweep}
 \end{figure}
 
@@ -805,9 +862,10 @@ Table~\ref{tab:new_public_benchmarks} summarizes the cross-validated metrics acr
   with component extraction outside cross-validation loops, which we do not repeat.
   Instead, rigorous predictive gains emerge specifically where modular,
   non-overlapping structure aligns with the underlying data geometry: continuous
-  clinical disease progression (ADNI CDRSB, $+0.18$ $R^2$ under Random Forest),
-  high-dimensional transcriptomics with dense stromal noise (Prostate cancer),
-  and physical non-negative spectroscopy (Tecator NIR).
+  clinical disease progression (ADNI CDRSB, $+0.123$ mean $\Delta R^2$ under Random
+  Forest across 20 repeated 80/20 splits), high-dimensional transcriptomics with
+  dense stromal noise (Prostate cancer), and physical non-negative spectroscopy
+  (Tecator NIR).
 \item Uniqueness for $w<1$ is an empirical finding on the problem families tested,
   not a theorem; $E_w$ is not convex, and $w\to1$ is provably combinatorial.
 \item Conditioning degrades as $w \to 1$: iteration counts grow from tens to
@@ -818,9 +876,11 @@ Table~\ref{tab:new_public_benchmarks} summarizes the cross-validated metrics acr
 \item The binary diagnosis analysis uses right-hemisphere grey-matter volumes due
   to label dropout on the left in that derived table; our continuous progression
   analysis uses bilateral cortical thickness where all regions are fully complete.
-\item Fidelity is measured to a supplied target $X_0$ (here PCA loadings), so the
-  method refines a basis rather than estimating one from the data matrix directly.
-  A joint formulation over factors and loadings is left open.
+\item In target mode ($F(Y) = \Fnorm{Y - X_0}^2/\Fnorm{X_0}^2$), fidelity is
+  measured to a supplied basis $X_0$, whereas data mode ($F_{\text{data}}(V)$)
+  optimises the symmetric projection $X V V^\top$ over loadings $V$; a joint
+  bi-factor formulation over separate score and loading matrices $(U, V)$ is left
+  open.
 \item The network layers are demonstrated, not evaluated at scale.
 \end{itemize}
 
@@ -850,8 +910,8 @@ here is readability, with the conditions under which it improves or trades
 accuracy clearly demarcated.
 
 \paragraph{Reproducibility.} Code, the property battery and the experiment
-harness are in the accompanying repository. \texttt{make test} runs $152$
-assertions, $77$ of which state the propositions of \S\ref{sec:functional}
+harness are in the accompanying repository. \texttt{make test} runs $403$
+assertions, $79$ of which state the propositions of \S\ref{sec:functional}
 executably; \texttt{make paper} regenerates every table and figure from scratch.
 
 \bibliographystyle{plainnat}

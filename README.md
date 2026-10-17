@@ -202,13 +202,11 @@ layer = NSAFlowLinear(256, 32, w=0.5, nonneg="hard")      # non-negative AND nea
 layer.project_()                                          # exact anchored prox, in place, no autograd
 ```
 
-**Unified continuous blend semantics and decoupled steps (v3.3.0)**.
-Across all layers and sign modes, $w \in [0, 1]$ has one unified meaning as a continuous convex blend:
-$$W_{\text{eff}} = (1 - w) W_0 + w P(W_0)$$
-- **Signed (`nonneg=None`)**: $W_0 = W$, and $P(W_0) = \text{project\_scaled\_stiefel}(W_0)$.
-- **Non-negative (`nonneg="hard"` / `"softplus"`)**: $W_0 = \max(0, W)$, and $P(W_0)$ is the in-orthant defect flow run for `n_steps` iterations (default 8). This eliminates the 3-step quantization and premature plateau at $w \approx 0.19$–$0.35$; response across $w \in [0, 1]$ is strictly continuous and monotone.
-- **Exact certified solver (`operator="solver"`)**: Forward pass computes the exact anchored prox via `nsa_flow(mode="anchored", fidelity="anchor")` — identical to `layer.project_()` and linear SiMLR. A Straight-Through Estimator (STE) passes loss gradients directly to the unconstrained weights during training, while inference is cached in `eval()`.
-- **Decoupled iteration budget**: `n_steps` governs the flow iteration count independently of $w$. Because the flow graph does not vary with $w$, `compile=True` compiles a single static graph without Dynamo recompilation overhead across $w$ sweeps.
+**Unified continuous blend and certified solver semantics (v3.3.2)**.
+Across all layers (`NSAFlowLinear`, `NSAFlowConv2d`, `NSAFlowLayer`), `operator="auto"` is the default:
+- **Signed (`nonneg=None`)**: uses the fast differentiable blend $W_{\text{eff}} = (1 - w) W + w\,\text{project\_scaled\_stiefel}(W)$.
+- **Non-negative (`nonneg="hard"` / `"softplus"`, default `operator="auto"` $\to$ `"solver"`)**: Forward pass computes the exact anchored prox via `nsa_flow(mode="anchored", fidelity="anchor")` — identical to `layer.project_()` and linear SiMLR. With `nonneg="softplus"`, $W_{\text{base}} = \text{softplus}(W)$ is pre-applied and used in the Straight-Through Estimator (STE: $W_{\text{base}} + (W_{\text{eff}} - W_{\text{base}}).\text{detach}()$) so backward gradients scale smoothly by $\sigma(W)$. Inference is cached in `eval()`.
+- **Explicit unrolled blend (`operator="blend"`)**: uses $W_{\text{eff}} = (1 - w) W_0 + w P(W_0)$ where $P(W_0)$ is the in-orthant defect flow run for `n_steps` iterations (default 8) independently of $w$, compiling a static graph without Dynamo recompilation overhead across $w$ sweeps.
 
 `NSAFlowLayer` applies the same map per sample to a `[B, p, k]` batch.
 
@@ -310,8 +308,8 @@ this is reported rather than hidden behind a silently row-orthonormal answer.
 
 ```bash
 make install       # editable install with experiment + test extras
-make test          # 133 assertions
-make theory        # just the property battery (70 assertions)
+make test          # 403 assertions
+make theory        # just the property battery (79 assertions)
 make experiments   # regenerate paper/results/ and paper/figs/
 make paper         # build paper/nsaflow.pdf
 ```

@@ -456,3 +456,19 @@ def test_forward_solver_matches_project_call():
     eff = layer.effective_weight()
     layer.project_()
     assert torch.allclose(layer.weight, eff, atol=1e-5)
+
+
+def test_softplus_vs_hard_solver_mode_differ():
+    """nonneg='softplus' applies F.softplus(W) before the solver and scales backward gradients by sigmoid(W)."""
+    torch.manual_seed(0)
+    W0 = torch.randn(4, 20) - 2.0
+    l_hard = NSAFlowLinear(20, 4, bias=False, w=0.5, nonneg="hard")
+    l_soft = NSAFlowLinear(20, 4, bias=False, w=0.5, nonneg="softplus")
+    with torch.no_grad():
+        l_hard.weight.copy_(W0)
+        l_soft.weight.copy_(W0)
+    eff_hard = l_hard.effective_weight()
+    eff_soft = l_soft.effective_weight()
+    assert not torch.allclose(eff_hard, eff_soft)
+    eff_soft.sum().backward()
+    assert torch.allclose(l_soft.weight.grad, torch.sigmoid(W0), atol=1e-6)

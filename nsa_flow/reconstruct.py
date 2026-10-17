@@ -365,7 +365,8 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="D", max_iter=None,
             # overflowed to NaN.  Every other init is O(1)-normalised; so is this.
             V = V / V.norm(dim=0, keepdim=True).clamp_min(torch.finfo(V.dtype).tiny)
         elif init == "random":
-            V = torch.rand(p, k, dtype=Xt.dtype, device=Xt.device)
+            gen = torch.Generator(device="cpu").manual_seed(0)
+            V = torch.rand(p, k, generator=gen, dtype=Xt.dtype).to(Xt.device)
         else:
             raise ValueError(
                 f"unknown init strategy {init!r}; "

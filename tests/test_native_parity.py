@@ -139,3 +139,20 @@ def test_six_reference_instances_energy_parity(mode, family, monkeypatch):
     assert (r_native.stop_reason == r_py.stop_reason or
             (r_native.stop_reason in ("grad_map", "plateau") and r_py.stop_reason in ("grad_map", "plateau"))), \
         f"{mode} x {family}: stop reason mismatch ({r_native.stop_reason} vs {r_py.stop_reason})"
+
+
+@pytest.mark.skipif(
+    os.environ.get("NSA_FLOW_DISABLE_NATIVE", "0") in ("1", "true", "True"),
+    reason="Native extension disabled via NSA_FLOW_DISABLE_NATIVE",
+)
+def test_native_handles_large_k_without_stack_overflow():
+    """Regression test: k > 32 (two_k > 64) in signed mode and k > 64 in data mode
+    previously overflowed fixed 64-element stack arrays in lbfgsb_cpu.cpp."""
+    gen = torch.Generator().manual_seed(7)
+    X_signed = torch.randn(60, 80, generator=gen, dtype=torch.float64)
+    r_sig = nsa_flow_signed(X_signed, k=36, w=0.5, max_iter=15)
+    assert torch.isfinite(r_sig.Y).all() and r_sig.Y.shape == (80, 36)
+
+    X_pos = torch.rand(80, 90, generator=gen, dtype=torch.float64)
+    r_dat = nsa_flow_data(X_pos, k=68, w=0.5, max_iter=15)
+    assert torch.isfinite(r_dat.Y).all() and r_dat.Y.shape == (90, 68)

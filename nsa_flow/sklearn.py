@@ -94,20 +94,21 @@ class NSAFlow(*_Base):
         for key, val in kwargs.items():
             setattr(self, key, val)
 
+    _INIT_PARAMS = ("n_components", "w", "mode", "consolidate",
+                    "optimizer", "init", "max_iter", "tol", "center")
+
     def get_params(self, deep=True):
         """``BaseEstimator.get_params`` plus the ``**kwargs`` passthrough."""
         try:
             params = super().get_params(deep=deep)
         except AttributeError:                       # sklearn not installed
-            params = {k: getattr(self, k) for k in
-                      ("n_components", "w", "mode", "consolidate",
-                       "optimizer", "init", "max_iter", "tol", "center")}
+            params = {k: getattr(self, k) for k in self._INIT_PARAMS}
         params.update(self.kwargs)
         return params
 
     def set_params(self, **params):
         for key in list(params):
-            if key in self.kwargs:
+            if key in self.kwargs or key not in self._INIT_PARAMS:
                 self.kwargs[key] = params.pop(key)
                 setattr(self, key, self.kwargs[key])
         if params:
