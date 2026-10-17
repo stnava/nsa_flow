@@ -64,13 +64,19 @@ nsa_flow_autograd <- function(Y0, X0 = NULL, w = 0.5, max_iter = 1000,
   ## an empty list and the figure silently disappears.
   gg <- NULL
   if (isTRUE(plot) && !is.null(r$trace) && length(r$trace) > 0) {
-    tr <- do.call(rbind, lapply(r$trace, function(z) data.frame(
-      iter = as.numeric(z$iter), fidelity = as.numeric(z$fidelity),
-      defect = as.numeric(z$defect))))
+    tr <- do.call(rbind, lapply(r$trace, function(z) {
+      has_fd <- !is.null(z$fidelity) && !is.null(z$defect)
+      data.frame(
+        iter = as.numeric(z$iter),
+        v1 = as.numeric(if (has_fd) z$fidelity else z$energy),
+        v2 = as.numeric(if (has_fd) z$defect else z$grad_map),
+        t1 = if (has_fd) "fidelity" else "energy",
+        t2 = if (has_fd) "orthogonality defect" else "grad_map"
+      )
+    }))
     long <- rbind(
-      data.frame(iter = tr$iter, value = tr$fidelity, term = "fidelity"),
-      data.frame(iter = tr$iter, value = pmax(tr$defect, 1e-16),
-                 term = "orthogonality defect"))
+      data.frame(iter = tr$iter, value = pmax(tr$v1, 1e-16), term = tr$t1),
+      data.frame(iter = tr$iter, value = pmax(tr$v2, 1e-16), term = tr$t2))
     gg <- ggplot2::ggplot(long, ggplot2::aes(iter, value, colour = term)) +
       ggplot2::geom_line(linewidth = 0.7) +
       ggplot2::scale_y_log10() +

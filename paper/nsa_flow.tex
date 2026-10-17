@@ -188,7 +188,7 @@ University of Virginia, Charlottesville, VA 22903}
 \section*{Abstract}\label{abstract}
 \addcontentsline{toc}{section}{Abstract}
 
-NSA-Flow estimates a matrix that is non-negative and approximately orthogonal, with the degree of approximation set by one parameter. For a non-negative matrix, orthogonal columns have disjoint supports, so each component names a set of features and no feature is shared. Exact disjointness is a clustering of the features and discards the data's ability to say that two features belong together; the relaxation is what makes the interior of that constraint reachable. We keep non-negativity as a hard constraint and treat orthogonality as an objective weighted by \(w \in [0,1]\), so \(w = 0\) returns the unconstrained fit and \(w = 1\) returns the clustering. Both terms of the energy are dimensionless, so \(w\) needs no calibration. The solver is a spectral projected gradient with a computable stationarity certificate and no factorisation in the loop, at \(O(pk^2)\) per iteration, or \(O(npk)\) when the basis is fitted to data with \(p > n\). NSA-Flow can refine a supplied basis, fit one to data directly, or act as the proximal step inside another algorithm. On the Golub leukemia data it raises cross-validated accuracy from \(0.828\) to \(0.875\) as the sparsification step in sparse PCA. On ADNI cortical thickness it raises out-of-sample \(\Delta R^2\) for nine cognitive outcomes by \(0.043\) over PCA and trinary diagnosis AUC from \(0.719\) to \(0.765\). We also show that comparisons of this kind must use a model that is sensitive to the choice of axes: a linear model on projected scores is exactly invariant to reparametrisation of the basis and cannot distinguish two bases spanning the same subspace.
+NSA-Flow estimates a matrix that is non-negative and approximately orthogonal, with the degree of approximation set by one parameter. For a non-negative matrix, orthogonal columns have disjoint supports, so each component names a set of features and no feature is shared. Exact disjointness is a clustering of the features and discards the data's ability to say that two features belong together; the relaxation is what makes the interior of that constraint reachable. We keep non-negativity as a hard constraint and treat orthogonality as an objective weighted by \(w \in [0,1]\), so \(w = 0\) returns the unconstrained fit and \(w = 1\) returns the clustering. Both terms of the energy are dimensionless, so \(w\) needs no calibration. The solver uses bound-constrained L-BFGS-B or spectral projected gradient with a computable stationarity certificate and no factorisation in the loop, at \(O(pk^2)\) per iteration, or \(O(npk)\) when the basis is fitted to data with \(p > n\). NSA-Flow can refine a supplied basis, fit one to data directly, or act as the proximal step inside another algorithm. On the Golub leukemia data it achieves \(56.9\%\) sparsity and \(0.003\) orthogonality defect while matching dense PCA on in-fold binary cross-validated accuracy (\(0.800\) vs.~\(0.807\), and \(0.795\) for soft-thresholding sparse PCA), while signed NSA-Flow raises 3-class leukemia balanced accuracy from \(0.698\) to \(0.748\). On ADNI cortical thickness it raises out-of-sample \(\Delta R^2\) for nine cognitive outcomes by \(0.041\) over PCA (\(+0.123\) on CDRSB clinical progression) and trinary diagnosis AUC from \(0.716\) to \(0.732\) (\(p = 1.24 \times 10^{-4}\)). We also show that comparisons of this kind must use a model that is sensitive to the choice of axes: a linear model on projected scores is exactly invariant to reparametrisation of the basis and cannot distinguish two bases spanning the same subspace.
 
 \section{Introduction}\label{introduction}
 
@@ -553,7 +553,7 @@ This section demonstrates applications of NSA-Flow in meaningful biomedical cont
 
 We contrast the impact of regularization in Sparse PCA based on our framework (parameterized globally at the matrix level) versus a standard \(\ell_1\) approach. The ``standard'' variant uses soft-thresholding as the proximal operator for \(\ell_1\) sparsity, which is a common approach in Sparse PCA algorithms (e.g., inspired by proximal gradient methods for variance maximization with \(\ell_1\) regularization, as in Zou et al.'s formulation (\citeproc{ref-zou2006sparse}{Zou, Hastie, and Tibshirani 2006})). The variant implemented here is identical for both approaches but switches between soft-thresholding and NSA-Flow to provide a controlled comparison. Evaluations include core metrics (explained variance, sparsity, orthogonality) and prediction impact (cross-validated accuracy in biomedical data from the Golub leukemia dataset (\citeproc{ref-golub1999molecular}{Golub et al. 1999})).
 
-We demonstrate the utility of our Sparse PCA implementation on the classic Golub et al.~(1999) leukemia gene expression dataset, a benchmark in bioinformatics for cancer classification. The dataset consists of expression levels for 3571 genes across 72 patients: 47 with acute lymphoblastic leukemia (ALL) and 25 with acute myeloid leukemia (AML). Sparse PCA is particularly valuable here, as it identifies a small subset of discriminative genes (biomarkers) while maximizing explained variance, aiding in interpretable cancer subtyping and reducing dimensionality for downstream tasks like classification. We compare our standard soft-thresholding variant (basic proximal) and the nsa\_flow approximation (non-negative sparse variant) to vanilla PCA (using \texttt{prcomp}). For evaluation:
+We demonstrate the utility of our Sparse PCA implementation on the classic Golub et al.~(1999) leukemia gene expression dataset, a benchmark in bioinformatics for cancer classification. The dataset consists of expression levels for 7129 genes across 72 patients: 47 with acute lymphoblastic leukemia (ALL) and 25 with acute myeloid leukemia (AML). Sparse PCA is particularly valuable here, as it identifies a small subset of discriminative genes (biomarkers) while maximizing explained variance, aiding in interpretable cancer subtyping and reducing dimensionality for downstream tasks like classification. We compare our standard soft-thresholding variant (basic proximal) and the nsa\_flow approximation (non-negative sparse variant) to vanilla PCA (using \texttt{prcomp}). For evaluation:
 
 \begin{itemize}
 \item
@@ -561,12 +561,12 @@ We demonstrate the utility of our Sparse PCA implementation on the classic Golub
 \item
   \textbf{Visualization}: 2D projection scatter plot colored by class (ALL/AML) to assess separation.
 \item
-  \textbf{Classification Performance}: Accuracy of a simple k-NN classifier (k=3) on the projected data using 5-fold CV, highlighting improved interpretability with fewer genes.
+  \textbf{Classification Performance}: Accuracy of a Random Forest classifier on the projected data using repeated 5-fold cross-validation with all scaling and basis estimation performed strictly inside each training fold.
 \item
   \textbf{Selected Genes}: List top genes (by loading magnitude) for each component demonstrating biomarker selection.
 \end{itemize}
 
-Data is loaded directly from the URL; genes are rows, samples are columns (transposed for analysis). Classes are assigned as first 47 ALL, last 25 AML based on the dataset structure. We compare standard PCA, Sparse PCA (soft thresholding) and Sparse PCA (NSA-Flow Approximation) on these wide data with 72 participants \(\times\) 7129 gene expression measurements. We evaluate reconstruction quality, sparsity, orthogonality, and classification performance. Figure \ref{fig:golubvis} summarizes the classification results and the embeddings for each method. Figure \ref{fig:golubtop} shows the feature selection and weights for each method where only the top 5 features for each component are shown for clarity. Table 2 summarizes the core metrics and classification results for each method.
+Data is loaded from the \texttt{golubEsets} package; samples are rows and genes are columns. We compare standard PCA, Sparse PCA (soft thresholding) and Sparse PCA (NSA-Flow Approximation) on these wide data with 72 participants \(\times\) 7129 gene expression measurements. We evaluate reconstruction quality, sparsity, orthogonality, and classification performance. Figure \ref{fig:golubvis} summarizes the classification results and the embeddings for each method. Figure \ref{fig:golubtop} shows the feature selection and weights for each method where only the top 5 features for each component are shown for clarity. Table \ref{tab:golubtbl} summarizes the core metrics and classification results for each method.
 
 \begin{table}[t]
 \caption{\label{tab:golubtbl}Core and Random Forest Classification Metrics for PCA Variants (Golub Dataset)} 
@@ -575,9 +575,9 @@ Data is loaded directly from the URL; genes are rows, samples are columns (trans
 \toprule
 Method & Expl. Var. & Sparsity & Orthog. Defect & CV Accuracy \\ 
 \midrule\addlinespace[2.5pt]
-Standard PCA & 0.290 & 0.000 & 0.000 & 0.828 \\ 
-Sparse PCA (Basic) & 0.273 & 0.500 & 0.000 & 0.824 \\ 
-Sparse PCA (NSA-Flow) & 0.213 & 0.567 & 0.003 & 0.875 \\ 
+Standard PCA & 0.290 & 0.000 & 0.000 & 0.807 \\ 
+Sparse PCA (Basic) & 0.273 & 0.500 & 0.000 & 0.795 \\ 
+Sparse PCA (NSA-Flow) & 0.212 & 0.569 & 0.003 & 0.800 \\ 
 \bottomrule
 \end{tabular*}
 \end{table}
@@ -645,20 +645,20 @@ We projected the data onto both sets of loadings: \(\text{proj}_{\text{PCA}} = X
 \midrule\addlinespace[2.5pt]
 \multicolumn{7}{l}{Pairwise Results} \\[2.5pt] 
 \midrule\addlinespace[2.5pt]
-CN vs MCI & NSA & 0.479 & 0.649 & 0.704 & 0.685 & {\itshape \cellcolor[HTML]{ADD8E6}{0.629}} \\ 
-CN vs MCI & PCA & 0.504 & 0.689 & 0.648 & 0.776 & {\itshape \cellcolor[HTML]{ADD8E6}{0.654}} \\ 
-CN vs AD & NSA & 0.840 & 0.790 & 0.908 & 0.922 & {\itshape \cellcolor[HTML]{ADD8E6}{0.865}} \\ 
-CN vs AD & PCA & 0.853 & 0.783 & 0.840 & 0.850 & {\itshape \cellcolor[HTML]{ADD8E6}{0.831}} \\ 
-MCI vs AD & NSA & 0.789 & 0.466 & 0.911 & 0.756 & {\itshape \cellcolor[HTML]{ADD8E6}{0.730}} \\ 
-MCI vs AD & PCA & 0.743 & 0.528 & 0.841 & 0.706 & {\itshape \cellcolor[HTML]{ADD8E6}{0.704}} \\ 
+CN vs MCI & NSA & 0.703 & 0.725 & 0.526 & 0.588 & {\itshape \cellcolor[HTML]{ADD8E6}{0.636}} \\ 
+CN vs MCI & PCA & 0.667 & 0.717 & 0.508 & 0.555 & {\itshape \cellcolor[HTML]{ADD8E6}{0.611}} \\ 
+CN vs AD & NSA & 0.833 & 0.928 & 0.838 & 0.863 & {\itshape \cellcolor[HTML]{ADD8E6}{0.866}} \\ 
+CN vs AD & PCA & 0.892 & 0.889 & 0.853 & 0.886 & {\itshape \cellcolor[HTML]{ADD8E6}{0.880}} \\ 
+MCI vs AD & NSA & 0.756 & 0.813 & 0.800 & 0.672 & {\itshape \cellcolor[HTML]{ADD8E6}{0.760}} \\ 
+MCI vs AD & PCA & 0.763 & 0.804 & 0.742 & 0.663 & {\itshape \cellcolor[HTML]{ADD8E6}{0.743}} \\ 
 \midrule\addlinespace[2.5pt]
 \multicolumn{7}{l}{Overall Summary} \\[2.5pt] 
 \midrule\addlinespace[2.5pt]
-Multi-class & NSA & - & - & - & - & {\itshape \cellcolor[HTML]{ADD8E6}{0.765}} \\ 
-Multi-class & PCA & - & - & - & - & {\itshape \cellcolor[HTML]{ADD8E6}{0.719}} \\ 
+Multi-class & NSA & 0.749 & 0.810 & 0.706 & 0.691 & {\itshape \cellcolor[HTML]{ADD8E6}{0.732}} \\ 
+Multi-class & PCA & 0.732 & 0.791 & 0.678 & 0.660 & {\itshape \cellcolor[HTML]{ADD8E6}{0.716}} \\ 
 Random Accuracy &  & - & - & - & - & {\itshape \cellcolor[HTML]{ADD8E6}{0.406}} \\ 
-t-statistic (NSA>PCA) &  & - & - & - & - & {\itshape \cellcolor[HTML]{ADD8E6}{16.479}} \\ 
-p-value (NSA>PCA) &  & - & - & - & - & {\itshape \cellcolor[HTML]{ADD8E6}{0.000}} \\ 
+t-statistic (NSA>PCA) &  & - & - & - & - & {\itshape \cellcolor[HTML]{ADD8E6}{4.695}} \\ 
+p-value (NSA>PCA) &  & - & - & - & - & {\itshape \cellcolor[HTML]{ADD8E6}{1.236 $\times$ 10\textsuperscript{-4}}} \\ 
 \bottomrule
 \end{tabular*}
 \end{table}
@@ -753,20 +753,20 @@ cannot answer this question.
 \toprule
 outcome & mode & n & covariates & PCA & NSA & NSA - PCA\\
 \midrule
-FAQ & data & 299 & -0.183 & 0.082 & 0.220 & 0.138\\
-CDRSB & data & 303 & -0.048 & 0.232 & 0.352 & 0.120\\
-ADAS13 & data & 301 & 0.073 & 0.407 & 0.451 & 0.044\\
-ADASQ4 & data & 303 & 0.031 & 0.297 & 0.332 & 0.036\\
-LDELTOTAL & data & 302 & 0.134 & 0.322 & 0.348 & 0.026\\
-mPACCdigit & data & 303 & 0.197 & 0.441 & 0.462 & 0.021\\
-MMSE & data & 303 & 0.036 & 0.321 & 0.334 & 0.013\\
-EcogPtTotal & data & 300 & -0.189 & 0.032 & 0.012 & -0.020\\
-EcogSPTotal & data & 294 & 0.009 & 0.217 & 0.183 & -0.034\\
-CDRSB & subspace & 303 & -0.048 & 0.232 & 0.317 & 0.085\\
+FAQ & data & 299 & -0.183 & 0.082 & 0.218 & 0.136\\
+CDRSB & data & 303 & -0.048 & 0.232 & 0.347 & 0.115\\
+ADAS13 & data & 301 & 0.073 & 0.407 & 0.450 & 0.043\\
+mPACCdigit & data & 303 & 0.197 & 0.441 & 0.480 & 0.039\\
+ADASQ4 & data & 303 & 0.031 & 0.297 & 0.335 & 0.038\\
+MMSE & data & 303 & 0.036 & 0.321 & 0.350 & 0.029\\
+LDELTOTAL & data & 302 & 0.134 & 0.322 & 0.343 & 0.021\\
+EcogPtTotal & data & 300 & -0.189 & 0.032 & 0.013 & -0.019\\
+EcogSPTotal & data & 294 & 0.009 & 0.217 & 0.185 & -0.032\\
+CDRSB & subspace & 303 & -0.048 & 0.232 & 0.318 & 0.086\\
 FAQ & subspace & 299 & -0.183 & 0.082 & 0.166 & 0.084\\
-ADASQ4 & subspace & 303 & 0.031 & 0.297 & 0.359 & 0.062\\
-mPACCdigit & subspace & 303 & 0.197 & 0.441 & 0.476 & 0.035\\
-MMSE & subspace & 303 & 0.036 & 0.321 & 0.356 & 0.035\\
+ADASQ4 & subspace & 303 & 0.031 & 0.297 & 0.358 & 0.062\\
+MMSE & subspace & 303 & 0.036 & 0.321 & 0.355 & 0.034\\
+mPACCdigit & subspace & 303 & 0.197 & 0.441 & 0.475 & 0.034\\
 EcogPtTotal & subspace & 300 & -0.189 & 0.032 & 0.062 & 0.030\\
 LDELTOTAL & subspace & 302 & 0.134 & 0.322 & 0.352 & 0.030\\
 ADAS13 & subspace & 301 & 0.073 & 0.407 & 0.426 & 0.019\\
@@ -784,7 +784,7 @@ EcogSPTotal & subspace & 294 & 0.009 & 0.217 & 0.195 & -0.022\\
 \toprule
 mode & outcomes favouring NSA & gain NSA & gain PCA & difference\\
 \midrule
-data & 7/9 & 0.293 & 0.254 & 0.038\\
+data & 7/9 & 0.296 & 0.254 & 0.041\\
 subspace & 8/9 & 0.294 & 0.254 & 0.040\\
 \bottomrule
 \end{tabular}
@@ -802,7 +802,7 @@ over PCA does not appear under a linear model, where the two are within
 
 \subsubsection{Extension to Diagnosis Prediction}\label{extension-to-diagnosis-prediction}
 
-We add a trinary classification task for AD diagnosis between controls (CN) vs.~mild cognitive impairment (MCI) vs clinical Alzheimer's disease (AD, most severe symptoms) derived from ADNI diagnostic labels using random forest classification and ROC analysis (\citeproc{ref-Cuingnet2011}{Cuingnet et al. 2011}). These additions provide a multifaceted view of utility, including out-of-sample generalizability and clinical relevance. For the diagnosis task, we use 5-fold cross-validation to compute area under the ROC curve (AUC), sensitivity, and specificity, ensuring robustness against overfitting. Table 3 summarizes these results. NSA-Flow yields an \textasciitilde4.6\% absolute AUC improvement over PCA averaged across all weighting conditions. Figure \ref{fig:dxstability} demonstrates stability of this effect across different \(w\) choices. While this difference may appear small numerically, it is:
+We add a trinary classification task for AD diagnosis between controls (CN) vs.~mild cognitive impairment (MCI) vs clinical Alzheimer's disease (AD, most severe symptoms) derived from ADNI diagnostic labels using random forest classification and ROC analysis (\citeproc{ref-Cuingnet2011}{Cuingnet et al. 2011}). These additions provide a multifaceted view of utility, including out-of-sample generalizability and clinical relevance. For the diagnosis task, we use 4-fold cross-validation (with all centering, PCA, and NSA-Flow refinement fitted strictly inside each training fold) to compute area under the ROC curve (AUC). The summary table in Figure \ref{fig:dxstability} reports these results. NSA-Flow yields a \(1.6\%\) absolute multi-class AUC improvement over PCA averaged across all weighting conditions (\(0.732\) vs.~\(0.716\), paired \(t = 4.695\), \(p = 1.24 \times 10^{-4}\)), and \(0.636\) vs.~\(0.611\) on the CN vs.~MCI contrast. Figure \ref{fig:enhanced-stats-dx-0} and Figure \ref{fig:dxstability} demonstrate the stability of this effect across different \(w\) choices. While this difference is modest numerically, it is:
 
 \begin{itemize}
 \item
@@ -834,11 +834,11 @@ To evaluate the generalization of NSA-Flow across diverse data geometries and en
 \def\labelenumi{\arabic{enumi}.}
 \tightlist
 \item
-  \textbf{Tecator NIR Optical Meat Spectroscopy} (\(n=240, p=100\), OpenML ID 505; Borggaard and Thodberg (\citeproc{ref-borggaard1992optimal}{1992})): Continuous absorbance spectra measuring \(850\)--\(1050\),nm channels to predict chemical fat percentage (\(0.9\%\)--\(49.8\%\)). In optical spectroscopy, absorbance is governed by the Beer-Lambert law, which dictates an additive non-negative linear combination of pure constituent spectra (\(V \ge 0\)). Dense PCA yields unphysical negative loadings, while traditional Non-Negative Matrix Factorization (NMF) collapses into catastrophic collinearity (\(D = 0.943\), Ridge \(R^2 = 0.386\)). Non-Negative NSA-Flow (\(w=0.5\)) completely eliminates this collinearity defect (\(D = 0.000\)) while enforcing \(V \ge 0\), recovering \(R^2 = 0.878\), while Consolidated Signed NSA-Flow matches dense PCA (\(R^2 = 0.903\) vs \(0.911\)) with clean, non-overlapping spectral bands.
+  \textbf{Tecator NIR Optical Meat Spectroscopy} (\(n=240, p=100\), OpenML ID 505; Borggaard and Thodberg (\citeproc{ref-borggaard1992optimal}{1992})): Continuous absorbance spectra measuring \(850\)--\(1050\),nm channels to predict chemical fat percentage (\(0.9\%\)--\(49.8\%\)). In optical spectroscopy, absorbance is governed by the Beer-Lambert law, which dictates an additive non-negative linear combination of pure constituent spectra (\(V \ge 0\)). Dense PCA yields unphysical negative loadings, while traditional Non-Negative Matrix Factorization (NMF) collapses into catastrophic collinearity (\(D = 0.943\), Ridge \(R^2 = 0.386\)). Non-Negative NSA-Flow (\(w=0.5\)) drastically reduces this collinearity defect (\(D = 0.006\)) while enforcing \(V \ge 0\), recovering \(R^2 = 0.853\), while Signed (\(R^2 = 0.918\)) and Consolidated Signed NSA-Flow (\(R^2 = 0.907\)) match or exceed dense PCA (\(R^2 = 0.911\)) with clean, non-overlapping spectral bands.
 \item
-  \textbf{Sonar Frequency Return Acoustics} (\(n=208, p=60\), OpenML ID 40; Gorman and Sejnowski (\citeproc{ref-gorman1988analysis}{1988})): Continuous acoustic sensor energy bands (\(X \in [0, 1]\)) classifying cylindrical metal mines from rock targets. This benchmark avoids saturation ceilings. Signed NSA-Flow matches dense PCA (\(\text{ROC-AUC} = 0.819\) at \(w=0.0\) and \(0.813\) at \(w=0.5\)), and consolidated signed flow achieves \(\text{ROC-AUC} = 0.810\) with strictly non-overlapping frequency modules.
+  \textbf{Sonar Frequency Return Acoustics} (\(n=208, p=60\), OpenML ID 40; Gorman and Sejnowski (\citeproc{ref-gorman1988analysis}{1988})): Continuous acoustic sensor energy bands (\(X \in [0, 1]\)) classifying cylindrical metal mines from rock targets. This benchmark avoids saturation ceilings. Signed NSA-Flow matches dense PCA (\(\text{ROC-AUC} = 0.819\) at \(w=0.0\) and \(0.809\) at \(w=0.5\)), and consolidated signed flow achieves \(\text{ROC-AUC} = 0.812\) with strictly non-overlapping frequency modules (\(83.3\%\) sparsity, \(D = 0.000\)).
 \item
-  \textbf{High-Dimensional Prostate Cancer Transcriptomics} (\(n=102, p=12{,}600\), OpenML ID 45099; Singh et al. (\citeproc{ref-singh2002gene}{2002})): Gene expression contrast separating 52 prostate tumor specimens from 50 non-tumor prostate tissues, with variance filtering to the top 2000 genes executed strictly inside each cross-validation fold. Consolidated Signed NSA-Flow outperforms dense PCA on Balanced Accuracy (\(0.822 \pm 0.133\) vs \(0.805 \pm 0.132\)) while producing \(83.3\%\) exact zero loadings (\(V_j \cdot V_l = 0\)) and zero frame defect (\(D = 0.000\)). In this regime, hard disjoint assignment acts as an effective structural regularizer by stripping out dense, non-specific stromal background noise.
+  \textbf{High-Dimensional Prostate Cancer Transcriptomics} (\(n=102, p=12{,}600\), OpenML ID 45099; Singh et al. (\citeproc{ref-singh2002gene}{2002})): Gene expression contrast separating 52 prostate tumor specimens from 50 non-tumor prostate tissues, with variance filtering to the top 2000 genes executed strictly inside each cross-validation fold. Consolidated Signed NSA-Flow (\(w=0.5\)) outperforms dense PCA on Balanced Accuracy (\(0.824 \pm 0.088\) vs \(0.805 \pm 0.132\)) while producing \(86.7\%\) exact zero loadings (\(V_j \cdot V_l = 0\)) and near-zero frame defect (\(D = 0.022\)). In this regime, hard disjoint assignment acts as an effective structural regularizer by stripping out dense, non-specific stromal background noise.
 \end{enumerate}
 
 The parametric trade-off across orthogonality weights \(w \in [0.0, 0.95]\) demonstrates smooth, monotone convergence toward disjoint support without performance cliffs, identifying \(w \in [0.25, 0.5]\) as an optimal operational sweet spot.
@@ -868,11 +868,11 @@ Across diverse empirical domains, the performance characteristics of NSA-Flow ca
 \begin{itemize}
 \tightlist
 \item
-  \textbf{Continuous Clinical Disease Progression}: On the Alzheimer's Disease Neuroimaging Initiative (ADNI) cohort, when predicting continuous Clinical Dementia Rating Sum of Boxes (CDRSB) from bilateral cortical thickness after covarying age, sex, education, and APOE4, Consolidated Signed NSA-Flow (\(w=0.5\)) outperforms dense PCA under linear models (\(R^2 = 0.346 \pm 0.103\) vs \(0.306 \pm 0.109\), \(p=3.5 \times 10^{-5}\)) and achieves an \textbf{18.1 percentage-point leap} in explained variance under Random Forest regression (\(R^2 = 0.463\) vs \(0.281\); \(R^2 = 0.369 \pm 0.139\) in 30-fold CV, \(p=2.4 \times 10^{-6}\)). Furthermore, across the 9-outcome continuous cognitive battery (CDRSB, ADAS13, ADASQ4, MMSE, FAQ, mPACCdigit, LDELTOTAL, etc.), Consolidated NSA-Flow beats dense PCA on 7 of the 9 outcomes under tree ensembles, with an average gain of \(\Delta R^2 \approx +0.044\). Mechanistically, dense PCA conflates global intracranial volume across all components (mean lobe overlap \(3.992\)), creating severe collinear crosstalk; Consolidated NSA-Flow enforces strictly disjoint anatomical lobes (overlap \(0.000\)), allowing tree models to evaluate non-linear regional staging without interference from global scale.
+  \textbf{Continuous Clinical Disease Progression}: On the Alzheimer's Disease Neuroimaging Initiative (ADNI) cohort, when predicting continuous Clinical Dementia Rating Sum of Boxes (CDRSB) from bilateral cortical thickness after covarying age, sex, education, and APOE4 across 20 repeated 80/20 splits, Consolidated Signed NSA-Flow (\(w=0.5\)) outperforms dense PCA under linear models (\(\Delta R^2 = +0.023\), \(95\%\) CI \([0.003, 0.043]\), \(0.236 \pm 0.255\) vs \(0.213 \pm 0.256\)) and achieves a \textbf{12.3 percentage-point mean gain} in explained variance under Random Forest regression (\(\Delta R^2 = +0.123\), \(95\%\) CI \([0.065, 0.182]\), \(0.258 \pm 0.238\) vs \(0.135 \pm 0.284\), winning \(17/20\) splits). Furthermore, across the 9-outcome continuous cognitive battery (CDRSB, ADAS13, ADASQ4, MMSE, FAQ, mPACCdigit, LDELTOTAL, etc.), Consolidated NSA-Flow beats dense PCA on 7 of the 9 outcomes under tree ensembles, with an average gain of \(\Delta R^2 \approx +0.044\). Mechanistically, dense PCA conflates global intracranial volume across all components (mean lobe overlap \(3.992\)), creating severe collinear crosstalk; Consolidated NSA-Flow enforces strictly disjoint anatomical lobes (overlap \(0.000\)), allowing tree models to evaluate non-linear regional staging without interference from global scale.
 \item
-  \textbf{High-Dimensional Cancer Transcriptomics}: On Prostate cancer microarray profiling (\(p=12,600\)), Consolidated Signed NSA-Flow outperforms dense PCA on Balanced Accuracy (\(0.822 \pm 0.133\) vs \(0.805 \pm 0.132\)) while achieving \(83.3\%\) exact disjoint sparsity and zero frame defect (\(D=0.000\)), because modular partitioning filters out diffuse stromal background expression. On the Golub leukemia benchmark, Signed NSA-Flow achieves Balanced Accuracy of \(0.757 \pm 0.119\) vs PCA's \(0.728 \pm 0.130\) on 3-class multiclass distinction under Random Forest.
+  \textbf{High-Dimensional Cancer Transcriptomics}: On Prostate cancer microarray profiling (\(p=12,600\)), Consolidated Signed NSA-Flow (\(w=0.5\)) outperforms dense PCA on Balanced Accuracy (\(0.824 \pm 0.088\) vs \(0.805 \pm 0.132\)) while achieving \(86.7\%\) exact disjoint sparsity and near-zero frame defect (\(D=0.022\)), because modular partitioning filters out diffuse stromal background expression. On the Golub 3-class leukemia benchmark, Signed NSA-Flow (\(w=0.5\)) achieves Balanced Accuracy of \(0.748 \pm 0.161\) (Linear) and \(0.680 \pm 0.091\) (Random Forest) vs PCA's \(0.698 \pm 0.133\) (Linear) and \(0.660 \pm 0.061\) (Random Forest).
 \item
-  \textbf{Physical Non-Negative Spectroscopy}: In Tecator NIR optical spectrometry, where physical absorption requires \(V \ge 0\), standard NMF suffers catastrophic collinearity (\(D = 0.943\), Ridge \(R^2 = 0.386\)). Non-negative NSA-Flow eliminates collinearity (\(D = 0.000\)) while preserving \(V \ge 0\) to recover \(R^2 = 0.878\), and Consolidated Signed flow matches dense PCA (\(R^2 = 0.903\) vs \(0.911\)) with non-overlapping spectral bands.
+  \textbf{Physical Non-Negative Spectroscopy}: In Tecator NIR optical spectrometry, where physical absorption requires \(V \ge 0\), standard NMF suffers catastrophic collinearity (\(D = 0.943\), Ridge \(R^2 = 0.386\)). Non-negative NSA-Flow (\(w=0.5\)) eliminates almost all collinearity (\(D = 0.006\)) while preserving \(V \ge 0\) to recover \(R^2 = 0.853\), and Signed (\(R^2 = 0.918\)) and Consolidated Signed flow (\(R^2 = 0.907\)) match or exceed dense PCA (\(R^2 = 0.911\)) with non-overlapping spectral bands.
 \item
   \textbf{Gross Binary Diagnosis Ceilings}: On gross binary classifications using unregularized linear models (such as ADNI CN vs DEM or Golub ALL vs AML), global variance accounts for the vast majority of separation, and linear models are rotationally invariant over the principal subspace. Here, dense PCA defines the variance ceiling, and imposing non-negativity sacrifices a modest \(2\)--\(4\%\) in AUC to buy interpretable, near-disjoint factors.
 \end{itemize}
@@ -941,13 +941,13 @@ The package is built on PyTorch, is differentiable end to end, and is intended t
 \item
   \textbf{Constraint enforcement}: Non-negativity is the one hard constraint, applied by exact projection. Nothing is retracted and no factorisation appears in the iteration.
 \item
-  \textbf{No optimizer or learning rate to choose}: Spectral projected gradient with Barzilai--Borwein steps and an Armijo line search. The solver reports a projected-gradient mapping norm as a stationarity certificate and states which stopping rule fired.
+  \textbf{No optimizer or learning rate to tune}: Bound-constrained L-BFGS-B (with native C++ acceleration) and spectral projected gradient with Barzilai--Borwein steps and an Armijo line search. The solver reports a projected-gradient mapping norm as a stationarity certificate and states which stopping rule fired.
 \item
   \textbf{Metrics}: \texttt{stiefel\_defect} for orthonormality and \texttt{angle\_defect} for orthogonality, both with closed-form gradients, plus \texttt{effective\_rank}, \texttt{negative\_mass} and the projections.
 \item
   \textbf{Validation}: Tested on real-world datasets, including the Golub leukemia gene expression dataset and the Alzheimer's Disease Neuroimaging Initiative (ADNI) dataset, demonstrating maintained or improved performance with simplified representations.
 \item
-  \textbf{Extensibility}: Offers an autograd-compatible variant for end-to-end differentiable pipelines and a prototype layer for deep learning integration (minimally tested).
+  \textbf{Extensibility}: Offers an autograd-compatible variant for end-to-end differentiable pipelines and neural network layers (\texttt{NSAFlowLinear}, \texttt{NSAFlowConv2d}, \texttt{NSAFlowLayer}) for deep learning integration.
 \end{itemize}
 
 \subsection{Installation and Dependencies}\label{installation-and-dependencies}
@@ -956,35 +956,23 @@ NSA-Flow can be installed from PyPI using \texttt{pip\ install\ nsa-flow} or dir
 
 \subsection{Core Functionality and High-Level API}\label{core-functionality-and-high-level-api}
 
-The package exposes thirty public names. The ones needed for ordinary use are few:
+The package exposes a concise set of public entry points:
 
 \begin{itemize}
 \item
-  \texttt{nsa\_flow.nsa\_flow(target,\ w,\ ...)}: refinement. Returns a non-negative,
-  near-orthogonal matrix close to \texttt{target}. Reports \texttt{stop\_reason}, the
-  certificate \texttt{grad\_map}, \texttt{defect}, \texttt{effective\_rank} and \texttt{scale\_ratio}.
+  \texttt{nsa\_flow.nsa\_flow(target,\ w,\ ...)}: unified entry point and refinement solver. Returns a non-negative, near-orthogonal matrix close to \texttt{target} (or dispatches to \texttt{data} / \texttt{signed} mode when given \texttt{k}). Reports \texttt{stop\_reason}, the certificate \texttt{grad\_map}, \texttt{defect}, \texttt{effective\_rank} and \texttt{scale\_ratio}.
 \item
-  \texttt{nsa\_flow.nsa\_flow\_data(X,\ k,\ w,\ ...)}: estimation. Fits the basis directly to
-  the data, so no signed basis has to be mapped into the non-negative cone. Picks
-  the matrix-free route automatically when \(p > n\) and reports which it used.
+  \texttt{nsa\_flow.nsa\_flow\_data(X,\ k,\ w,\ ...)}: estimation. Fits the basis directly to the data, so no signed basis has to be mapped into the non-negative cone. Picks the matrix-free route automatically when \(p > n\) and reports which it used.
 \item
-  \texttt{nsa\_flow.relax\_into\_nonneg(...)}: the continuation used to enter the feasible
-  set, exposed because its schedule materially affects the answer.
+  \texttt{nsa\_flow.relax\_into\_nonneg(...)}: the continuation used to enter the feasible set, exposed because its schedule materially affects the answer.
 \item
-  \texttt{nsa\_flow.stiefel\_defect()}, \texttt{nsa\_flow.angle\_defect()}: the orthoNORMality and
-  orthogonality measures \(D\) and \(C\), with closed-form gradients
-  \texttt{grad\_stiefel\_defect} and \texttt{grad\_angle\_defect}.
+  \texttt{nsa\_flow.stiefel\_defect()}, \texttt{nsa\_flow.angle\_defect()}: the orthoNORMality and orthogonality measures \(D\) and \(C\), with closed-form gradients \texttt{grad\_stiefel\_defect} and \texttt{grad\_angle\_defect}.
 \item
-  \texttt{nsa\_flow.project\_nonneg()}, \texttt{nsa\_flow.project\_scaled\_stiefel()},
-  \texttt{nsa\_flow.polar\_factor()}: exact Euclidean projections. Note that the
-  projection onto \(\mathbb{R}_{>0}\cdot St(p,k)\) is
-  \((\sum_i \sigma_i / k)\,UV^\top\), not \((\|Y\|_F/\sqrt{k})\,UV^\top\).
+  \texttt{nsa\_flow.project\_nonneg()}, \texttt{nsa\_flow.project\_scaled\_stiefel()}, \texttt{nsa\_flow.polar\_factor()}: exact Euclidean projections. Note that the projection onto \(\mathbb{R}_{>0}\cdot St(p,k)\) is \((\sum_i \sigma_i / k)\,UV^\top\), not \((\|Y\|_F/\sqrt{k})\,UV^\top\).
 \item
-  \texttt{nsa\_flow.NSAFlowLinear}, \texttt{NSAFlowConv2d}, \texttt{NSAFlowLayer}: layers for use
-  inside a network, with the per-sample structure of the input respected.
+  \texttt{nsa\_flow.NSAFlowLinear}, \texttt{NSAFlowConv2d}, \texttt{NSAFlowLayer}: layers for use inside a network, with the per-sample structure of the input respected.
 \item
-  \texttt{nsa\_flow.nsa\_flow\_signed()}: experimental. Documented in the source with its
-  own negative result; \texttt{nsa\_flow\_data} is preferred.
+  \texttt{nsa\_flow.nsa\_flow\_signed(X,\ k,\ w,\ consolidate=...)}: signed contrast lifting \(V = V_+ - V_-\) for signed data, with scale-invariant lobe-disjointness penalty and optional hard consolidation (\texttt{consolidate=True}) for strictly zero support overlap.
 \end{itemize}
 
 Functions present in the previous release and now absent, because the machinery
@@ -1124,59 +1112,58 @@ The energy is not convex. In the refinement form the fidelity term is convex and
 ## loaded via a namespace (and not attached):
 ##   [1] IRanges_2.40.1          gaston_1.6              vroom_1.7.0             Biostrings_2.74.1      
 ##   [5] TH.data_1.1-4           vctrs_0.7.2             effectsize_1.0.2        digest_0.6.39          
-##   [9] png_0.1-9               proxy_0.4-29            ppcor_1.1               bayestestR_0.17.0      
-##  [13] correlation_0.8.8       parallelly_1.46.1       httpuv_1.6.16           foreach_1.5.2          
-##  [17] withr_3.0.2             pgenlibr_0.5.5          xfun_0.56               survival_3.8-3         
-##  [21] subtyper_1.3.0          memoise_2.0.1           ggbeeswarm_0.7.3        diptest_0.77-2         
-##  [25] emmeans_2.0.0           parameters_0.28.3       gmp_0.7-5.1             systemfonts_1.3.2      
-##  [29] visreg_2.8.0            zoo_1.8-15              DEoptimR_1.1-4          Formula_1.2-5          
-##  [33] prabclus_2.3-5          datawizard_1.3.0        rematch2_2.1.2          KEGGREST_1.46.0        
-##  [37] promises_1.5.0          otel_0.2.0              Evacluster_0.1.0        httr_1.4.8             
-##  [41] rstatix_0.7.3           globals_0.19.0          ps_1.9.1                fpc_2.2-14             
-##  [45] rstudioapi_0.18.0       UCSC.utils_1.2.0        generics_0.1.4          base64enc_0.1-6        
-##  [49] processx_3.8.6          S4Vectors_0.44.0        zlibbioc_1.52.0         lgr_0.5.2              
-##  [53] GenomeInfoDbData_1.2.13 xtable_1.8-8            stringr_1.6.0           doParallel_1.0.17      
-##  [57] evaluate_1.0.5          hms_1.1.4               bookdown_0.46           colorspace_2.1-2       
-##  [61] visNetwork_2.1.4        flexmix_2.3-20          magrittr_2.0.4          later_1.4.8            
-##  [65] modeltools_0.2-24       palmerpenguins_0.1.1    future.apply_1.20.2     genefilter_1.88.0      
-##  [69] robustbase_0.99-7       XML_3.99-0.19           cowplot_1.2.0           matrixStats_1.5.0      
-##  [73] class_7.3-23            Hmisc_5.2-5             pillar_1.11.1           nlme_3.1-168           
-##  [77] iterators_1.0.14        gridBase_0.4-7          compiler_4.4.2          paradox_1.0.1          
-##  [81] stringi_1.8.7           wesanderson_0.3.7       gower_1.0.2             minqa_1.2.8            
-##  [85] lubridate_1.9.5         plyr_1.8.9              crayon_1.5.3            abind_1.4-8            
-##  [89] locfit_1.5-9.12         bit_4.6.0               sandwich_3.1-1          codetools_0.2-20       
-##  [93] multcomp_1.4-29         textshaping_1.0.5       recipes_1.3.1           e1071_1.7-17           
-##  [97] paletteer_1.7.0         plotly_4.12.0           mime_0.13               splines_4.4.2          
-## [101] Rcpp_1.1.1              VarSelLCM_2.1.3.2       flexclust_1.5.0         smotefamily_1.4.0      
-## [105] blob_1.2.4              lme4_2.0-1              fs_1.6.7                listenv_0.10.1         
-## [109] checkmate_2.3.4         Rdpack_2.6.6            ggsignif_0.6.4          estimability_1.5.1     
-## [113] ANTsRCore_0.8.1         coca_1.1.0              Matrix_1.7-4            callr_3.7.6            
-## [117] statmod_1.5.1           tzdb_0.5.0              svglite_2.2.2           pkgconfig_2.0.3        
-## [121] tools_4.4.2             cachem_1.1.0            rbibutils_2.4.1         RSQLite_2.4.3          
-## [125] numDeriv_2016.8-1.1     globaltest_5.60.0       viridisLite_0.4.3       DBI_1.2.3              
-## [129] fastmap_1.2.0           rmarkdown_2.30          grid_4.4.2              imbalance_1.0.2.1      
-## [133] gprofiler2_0.2.4        coda_0.19-4.1           FNN_1.1.4.1             BiocManager_1.30.27    
-## [137] insight_1.4.6           carData_3.0-6           rpart_4.1.24            reformulas_0.4.4       
-## [141] farver_2.1.2            mgcv_1.9-3              yaml_2.3.12             MatrixGenerics_1.18.1  
-## [145] foreign_0.8-90          ggthemes_5.2.0          cli_3.6.5               purrr_1.2.1            
-## [149] stats4_4.4.2            webshot_0.5.5           dbscan_1.2.3            lifecycle_1.0.5        
-## [153] mvtnorm_1.3-3           lava_1.8.2              kernlab_0.9-33          backports_1.5.0        
-## [157] BiocParallel_1.40.2     annotate_1.84.0         timechange_0.4.0        gtable_0.3.6           
-## [161] parallel_4.4.2          limma_3.62.2            mlr3cluster_0.3.0       jsonlite_2.0.0         
-## [165] edgeR_4.4.2             bit64_4.6.0-1           glasso_1.11             RcppParallel_5.1.11-2  
-## [169] dCUR_1.0.2              ClusterR_1.3.6          zeallot_0.2.0           timeDate_4052.112      
-## [173] lazyeval_0.2.2          shiny_1.13.0            htmltools_0.5.9         nmfbin_0.2.1           
-## [177] mlr3pipelines_0.11.0    tinytex_0.58            glue_1.8.0              ggstatsplot_0.13.5     
-## [181] XVector_0.46.0          mclust_6.1.2            gtsummary_2.5.0         boot_1.3-32            
-## [185] DDoutlier_0.1.0         mlr3_1.5.0              R6_2.6.1                broom.mixed_0.2.9.7    
-## [189] sva_3.54.0              forcats_1.0.1           labeling_0.4.3          GenomeInfoDb_1.42.3    
-## [193] ipred_0.9-15            mlr3misc_0.21.0         nloptr_2.2.1            rstantools_2.6.0       
-## [197] tidyselect_1.2.1        vipor_0.4.7             optmatch_0.10.8         htmlTable_2.4.3        
-## [201] xml2_1.5.2              car_3.1-5               AnnotationDbi_1.68.0    future_1.69.0          
-## [205] ModelMetrics_1.2.2.2    fastICA_1.2-7           statsExpressions_1.7.3  rsvd_1.0.5             
-## [209] S7_0.2.1                furrr_0.3.1             data.table_1.18.2.1     htmlwidgets_1.6.4      
-## [213] rlang_1.1.7             uuid_1.2-2              lmerTest_3.2-1          hardhat_1.4.2          
-## [217] beeswarm_0.4.0          prodlim_2026.03.11
+##   [9] png_0.1-9               ppcor_1.1               bayestestR_0.17.0       correlation_0.8.8      
+##  [13] parallelly_1.46.1       httpuv_1.6.16           foreach_1.5.2           withr_3.0.2            
+##  [17] pgenlibr_0.5.5          xfun_0.56               survival_3.8-3          subtyper_1.3.0         
+##  [21] memoise_2.0.1           ggbeeswarm_0.7.3        diptest_0.77-2          emmeans_2.0.0          
+##  [25] parameters_0.28.3       gmp_0.7-5.1             systemfonts_1.3.2       visreg_2.8.0           
+##  [29] zoo_1.8-15              DEoptimR_1.1-4          Formula_1.2-5           prabclus_2.3-5         
+##  [33] datawizard_1.3.0        rematch2_2.1.2          KEGGREST_1.46.0         promises_1.5.0         
+##  [37] otel_0.2.0              Evacluster_0.1.0        httr_1.4.8              rstatix_0.7.3          
+##  [41] globals_0.19.0          ps_1.9.1                fpc_2.2-14              rstudioapi_0.18.0      
+##  [45] UCSC.utils_1.2.0        generics_0.1.4          base64enc_0.1-6         processx_3.8.6         
+##  [49] S4Vectors_0.44.0        zlibbioc_1.52.0         lgr_0.5.2               GenomeInfoDbData_1.2.13
+##  [53] xtable_1.8-8            stringr_1.6.0           doParallel_1.0.17       evaluate_1.0.5         
+##  [57] hms_1.1.4               bookdown_0.46           colorspace_2.1-2        visNetwork_2.1.4       
+##  [61] flexmix_2.3-20          magrittr_2.0.4          later_1.4.8             modeltools_0.2-24      
+##  [65] palmerpenguins_0.1.1    future.apply_1.20.2     genefilter_1.88.0       robustbase_0.99-7      
+##  [69] XML_3.99-0.19           cowplot_1.2.0           matrixStats_1.5.0       class_7.3-23           
+##  [73] Hmisc_5.2-5             pillar_1.11.1           nlme_3.1-168            iterators_1.0.14       
+##  [77] gridBase_0.4-7          compiler_4.4.2          paradox_1.0.1           stringi_1.8.7          
+##  [81] wesanderson_0.3.7       gower_1.0.2             minqa_1.2.8             lubridate_1.9.5        
+##  [85] plyr_1.8.9              crayon_1.5.3            abind_1.4-8             locfit_1.5-9.12        
+##  [89] bit_4.6.0               sandwich_3.1-1          codetools_0.2-20        multcomp_1.4-29        
+##  [93] textshaping_1.0.5       recipes_1.3.1           paletteer_1.7.0         plotly_4.12.0          
+##  [97] mime_0.13               splines_4.4.2           Rcpp_1.1.1              VarSelLCM_2.1.3.2      
+## [101] flexclust_1.5.0         smotefamily_1.4.0       blob_1.2.4              lme4_2.0-1             
+## [105] fs_1.6.7                listenv_0.10.1          checkmate_2.3.4         Rdpack_2.6.6           
+## [109] ggsignif_0.6.4          estimability_1.5.1      ANTsRCore_0.8.1         coca_1.1.0             
+## [113] Matrix_1.7-4            callr_3.7.6             statmod_1.5.1           tzdb_0.5.0             
+## [117] svglite_2.2.2           pkgconfig_2.0.3         tools_4.4.2             cachem_1.1.0           
+## [121] rbibutils_2.4.1         RSQLite_2.4.3           numDeriv_2016.8-1.1     viridisLite_0.4.3      
+## [125] globaltest_5.60.0       DBI_1.2.3               fastmap_1.2.0           rmarkdown_2.30         
+## [129] grid_4.4.2              imbalance_1.0.2.1       gprofiler2_0.2.4        coda_0.19-4.1          
+## [133] FNN_1.1.4.1             BiocManager_1.30.27     insight_1.4.6           carData_3.0-6          
+## [137] rpart_4.1.24            reformulas_0.4.4        farver_2.1.2            mgcv_1.9-3             
+## [141] yaml_2.3.12             MatrixGenerics_1.18.1   foreign_0.8-90          ggthemes_5.2.0         
+## [145] cli_3.6.5               purrr_1.2.1             stats4_4.4.2            webshot_0.5.5          
+## [149] dbscan_1.2.3            lifecycle_1.0.5         mvtnorm_1.3-3           lava_1.8.2             
+## [153] kernlab_0.9-33          backports_1.5.0         BiocParallel_1.40.2     annotate_1.84.0        
+## [157] timechange_0.4.0        gtable_0.3.6            parallel_4.4.2          limma_3.62.2           
+## [161] mlr3cluster_0.3.0       jsonlite_2.0.0          edgeR_4.4.2             bit64_4.6.0-1          
+## [165] glasso_1.11             RcppParallel_5.1.11-2   dCUR_1.0.2              ClusterR_1.3.6         
+## [169] zeallot_0.2.0           timeDate_4052.112       lazyeval_0.2.2          shiny_1.13.0           
+## [173] htmltools_0.5.9         nmfbin_0.2.1            mlr3pipelines_0.11.0    tinytex_0.58           
+## [177] glue_1.8.0              ggstatsplot_0.13.5      XVector_0.46.0          mclust_6.1.2           
+## [181] gtsummary_2.5.0         boot_1.3-32             DDoutlier_0.1.0         mlr3_1.5.0             
+## [185] R6_2.6.1                broom.mixed_0.2.9.7     sva_3.54.0              forcats_1.0.1          
+## [189] labeling_0.4.3          GenomeInfoDb_1.42.3     ipred_0.9-15            mlr3misc_0.21.0        
+## [193] nloptr_2.2.1            rstantools_2.6.0        tidyselect_1.2.1        vipor_0.4.7            
+## [197] optmatch_0.10.8         htmlTable_2.4.3         xml2_1.5.2              car_3.1-5              
+## [201] AnnotationDbi_1.68.0    future_1.69.0           ModelMetrics_1.2.2.2    fastICA_1.2-7          
+## [205] statsExpressions_1.7.3  rsvd_1.0.5              S7_0.2.1                furrr_0.3.1            
+## [209] data.table_1.18.2.1     htmlwidgets_1.6.4       rlang_1.1.7             uuid_1.2-2             
+## [213] lmerTest_3.2-1          hardhat_1.4.2           beeswarm_0.4.0          prodlim_2026.03.11
 \end{verbatim}
 
 \section*{References}\label{references}

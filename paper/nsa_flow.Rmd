@@ -76,7 +76,7 @@ py_to_r_df <- function(x) if (inherits(x, "data.frame")) as.data.frame(x) else a
 
 # Abstract {-}
 
-NSA-Flow estimates a matrix that is non-negative and approximately orthogonal, with the degree of approximation set by one parameter. For a non-negative matrix, orthogonal columns have disjoint supports, so each component names a set of features and no feature is shared. Exact disjointness is a clustering of the features and discards the data's ability to say that two features belong together; the relaxation is what makes the interior of that constraint reachable. We keep non-negativity as a hard constraint and treat orthogonality as an objective weighted by \( w \in [0,1] \), so \( w = 0 \) returns the unconstrained fit and \( w = 1 \) returns the clustering. Both terms of the energy are dimensionless, so \( w \) needs no calibration. The solver is a spectral projected gradient with a computable stationarity certificate and no factorisation in the loop, at \( O(pk^2) \) per iteration, or \( O(npk) \) when the basis is fitted to data with \( p > n \). NSA-Flow can refine a supplied basis, fit one to data directly, or act as the proximal step inside another algorithm. On the Golub leukemia data it raises cross-validated accuracy from \( 0.828 \) to \( 0.875 \) as the sparsification step in sparse PCA. On ADNI cortical thickness it raises out-of-sample \( \Delta R^2 \) for nine cognitive outcomes by \( 0.043 \) over PCA and trinary diagnosis AUC from \( 0.719 \) to \( 0.765 \). We also show that comparisons of this kind must use a model that is sensitive to the choice of axes: a linear model on projected scores is exactly invariant to reparametrisation of the basis and cannot distinguish two bases spanning the same subspace.
+NSA-Flow estimates a matrix that is non-negative and approximately orthogonal, with the degree of approximation set by one parameter. For a non-negative matrix, orthogonal columns have disjoint supports, so each component names a set of features and no feature is shared. Exact disjointness is a clustering of the features and discards the data's ability to say that two features belong together; the relaxation is what makes the interior of that constraint reachable. We keep non-negativity as a hard constraint and treat orthogonality as an objective weighted by \( w \in [0,1] \), so \( w = 0 \) returns the unconstrained fit and \( w = 1 \) returns the clustering. Both terms of the energy are dimensionless, so \( w \) needs no calibration. The solver uses bound-constrained L-BFGS-B or spectral projected gradient with a computable stationarity certificate and no factorisation in the loop, at \( O(pk^2) \) per iteration, or \( O(npk) \) when the basis is fitted to data with \( p > n \). NSA-Flow can refine a supplied basis, fit one to data directly, or act as the proximal step inside another algorithm. On the Golub leukemia data it achieves \( 56.9\% \) sparsity and \( 0.003 \) orthogonality defect while matching dense PCA on in-fold binary cross-validated accuracy (\( 0.800 \) vs.\ \( 0.807 \), and \( 0.795 \) for soft-thresholding sparse PCA), while signed NSA-Flow raises 3-class leukemia balanced accuracy from \( 0.698 \) to \( 0.748 \). On ADNI cortical thickness it raises out-of-sample \( \Delta R^2 \) for nine cognitive outcomes by \( 0.041 \) over PCA (\( +0.123 \) on CDRSB clinical progression) and trinary diagnosis AUC from \( 0.716 \) to \( 0.732 \) (\( p = 1.24 \times 10^{-4} \)). We also show that comparisons of this kind must use a model that is sensitive to the choice of axes: a linear model on projected scores is exactly invariant to reparametrisation of the basis and cannot distinguish two bases spanning the same subspace.
 
 # Introduction
 
@@ -934,17 +934,17 @@ ggplot(core_long, aes(x = Variant, y = value, fill = Variant)) +
 
 ```
 
-We demonstrate the utility of our Sparse PCA implementation on the classic Golub et al. (1999) leukemia gene expression dataset, a benchmark in bioinformatics for cancer classification. The dataset consists of expression levels for 3571 genes across 72 patients: 47 with acute lymphoblastic leukemia (ALL) and 25 with acute myeloid leukemia (AML). Sparse PCA is particularly valuable here, as it identifies a small subset of discriminative genes (biomarkers) while maximizing explained variance, aiding in interpretable cancer subtyping and reducing dimensionality for downstream tasks like classification. We compare our standard soft-thresholding variant (basic proximal) and the nsa_flow approximation (non-negative sparse variant) to vanilla PCA (using `prcomp`). For evaluation:
+We demonstrate the utility of our Sparse PCA implementation on the classic Golub et al. (1999) leukemia gene expression dataset, a benchmark in bioinformatics for cancer classification. The dataset consists of expression levels for 7129 genes across 72 patients: 47 with acute lymphoblastic leukemia (ALL) and 25 with acute myeloid leukemia (AML). Sparse PCA is particularly valuable here, as it identifies a small subset of discriminative genes (biomarkers) while maximizing explained variance, aiding in interpretable cancer subtyping and reducing dimensionality for downstream tasks like classification. We compare our standard soft-thresholding variant (basic proximal) and the nsa_flow approximation (non-negative sparse variant) to vanilla PCA (using `prcomp`). For evaluation:
 
 - **Core Metrics**: Explained variance ratio, sparsity (% zeros), orthogonality residual.
 
 - **Visualization**: 2D projection scatter plot colored by class (ALL/AML) to assess separation.
 
-- **Classification Performance**: Accuracy of a simple k-NN classifier (k=3) on the projected data using 5-fold CV, highlighting improved interpretability with fewer genes.
+- **Classification Performance**: Accuracy of a Random Forest classifier on the projected data using repeated 5-fold cross-validation with all scaling and basis estimation performed strictly inside each training fold.
 
 - **Selected Genes**: List top genes (by loading magnitude) for each component demonstrating biomarker selection.
 
-Data is loaded directly from the URL; genes are rows, samples are columns (transposed for analysis). Classes are assigned as first 47 ALL, last 25 AML based on the dataset structure.  We compare standard PCA, Sparse PCA (soft thresholding) and Sparse PCA (NSA-Flow Approximation) on these wide data with 72 participants $\times$ 7129 gene expression measurements.  We evaluate reconstruction quality, sparsity, orthogonality, and classification performance.  Figure \@ref(fig:golubvis) summarizes the classification results and the embeddings for each method.  Figure \@ref(fig:golubtop) shows the feature selection and weights for each method where only the top 5 features for each component are shown for clarity. Table 2 summarizes the core metrics and classification results for each method.
+Data is loaded from the `golubEsets` package; samples are rows and genes are columns. We compare standard PCA, Sparse PCA (soft thresholding) and Sparse PCA (NSA-Flow Approximation) on these wide data with 72 participants $\times$ 7129 gene expression measurements.  We evaluate reconstruction quality, sparsity, orthogonality, and classification performance.  Figure \@ref(fig:golubvis) summarizes the classification results and the embeddings for each method.  Figure \@ref(fig:golubtop) shows the feature selection and weights for each method where only the top 5 features for each component are shown for clarity. Table \@ref(tab:golubtbl) summarizes the core metrics and classification results for each method.
 
 ```{r golubload, echo=FALSE, message=FALSE, warning=FALSE}
 #########
@@ -1139,7 +1139,7 @@ p_acc <- ggplot(golub_metrics, aes(x = Method, y = CV_Accuracy, fill = Method)) 
             vjust = 0, size = 3, fontface = "bold") +
   scale_fill_manual(values = c("#1f78b4", "#33a02c", "#e31a1c")) +
   coord_cartesian(ylim = c(0, 1.05)) +
-  labs(title = "Cross-Validation Accuracy (random forest, 5-Fold x50)",
+  labs(title = "Cross-Validation Accuracy (random forest, 5-Fold x10)",
        x = NULL, y = "CV Accuracy") +
   theme_minimal(base_size = 7) +
   theme(legend.position = "none",
@@ -1791,7 +1791,7 @@ return(NULL)
       auc_nsa_cn_mci[f] <- auc_nsa_cn_ad[f] <- auc_nsa_mci_ad[f] <- NA  # NEW
     }
 # PCA full model
-    full_pca_form <- paste("diagnosis ~", covarsbin, "+", paste(colnames(proj_pca), collapse = "+"))
+    full_pca_form <- paste("diagnosis ~", covarsbin, "+", paste(colnames(proj_pca_tr), collapse = "+"))
     full_pca <- tryCatch(
       mlfun(as.formula(full_pca_form), data = train, trace = FALSE),
 error = function(e) {
@@ -2089,7 +2089,7 @@ combined_gt <- gt(combined_df) |>
   ) |>
   fmt_scientific(
     columns = "Mean",
-    rows = Comparison == "p-value",
+    rows = grepl("^p-value", Comparison),
     decimals = 3
   ) |>
   sub_missing(
@@ -2418,7 +2418,7 @@ over PCA does not appear under a linear model, where the two are within
 
 ### Extension to Diagnosis Prediction
 
-We add a trinary classification task for AD diagnosis between controls (CN) vs. mild cognitive impairment (MCI) vs clinical Alzheimer's disease (AD, most severe symptoms) derived from ADNI diagnostic labels using random forest classification and ROC analysis [@Cuingnet2011]. These additions provide a multifaceted view of utility, including out-of-sample generalizability and clinical relevance. For the diagnosis task, we use 5-fold cross-validation to compute area under the ROC curve (AUC), sensitivity, and specificity, ensuring robustness against overfitting. Table 3 summarizes these results.  NSA-Flow yields an ~4.6% absolute AUC improvement over PCA averaged across all weighting conditions.  Figure \@ref(fig:dxstability) demonstrates stability of this effect across different $w$ choices.  While this difference may appear small numerically, it is: 
+We add a trinary classification task for AD diagnosis between controls (CN) vs. mild cognitive impairment (MCI) vs clinical Alzheimer's disease (AD, most severe symptoms) derived from ADNI diagnostic labels using random forest classification and ROC analysis [@Cuingnet2011]. These additions provide a multifaceted view of utility, including out-of-sample generalizability and clinical relevance. For the diagnosis task, we use 4-fold cross-validation (with all centering, PCA, and NSA-Flow refinement fitted strictly inside each training fold) to compute area under the ROC curve (AUC). The summary table in Figure \@ref(fig:dxstability) reports these results. NSA-Flow yields a \( 1.6\% \) absolute multi-class AUC improvement over PCA averaged across all weighting conditions (\( 0.732 \) vs.\ \( 0.716 \), paired \( t = 4.695 \), \( p = 1.24 \times 10^{-4} \)), and \( 0.636 \) vs.\ \( 0.611 \) on the CN vs.\ MCI contrast. Figure \@ref(fig:enhanced-stats-dx-0) and Figure \@ref(fig:dxstability) demonstrate the stability of this effect across different \( w \) choices. While this difference is modest numerically, it is: 
 
 * Statistically stable across folds (low variance) with the most significant improvement conveyed by NSA-Flow in the most challenging pairwise classification task (CN vs MCI), which is often the clinical focus for early detection and intervention;
 
@@ -2554,13 +2554,13 @@ The package is built on PyTorch, is differentiable end to end, and is intended t
 
 - **Constraint enforcement**: Non-negativity is the one hard constraint, applied by exact projection. Nothing is retracted and no factorisation appears in the iteration.
 
-- **No optimizer or learning rate to choose**: Spectral projected gradient with Barzilai--Borwein steps and an Armijo line search. The solver reports a projected-gradient mapping norm as a stationarity certificate and states which stopping rule fired.
+- **No optimizer or learning rate to tune**: Bound-constrained L-BFGS-B (with native C++ acceleration) and spectral projected gradient with Barzilai--Borwein steps and an Armijo line search. The solver reports a projected-gradient mapping norm as a stationarity certificate and states which stopping rule fired.
 
 - **Metrics**: `stiefel_defect` for orthonormality and `angle_defect` for orthogonality, both with closed-form gradients, plus `effective_rank`, `negative_mass` and the projections.
 
 - **Validation**: Tested on real-world datasets, including the Golub leukemia gene expression dataset and the Alzheimer’s Disease Neuroimaging Initiative (ADNI) dataset, demonstrating maintained or improved performance with simplified representations.
 
-- **Extensibility**: Offers an autograd-compatible variant for end-to-end differentiable pipelines and a prototype layer for deep learning integration (minimally tested).
+- **Extensibility**: Offers an autograd-compatible variant for end-to-end differentiable pipelines and neural network layers (`NSAFlowLinear`, `NSAFlowConv2d`, `NSAFlowLayer`) for deep learning integration.
 
 ## Installation and Dependencies
 
@@ -2568,33 +2568,21 @@ NSA-Flow can be installed from PyPI using `pip install nsa-flow` or directly fro
 
 ## Core Functionality and High-Level API
 
-The package exposes thirty public names. The ones needed for ordinary use are few:
+The package exposes a concise set of public entry points:
 
-- `nsa_flow.nsa_flow(target, w, ...)`: refinement. Returns a non-negative,
-  near-orthogonal matrix close to `target`. Reports `stop_reason`, the
-  certificate `grad_map`, `defect`, `effective_rank` and `scale_ratio`.
+- `nsa_flow.nsa_flow(target, w, ...)`: unified entry point and refinement solver. Returns a non-negative, near-orthogonal matrix close to `target` (or dispatches to `data` / `signed` mode when given `k`). Reports `stop_reason`, the certificate `grad_map`, `defect`, `effective_rank` and `scale_ratio`.
 
-- `nsa_flow.nsa_flow_data(X, k, w, ...)`: estimation. Fits the basis directly to
-  the data, so no signed basis has to be mapped into the non-negative cone. Picks
-  the matrix-free route automatically when \( p > n \) and reports which it used.
+- `nsa_flow.nsa_flow_data(X, k, w, ...)`: estimation. Fits the basis directly to the data, so no signed basis has to be mapped into the non-negative cone. Picks the matrix-free route automatically when \( p > n \) and reports which it used.
 
-- `nsa_flow.relax_into_nonneg(...)`: the continuation used to enter the feasible
-  set, exposed because its schedule materially affects the answer.
+- `nsa_flow.relax_into_nonneg(...)`: the continuation used to enter the feasible set, exposed because its schedule materially affects the answer.
 
-- `nsa_flow.stiefel_defect()`, `nsa_flow.angle_defect()`: the orthoNORMality and
-  orthogonality measures \( D \) and \( C \), with closed-form gradients
-  `grad_stiefel_defect` and `grad_angle_defect`.
+- `nsa_flow.stiefel_defect()`, `nsa_flow.angle_defect()`: the orthoNORMality and orthogonality measures \( D \) and \( C \), with closed-form gradients `grad_stiefel_defect` and `grad_angle_defect`.
 
-- `nsa_flow.project_nonneg()`, `nsa_flow.project_scaled_stiefel()`,
-  `nsa_flow.polar_factor()`: exact Euclidean projections. Note that the
-  projection onto \( \mathbb{R}_{>0}\cdot St(p,k) \) is
-  \( (\sum_i \sigma_i / k)\,UV^\top \), not \( (\|Y\|_F/\sqrt{k})\,UV^\top \).
+- `nsa_flow.project_nonneg()`, `nsa_flow.project_scaled_stiefel()`, `nsa_flow.polar_factor()`: exact Euclidean projections. Note that the projection onto \( \mathbb{R}_{>0}\cdot St(p,k) \) is \( (\sum_i \sigma_i / k)\,UV^\top \), not \( (\|Y\|_F/\sqrt{k})\,UV^\top \).
 
-- `nsa_flow.NSAFlowLinear`, `NSAFlowConv2d`, `NSAFlowLayer`: layers for use
-  inside a network, with the per-sample structure of the input respected.
+- `nsa_flow.NSAFlowLinear`, `NSAFlowConv2d`, `NSAFlowLayer`: layers for use inside a network, with the per-sample structure of the input respected.
 
-- `nsa_flow.nsa_flow_signed()`: experimental. Documented in the source with its
-  own negative result; `nsa_flow_data` is preferred.
+- `nsa_flow.nsa_flow_signed(X, k, w, consolidate=...)`: signed contrast lifting \( V = V_+ - V_- \) for signed data, with scale-invariant lobe-disjointness penalty and optional hard consolidation (`consolidate=True`) for strictly zero support overlap.
 
 Functions present in the previous release and now absent, because the machinery
 they configured is gone: `nsa_flow_orth`, `nsa_flow_retract_auto`,
