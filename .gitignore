@@ -167,3 +167,6 @@ experiments/cache/
 paper/nsa_flow.knit.md
 paper/nsa_flow.utf8.md
 paper/*_files/
+
+/.quarto/
+**/*.quarto_ipynb
