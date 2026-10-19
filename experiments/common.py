@@ -7,6 +7,7 @@ otherwise carry information from the held-out samples, so fitting them on the
 full matrix inflates every downstream score.
 """
 import numpy as np
+import pandas as pd
 import torch
 from scipy.optimize import linear_sum_assignment
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -18,6 +19,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from nsa_flow import nsa_flow, stiefel_defect_normalised
+from nsa_flow.bench.metrics import (contiguity, dominant_assignment, module_ari, module_nmi,  # noqa: F401
+    paired_summary, sparsity, split_half_ari, support_overlap)  # single source: nsa_flow.bench.metrics
 
 F64 = torch.float64
 
@@ -109,26 +112,6 @@ class NMFLoadings(BaseEstimator, TransformerMixin):
 
 
 # ------------------------------------------------------------------ interpretability
-def sparsity(L, rel=1e-3):
-    """Fraction of loading entries below ``rel`` times the column maximum."""
-    L = np.abs(L)
-    thresh = rel * L.max(axis=0, keepdims=True)
-    return float((L <= thresh).mean())
-
-
-def support_overlap(L, rel=1e-3):
-    """Mean number of components each active feature loads on, minus one.
-
-    Zero means every feature belongs to exactly one component: a clean, readable
-    factor. Larger values mean features are shared across components.
-    """
-    L = np.abs(L)
-    active = L > rel * L.max(axis=0, keepdims=True)
-    per_feature = active.sum(axis=1)
-    live = per_feature > 0
-    return float(per_feature[live].mean() - 1.0) if live.any() else 0.0
-
-
 def matched_cosine(L, V_true):
     """Mean |cosine| between recovered and true columns under the best matching."""
     A = L / (np.linalg.norm(L, axis=0, keepdims=True) + 1e-300)
@@ -212,3 +195,6 @@ def cv_score(X, y, loader, n_components=5, n_splits=5, n_repeats=4, seed=0,
         defect=float(np.mean(defects)), sparsity=float(np.mean(sparsities)),
         overlap=float(np.mean(overlaps)), n_fits=len(aucs),
     )
+
+
+# ------------------------------------------------------------------ module recovery
