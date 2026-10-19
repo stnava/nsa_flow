@@ -92,6 +92,18 @@ def _kmeans(rep, hp, seed, ctx):
     return V, {}
 
 
+def _ceiling(rep, hp, seed, ctx):
+    """No reduction: V = identity, so the model sees every feature (the ceiling arm)."""
+    return np.eye(rep["c"].shape[1]), {}
+
+
+def _nsa_nonneg_shuffled(rep, hp, seed, ctx):
+    """Control: the fitted non-negative basis with its feature assignment permuted (density, column norms and the
+    whole value multiset preserved; only WHICH feature each weight belongs to is destroyed)."""
+    V, cert = _nsa(rep, hp, seed, ctx, "data")
+    return V[np.random.default_rng(seed).permutation(V.shape[0])], cert
+
+
 def _nsa_grids():
     return {"smoke": _grid(w=[0.5], k=[3]),
             "quick": _grid(w=[0.25, 0.5, 0.75], k=[3, 5]),
@@ -119,6 +131,12 @@ def _register():
                             max_p=500, note="sklearn SparsePCA is ~18 s/fit at p=2000"))
     reg("NMF", Method("NMF", _nmf, "pos", _simple_grids()))
     reg("KMeans features", Method("KMeans features", _kmeans, "c", _simple_grids()))
+    one = {"smoke": [{"k": 0}], "quick": [{"k": 0}], "standard": [{"k": 0}]}
+    reg("Ceiling (all features)", Method("Ceiling (all features)", _ceiling, "c", one, family="control",
+                                          note="V = I; upper reference for any reduction"))
+    reg("NSA nonneg (shuffled support)", Method("NSA nonneg (shuffled support)", _nsa_nonneg_shuffled, "pos",
+                                                _nsa_grids(), [{"w": 0.5}], family="control",
+                                                note="fitted non-negative basis, feature assignment permuted"))
 
 
 _register()

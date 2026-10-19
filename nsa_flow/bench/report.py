@@ -22,8 +22,14 @@ def verdict_table(verdicts) -> str:
         contrast = f"{v['method']} − {v['ref']}" if v["ref"] else f"{v['method']} (mean vs 0)"
         mm = v["metric"] + (f", {v['model']}" if v["model"] else "")
         ci = "" if v["status"] == "SKIPPED" else f"{_f(v['estimate'])} [{_f(v['lo'])}, {_f(v['hi'])}]"
-        lines.append(f"| {v['dataset']} | {v.get('tier') or tier_of(v['dataset'])} | {v['protocol']} | {contrast} ({mm}) | {ci} | "
-                     f"{v['expect']} | {v['status']} |")
+        status = v["status"]
+        if v.get("guards"):
+            status += " [guards: " + "; ".join(
+                f"{g['metric']} " + ("n/a" if g["ok"] is None else
+                                     f"{_f(g['estimate'])} [{_f(g['lo'])}, {_f(g['hi'])}] {'ok' if g['ok'] else 'FAILS'}")
+                for g in v["guards"]) + "]"
+        lines.append(f"| {v['dataset']} | {v.get('tier') or tier_of(v['dataset'])} | {v['protocol']} | "
+                     f"{contrast} ({mm}) | {ci} | {v['expect']} | {status} |")
     return "\n".join(lines)
 
 

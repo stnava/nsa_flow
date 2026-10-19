@@ -19,6 +19,18 @@ def estimate_minutes(entry, ds, profile, jobs) -> float:
     """Minutes for one entry from measured single-fit times (one probe per method), not guessed constants."""
     if ds is None or entry.protocol == "speed":
         return 0.0
+    if entry.protocol == "factor_analysis":
+        import time as _t
+        from .registry import FA_METHODS
+        k = int(ds.meta.get("n_factors", 5))
+        total = 0.0
+        for name in entry.methods:
+            m = FA_METHODS[name]
+            t0 = _t.time()
+            m.fit(ds.X, k, m.default, 0)
+            fits = profile.n_outer * (3 + 3 * max(len(m.grid(profile)), 1) * profile.n_inner)
+            total += (_t.time() - t0) * fits
+        return total / max(jobs, 1) / 60.0
     from .protocols.nested_cv import outer_splits
     if entry.protocol == "nested_cv":
         _, tr, te = next(outer_splits(ds, 1))
@@ -71,6 +83,22 @@ def evaluate_verdicts(suite, summary, only=None, skipped_entries=()):
                 status = "PASS" if (lo <= 0 <= hi) else "FAIL"
             else:
                 status = "INFO"
+            guards = []
+            for gm, gdir, gtol in p.guards:
+                gs = s[(s.dataset == e.dataset) & (s.protocol == e.protocol) & (s.metric == gm)
+                       & (s.model.fillna("") == p.model) & (s.method == p.method)]
+                if gs.empty or pd.isna(gs.iloc[0][f"ci_lo_{tag}"]):
+                    guards.append(dict(metric=gm, direction=gdir, tol=gtol, estimate=np.nan, lo=np.nan, hi=np.nan,
+                                       ok=None))          # not evaluable (e.g. CFA skipped on a small test split)
+                    continue
+                g = gs.iloc[0]
+                glo, ghi = float(g[f"ci_lo_{tag}"]), float(g[f"ci_hi_{tag}"])
+                guards.append(dict(metric=gm, direction=gdir, tol=gtol, estimate=float(g[f"d_vs_{tag}"]), lo=glo,
+                                   hi=ghi, ok=bool(ghi < gtol) if gdir == "lt" else bool(glo > -gtol)))
+            if guards:
+                base = dict(base, guards=guards)
+                if status == "PASS" and any(g["ok"] is False for g in guards):
+                    status = "FAIL (guard)"
         else:
             est, lo, hi = r["mean"], r["mean"] - 1.96 * r["se"], r["mean"] + 1.96 * r["se"]
             status = ("PASS" if abs(est) < p.tol else "FAIL") if e.expect == "null" else "INFO"

@@ -121,3 +121,62 @@ def long_summary(rows: pd.DataFrame, refs) -> pd.DataFrame:
         return pd.DataFrame()
     out = pd.concat(parts, ignore_index=True)
     return out[keys + [c for c in out.columns if c not in keys]]
+
+
+# ------------------------------------------------------------------ factor-analysis metrics
+def hofmann_complexity(L):
+    """Per-item Hofmann complexity (sum l^2)^2 / sum l^4: 1 = loads on one factor, k = spread evenly."""
+    A = np.abs(np.asarray(L, float))
+    return (A ** 2).sum(1) ** 2 / np.maximum((A ** 4).sum(1), 1e-300)
+
+
+def cross_loadings(L, thr=0.3):
+    """Number of items with |loading| > thr on more than one factor."""
+    return int(((np.abs(np.asarray(L)) > thr).sum(1) > 1).sum())
+
+
+def orthogonality_defect(L):
+    """Scale-invariant defect of the column Gram: ||G - I/k||_F^2 / (1 - 1/k), G = L'L / tr(L'L)."""
+    L = np.asarray(L, float)
+    k = L.shape[1]
+    if k < 2:
+        return 0.0
+    G = L.T @ L
+    G = G / max(np.trace(G), 1e-300)
+    return float(((G - np.eye(k) / k) ** 2).sum() / (1 - 1 / k))
+
+
+def tucker_congruence(L, target):
+    """Mean Tucker congruence between the columns of ``L`` and ``target`` under the best column matching
+    (sign-free), plus the matching (cols of L, cols of target)."""
+    from scipy.optimize import linear_sum_assignment
+    A = np.asarray(L, float)
+    B = np.asarray(target, float)
+    An = A / (np.linalg.norm(A, axis=0, keepdims=True) + 1e-12)
+    Bn = B / (np.linalg.norm(B, axis=0, keepdims=True) + 1e-12)
+    C = np.abs(An.T @ Bn)
+    r, c = linear_sum_assignment(-C)
+    return float(C[r, c].mean()), (r, c)
+
+
+def reproduced_correlation_error(R, L, uniqueness=None):
+    """Relative Frobenius error of the off-diagonal of R against L L' (diagonal ignored: communalities are free)."""
+    R = np.asarray(R, float)
+    M = np.asarray(L, float) @ np.asarray(L, float).T
+    off = ~np.eye(len(R), dtype=bool)
+    return float(np.linalg.norm((R - M)[off]) / max(np.linalg.norm(R[off]), 1e-300))
+
+
+# ------------------------------------------------------------------ survival
+def harrell_c(time, event, risk):
+    """Harrell's concordance index (exact): among comparable pairs (i has an event before j's time) the fraction
+    where i has the higher risk; ties in risk count 1/2."""
+    t, e, r = np.asarray(time, float), np.asarray(event).astype(bool), np.asarray(risk, float)
+    num = den = 0.0
+    for i in np.where(e)[0]:
+        later = t > t[i]
+        n_later = int(later.sum())
+        if n_later:
+            den += n_later
+            num += float((r[i] > r[later]).sum()) + 0.5 * float((r[i] == r[later]).sum())
+    return num / den if den else float("nan")

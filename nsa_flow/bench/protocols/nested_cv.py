@@ -54,24 +54,39 @@ def inner_splits(ds, tr, n_inner, seed):
 
 
 def score_models(ds, V, key, rep_tr, rep_te, tr, te, seed, trees):
-    """{model: score}: R^2 (regression) or balanced accuracy (classification) for linear and forest."""
+    """{model: score}: R^2 (regression), balanced accuracy or AUC (classification) for linear and forest."""
     from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
     from sklearn.linear_model import LinearRegression, LogisticRegression
-    from sklearn.metrics import balanced_accuracy_score, r2_score
+    from sklearn.metrics import balanced_accuracy_score, r2_score, roc_auc_score
     Ztr, Zte = rep_tr[key] @ V, rep_te[key] @ V
+    Ctr = Cte = None
     if ds.covariates is not None:
-        Ztr, Zte = np.column_stack([ds.covariates[tr], Ztr]), np.column_stack([ds.covariates[te], Zte])
+        Ctr, Cte = ds.covariates[tr], ds.covariates[te]
+    if ds.standardize_scores:                       # z-score scores and covariates on the training rows
+        mu, sd = Ztr.mean(0), Ztr.std(0) + 1e-12
+        Ztr, Zte = (Ztr - mu) / sd, (Zte - mu) / sd
+        if Ctr is not None:
+            cm, cs = Ctr.mean(0), Ctr.std(0) + 1e-12
+            Ctr, Cte = (Ctr - cm) / cs, (Cte - cm) / cs
+    if Ctr is not None:
+        Ztr, Zte = np.column_stack([Ctr, Ztr]), np.column_stack([Cte, Zte])
     if ds.task == "regression":
         lin, rf, metric = LinearRegression(), RandomForestRegressor(trees, random_state=seed, n_jobs=1), r2_score
+        pred = lambda m: m.predict(Zte)
+    elif ds.metric == "auc":
+        lin = LogisticRegression(C=1.0, max_iter=1000)
+        rf = RandomForestClassifier(trees, min_samples_leaf=5, random_state=seed, n_jobs=1)
+        metric, pred = roc_auc_score, (lambda m: m.predict_proba(Zte)[:, 1])
     else:
         lin = LogisticRegression(C=1.0, max_iter=500)
         rf, metric = RandomForestClassifier(trees, random_state=seed, n_jobs=1), balanced_accuracy_score
-    return {"linear": float(metric(ds.y[te], lin.fit(Ztr, ds.y[tr]).predict(Zte))),
-            "forest": float(metric(ds.y[te], rf.fit(Ztr, ds.y[tr]).predict(Zte)))}
+        pred = lambda m: m.predict(Zte)
+    return {"linear": float(metric(ds.y[te], pred(lin.fit(Ztr, ds.y[tr])))),
+            "forest": float(metric(ds.y[te], pred(rf.fit(Ztr, ds.y[tr]))))}
 
 
 def metric_name(ds):
-    return "r2" if ds.task == "regression" else "balanced_accuracy"
+    return "r2" if ds.task == "regression" else (ds.metric or "balanced_accuracy")
 
 
 # ------------------------------------------------------------------ selection
@@ -145,10 +160,12 @@ def _outer_split_impl(ds, split, tr, te, method_names, profile, seed0):
 
 
 @protocol("nested_cv")
-def run(ds, method_names, profile, jobs=1, seed0=0, n_outer=None, n_inner=None, **_):
+def run(ds, method_names, profile, jobs=1, seed0=0, n_outer=None, n_inner=None, max_n=None, **_):
     from dataclasses import replace
     if n_inner:
         profile = replace(profile, n_inner=n_inner)
+    if max_n:                                    # cost cap for very large datasets (documented in the entry params)
+        ds = ds.subsample(max_n, seed=seed0)
     if ds.y is None or ds.task is None:
         raise ValueError(f"{ds.name} has no outcome; nested_cv needs y")
     skipped, use = [], []

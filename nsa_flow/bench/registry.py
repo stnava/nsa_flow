@@ -29,6 +29,7 @@ DATASETS = Registry("dataset")      # name -> DatasetSpec
 METHODS = Registry("method")        # name -> Method
 PROTOCOLS = Registry("protocol")    # name -> callable(spec, dataset, methods, profile, jobs) -> DataFrame
 SUITES = Registry("suite")          # name -> Suite
+FA_METHODS = Registry("fa method")  # name -> FAMethod (factor-analysis protocol)
 
 
 def protocol(name: str):

@@ -51,3 +51,22 @@ def evaluate(X, y=None, groups=None, *, task=None, covariates=None, ordered=Fals
     rows = pd.concat(frames, ignore_index=True)
     valid = rows[rows.value.notna()]
     return Evaluation(rows, long_summary(valid, ["PCA", "KMeans features", "NMF"]))
+
+
+def evaluate_fa(X, n_factors, groups=None, *, keys=None, true_loadings=None, methods=None, profile="quick",
+                jobs=1, name="user", seed=0) -> Evaluation:
+    """Factor-analysis benchmark on your own items (samples x items) with ``n_factors`` factors.
+
+    ``groups`` (item -> scale id, -1 unlabelled) enables recovery (ARI) and score validity; ``keys`` (+1/-1 per item)
+    reverse-keys items when scale totals are formed; ``true_loadings`` (items x factors) enables Tucker congruence.
+    Same protocol, metrics and schema as the ``factor_analysis`` suites.
+    """
+    from .fa.methods import DEFAULT_FA
+    X = np.asarray(X, float)
+    meta = {"n_factors": int(n_factors), "keys": np.ones(X.shape[1]) if keys is None else np.asarray(keys, float)}
+    if true_loadings is not None:
+        meta["true_loadings"] = np.asarray(true_loadings, float)
+    ds = Dataset(name, X, groups=None if groups is None else np.asarray(groups), standardize=True, meta=meta)
+    rows = PROTOCOLS["factor_analysis"](ds, methods or DEFAULT_FA, get_profile(profile), jobs=jobs, seed0=seed)
+    valid = rows[rows.value.notna()]
+    return Evaluation(rows, long_summary(valid, ["PAF varimax", "PAF"]))
