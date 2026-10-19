@@ -13,6 +13,7 @@ authors = [{ name = "B. Avants" }]
 dependencies = ["torch>=2.0"]
 
 [project.optional-dependencies]
+bench = ["numpy>=1.23", "pandas>=1.5", "scikit-learn>=1.3", "scipy>=1.10", "joblib>=1.2"]
 experiments = ["numpy>=1.23", "pandas>=1.5", "scikit-learn>=1.3", "matplotlib>=3.7"]
 test = ["pytest>=7.0", "numpy>=1.23"]
 docs = [
@@ -22,12 +23,18 @@ docs = [
     "sphinx-copybutton>=0.5",
 ]
 
+[project.scripts]
+nsa-flow-bench = "nsa_flow.bench.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/stnava/nsa_flow"
 Repository = "https://github.com/stnava/nsa_flow"
 
 [tool.setuptools.packages.find]
 include = ["nsa_flow*"]
+
+[tool.setuptools.package-data]
+"nsa_flow.bench" = ["baseline_smoke.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

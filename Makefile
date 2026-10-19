@@ -1,10 +1,15 @@
-.PHONY: help install test theory experiments tables paper rmd-paper dist release clean docs docs-clean
+.PHONY: help install test theory bench bench-smoke bench-check bench-report speed experiments tables paper rmd-paper dist release clean docs docs-clean
 
 help:
 	@echo "install      - editable install with experiment + test extras"
 	@echo "test         - run the full test suite (theory, solver, layers)"
 	@echo "theory       - run only the theory property battery"
 	@echo "experiments  - run all paper experiments -> paper/results, paper/figs"
+	@echo "bench        - full nsa_flow.bench standard suite -> bench_results/ (nsa-flow-bench run)"
+	@echo "bench-smoke  - smoke suite (seconds, synthetic only)"
+	@echo "bench-check  - smoke suite vs stored baseline (solver regression guard)"
+	@echo "bench-report - markdown report of the latest standard run"
+	@echo "speed        - NSA-Flow vs PCA timing -> paper/results"
 	@echo "tables       - rebuild paper/results/*.tex from the saved CSVs (cheap)"
 	@echo "new-benchmarks - run Tecator, Sonar & Prostate benchmarks + sweeps + tables"
 	@echo "docs         - build Sphinx HTML documentation -> docs/_build/html"
@@ -33,6 +38,21 @@ experiments:
 
 tables:
 	PYTHONPATH=. python experiments/build_tables.py
+
+bench:
+	python -m nsa_flow.bench run --suite standard --profile standard --jobs 4 --out bench_results
+
+bench-smoke:
+	python -m nsa_flow.bench run --suite smoke --profile smoke --out bench_results
+
+bench-check:
+	python -m nsa_flow.bench check
+
+bench-report:
+	python -m nsa_flow.bench report standard
+
+speed:
+	PYTHONPATH=. python experiments/speed_vs_pca.py
 
 new-benchmarks:
 	PYTHONPATH=. python experiments/benchmark_new_public_data.py

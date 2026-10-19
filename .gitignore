@@ -172,3 +172,4 @@ paper/*_files/
 **/*.quarto_ipynb
 .agents/teamwork/
 
+bench_results/
