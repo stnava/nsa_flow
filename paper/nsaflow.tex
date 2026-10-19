@@ -93,8 +93,9 @@ $\Delta R^2 = +0.123$ [95\% CI $0.065, 0.182$] under Random Forest and $+0.023$
 [$0.003, 0.043$] under linear models across 20 repeated 80/20 splits, plus
 consistent advantages across a 9-outcome cognitive battery), high-dimensional
 cancer transcriptomics (Prostate cancer, $0.824$ vs.\ $0.805$ Balanced Accuracy
-with $86.7\%$ exact disjoint sparsity), Golub multiclass leukemia, and physical
-spectroscopy, Consolidated Signed NSA-Flow structurally outperforms dense PCA.
+with $86.7\%$ exact disjoint sparsity), Consolidated Signed NSA-Flow structurally outperforms dense PCA
+(Golub and Tecator spectroscopy are not in this list: Tecator matches PCA under linear models and loses under forests; Golub: with $w$, $k$ and PCA's $k$ all chosen by nested
+cross-validation, the gain is not distinguishable from zero; see \S\ref{sec:nested}).
 Disjoint, modular factors eliminate global volume confounding and collinear
 background noise, allowing non-linear estimators to isolate independent disease
 staging. All claims in the paper are asserted executably in the accompanying
@@ -693,8 +694,13 @@ Balanced Accuracy, confirming exact subspace equivalence at $w=0$), whereas
 Signed NSA-Flow at $w=0.5$ improves to $0.748 \pm 0.161$ (Linear) and
 $0.680 \pm 0.091$ (Random Forest) with $33.6\%$ sparsity, and Consolidated
 Signed flow ($w=0.5$) achieves $0.735 \pm 0.153$ (Linear) at $66.7\%$ exact
-disjoint sparsity. Isolating signed contrast directions improves class separation
-across multi-subtype lineages compared to dense variance projection.
+disjoint sparsity. At fixed $k=3$ this is a $+0.05$ gain over PCA. It does not survive an equal
+tuning budget: with $w$, $k$ and PCA's $k$ chosen by nested cross-validation
+(10 outer splits), Consolidated NSA-Flow reaches $0.839$ against tuned PCA's
+$0.824$ (Linear; $\Delta=+0.016$, 95\% CI $[-0.076, 0.107]$) and $0.673$ against
+$0.639$ (Forest; $+0.034$, $[-0.066, 0.134]$). We therefore report Golub as a
+task where NSA-Flow matches tuned PCA while returning disjoint factors, not as
+a predictive gain.
 
 \input{results/e4_table.tex}
 
@@ -777,7 +783,7 @@ Evaluating NSA-Flow across diverse modalities reveals a consistent, principled t
   \item \textbf{Gross binary discrimination in linear models (Ceiling regime):} When separating distant endpoints (e.g., ADNI CN vs.\ DEM, Golub ALL vs.\ AML) with linear models, unregularized classifiers are rotation-invariant over the subspace. Dense PCA captures maximal variance and defines the ceiling. Imposing non-negativity truncates negative loadings, sacrificing $2$--$4\%$ in AUC ($0.859 \to 0.813$ on ADNI CN/DEM; $0.986 \to 0.961$ on Golub) to achieve readable, disjoint factors. Here, the sign constraint is what costs accuracy, not the orthogonality flow.
   \item \textbf{Continuous disease progression in non-linear models (Modularity win):} On continuous clinical targets (ADNI CDRSB and the 9-outcome battery), where true pathology spreads across discrete anatomical modules, dense PCA's variance mixing introduces severe collinear crosstalk. Consolidated NSA-Flow's strictly disjoint supports eliminate lobe overlap ($3.99 \to 0.00$), unlocking a mean gain of $\Delta R^2 = +0.123$ ($95\%$ CI $[0.065, 0.182]$) under Random Forest ensembles across repeated splits.
   \item \textbf{High-dimensional transcriptomics with background noise (Regularization win):} In high-dimensional microarray data (Prostate cancer, $p=12{,}600$; \citealt{singh2002gene}), dense PCA loadings absorb non-specific stromal and benign tissue co-expression. Consolidated Signed NSA-Flow ($w=0.5$) achieves $86.7\%$ exact disjoint sparsity and improves Balanced Accuracy ($0.824 \pm 0.088$ vs.\ $0.805 \pm 0.132$) by acting as a structural regularizer that discards diffuse background noise.
-  \item \textbf{Physical non-negative spectroscopy (Physical consistency):} In NIR spectroscopy (Tecator, $p=100$; \citealt{borggaard1992optimal}), where Beer-Lambert absorption physics requires $V \ge 0$, standard NMF suffers catastrophic collinearity ($D = 0.943$, Ridge $R^2 = 0.386$). Non-negative NSA-Flow ($w=0.5$) drastically reduces the frame defect ($D = 0.006$) while maintaining $V \ge 0$ and recovering $R^2 = 0.853$, while Signed ($R^2 = 0.918$) and Consolidated Signed flow ($R^2 = 0.907$) match or exceed dense PCA ($R^2 = 0.911$) with clean spectral bands.
+  \item \textbf{Physical non-negative spectroscopy (Physical consistency):} In NIR spectroscopy (Tecator, $p=100$; \citealt{borggaard1992optimal}), where Beer-Lambert absorption physics requires $V \ge 0$, standard NMF suffers catastrophic collinearity ($D = 0.943$, Ridge $R^2 = 0.386$). Non-negative NSA-Flow ($w=0.5$) drastically reduces the frame defect ($D = 0.006$) while maintaining $V \ge 0$ and recovering $R^2 = 0.853$, while Signed ($R^2 = 0.918$) and Consolidated Signed flow ($R^2 = 0.907$) match or exceed dense PCA ($R^2 = 0.911$) with clean spectral bands. \textbf{Nested-CV update:} with $w$, $k$ and PCA's $k$ chosen by nested cross-validation (20 splits), NSA-Flow has no linear advantage over PCA ($\Delta R^2=-0.001$, $[-0.002, 0.000]$) and loses under Random Forest ($-0.242$, $[-0.293,-0.192]$). Its modules are spectral intervals (adjacent-wavelength contiguity $0.958$, chance about $0.2$) and reproducible across random halves of the rows (assignment ARI $0.870$), but k-means clustering of the wavelengths does the same ($0.960$, $0.868$); NSA-Flow beats PCA's argmax assignment ($0.891$, $0.509$) and NMF on stability ($0.545$). The claim here is interpretable bands at PCA-level linear accuracy, not a predictive gain.
 \end{enumerate}
 
 \subsection{Uniqueness of the optimum}\label{sec:exp-uniqueness}
@@ -864,8 +870,28 @@ Table~\ref{tab:new_public_benchmarks} summarizes the cross-validated metrics acr
   non-overlapping structure aligns with the underlying data geometry: continuous
   clinical disease progression (ADNI CDRSB, $+0.123$ mean $\Delta R^2$ under Random
   Forest across 20 repeated 80/20 splits), high-dimensional transcriptomics with
-  dense stromal noise (Prostate cancer), and physical non-negative spectroscopy
-  (Tecator NIR).
+  dense stromal noise (Prostate cancer; not yet nested-CV'd). Physical non-negative
+  spectroscopy (Tecator NIR) is not such a case: with all hyper-parameters chosen by
+  nested cross-validation (20 splits), Consolidated NSA-Flow matches tuned PCA under
+  linear models ($\Delta R^2=-0.001$, 95\% CI $[-0.002, 0.000]$) and is clearly worse
+  under Random Forest ($-0.242$, $[-0.293,-0.192]$): band-averaged scores discard
+  the smooth spectral shape the trees exploit.
+\item \label{sec:nested}\textbf{Hyper-parameter selection.} Earlier tables fixed $w=0.5$, $k=5$.
+  We now select $w\in\{0.1,\dots,0.9\}$ and $k\in\{3,5,8\}$ by inner 5-fold
+  cross-validation on each outer training set (\texttt{experiments/nested\_cv.py},
+  \texttt{results/nested\_*.csv}); PCA, SparsePCA, NMF, thresholded PCA and k-means
+  feature clustering receive the same budget. On ADNI CDRSB (20 splits),
+  Consolidated NSA-Flow gains $\Delta R^2=+0.147$ [$0.078, 0.216$] over tuned PCA
+  under Random Forest (fixed-setting value: $+0.155$) and $+0.012$ [$-0.005,0.028$]
+  under linear models; Signed NSA-Flow gains $+0.163$ [$0.101,0.226$] and $+0.023$
+  [$0.010,0.036$]. No baseline (SparsePCA, NMF, k-means, thresholded PCA) has an
+  interval excluding zero on either model. Part of the forest gap is that inner
+  selection makes PCA itself noisier ($R^2=0.097$ tuned versus $0.135$ at fixed
+  $k=5$); against fixed-$k$ PCA the nested gain is about $+0.11$. On Golub
+  (10 outer splits) no method differs from tuned PCA. The ADNI effect is the one
+  result that survives; it is modest, from one cohort, and its split-to-split
+  SD is $0.19$--$0.29$.
+\item \textbf{Module recovery on real data: the signed mode loses to k-means; the non-negative mode is competitive.} Against known feature groups embedded among about a thousand unlabelled genes or words (20 random sample draws, paired intervals, methods blind to labels, pre-specified primary: ARI of Consolidated Signed NSA-Flow at $w=0.5$ against k-means), the signed mode recovers a planted partition exactly (ARI $+0.377$ over k-means) but is worse than k-means on 20 Newsgroups ($-0.111$, $[-0.176,-0.046]$), METABRIC PAM50 groups ($-0.160$, $[-0.213,-0.107]$; split-half stability $0.385$ versus $0.886$) and PBMC3k cell-type markers ($-0.163$, $[-0.205,-0.122]$). The non-negative mode ($\texttt{mode="data"}$, $w=0.5$, on non-negatively shifted data) is competitive: ties k-means on ARI for newsgroups and METABRIC, is more stable than k-means on newsgroups ($+0.048$, $[0.020,0.076]$) and PBMC3k ($+0.072$, $[0.031,0.114]$), has higher pairwise recall on PBMC3k ($+0.042$, $[0.022,0.061]$) and newsgroups ($+0.075$, $[0.045,0.106]$), and is more stable than NMF on all three ($+0.04$ to $+0.24$); it is worse than k-means on PBMC3k ARI ($-0.131$) and on METABRIC stability ($-0.164$) and recall ($-0.253$). Results are sensitive to input scaling: the same mode on standardised-then-shifted data gave PBMC3k ARI $0.64$ in an earlier run. Group lists are our annotation. Null data (i.i.d. noise, column-shuffled METABRIC) give assignment stability $\le 0.002$ in absolute value. The interpretability contribution is the guarantee of disjoint, non-negative, calibration-free factors; recovery of ground-truth modules is competitive with k-means only in the non-negative mode.
 \item Uniqueness for $w<1$ is an empirical finding on the problem families tested,
   not a theorem; $E_w$ is not convex, and $w\to1$ is provably combinatorial.
 \item Conditioning degrades as $w \to 1$: iteration counts grow from tens to

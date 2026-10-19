@@ -107,7 +107,84 @@ Empirically `E_w` has a unique optimum for `w < 1` — 24 random restarts agree 
 machine precision on every problem family tested — so there are no restarts,
 schedules or step-size heuristics to tune.
 
-## Evaluation results (v3.0.0, certified solver)
+## Benchmarking (`nsa_flow.bench`)
+
+One package owns datasets, methods, protocols, metrics, pre-registered suites, results and reports.
+Install the extra and use it from the CLI or from Python:
+
+```bash
+pip install -e ".[bench]"
+nsa-flow-bench list                       # datasets (ok / MISSING + why), methods, protocols, suites
+nsa-flow-bench fetch pbmc3k --download    # public data downloads only on explicit request, checksummed
+nsa-flow-bench run --suite smoke --profile smoke      # seconds, synthetic only
+nsa-flow-bench run --suite standard --jobs 4          # the reported benchmarks -> bench_results/
+nsa-flow-bench report standard                        # markdown from the stored rows
+nsa-flow-bench check                                  # smoke suite vs stored baseline (solver regression guard)
+```
+
+```python
+from nsa_flow.bench import evaluate            # standalone: your own arrays, same protocols and schema
+ev = evaluate(X, y=y, groups=feature_group_ids, profile="quick")   # y -> nested CV; groups -> module recovery
+print(ev.report())
+```
+
+- **Protocols.** `nested_cv` (every method, PCA included, tunes its own hyper-parameters on the training portion
+  by inner CV; a fixed `w=0.5, k=5` row is reported beside it), `module_recovery` (feature modules against known
+  groups with unlabelled background present: ARI, split-half stability, pair recall/separation, contiguity),
+  `speed`. Null controls are the same protocols on derived data (`adni@null_y`, `metabric@shuffled`, `noise`).
+- **Pre-registration.** Each suite entry fixes its primary contrast (method, reference, metric, model) and pass rule
+  before running (`nsa_flow/bench/suites.py`); the run manifest stores the suite, the profile, versions, git sha and
+  dataset fingerprints. The report prints primary and secondary results separately; verdicts are PASS / FAIL /
+  WORSE / INFO / SKIPPED.
+- **Solver certificate.** Every NSA fit records `converged` and `defect_D` in its row; the report prints convergence
+  and the worst defect per method.
+- **Data tiers.** Each dataset is `public`, `restricted` (ADNI, data-use agreement) or `local` (METABRIC cache);
+  `--public-only` runs public data only, and missing data is skipped with a stated reason. PPMI is excluded (not public,
+  not reproducible). Full guide: `docs/BENCHMARKING.md`. Hand-typed gene/marker lists are the authors' annotation and are flagged as such in the report.
+- **Cost.** A time estimate from measured single-fit probes is printed before each entry; `--budget-min` skips entries
+  over budget visibly, and methods that are too slow for a dataset (sklearn `SparsePCA` above p=500) are skipped with
+  the reason in the results.
+- **Extending.** A new dataset is a loader decorated with `@dataset(...)` returning a `Dataset`; a new method is a
+  `Method(fit, grids, ...)` registered in `methods.py`; both show up in the CLI and suites automatically.
+
+### Latest standard run
+<!-- bench:standard:start -->
+# nsa_flow.bench report: standard
+profile `standard` · nsa_flow 3.3.4 (git cfedf20) · torch 2.13.0 · sklearn 1.9.0 · 2026-10-19T11:58:13
+
+## Pre-registered primary contrasts
+| dataset | tier | protocol | contrast (metric, model) | estimate [95% CI] | expect | status |
+|---|---|---|---|---|---|---|
+| adni | restricted | nested_cv | NSA consolidated − PCA (r2, forest) | 0.147 [0.078, 0.216] | effect | PASS |
+| golub | public | nested_cv | NSA consolidated − PCA (balanced_accuracy, linear) | 0.016 [-0.076, 0.107] | effect | FAIL |
+| tecator | public | nested_cv | NSA consolidated − PCA (r2, forest) | -0.242 [-0.293, -0.192] | effect | WORSE |
+| planted | public | module_recovery | NSA consolidated w=0.5 − KMeans features (ari) | 0.377 [0.319, 0.436] | effect | PASS |
+| newsgroups | public | module_recovery | NSA consolidated w=0.5 − KMeans features (ari) | -0.111 [-0.176, -0.046] | effect | WORSE |
+| metabric | local | module_recovery | NSA consolidated w=0.5 − KMeans features (ari) | -0.160 [-0.213, -0.107] | effect | WORSE |
+| pbmc3k | public | module_recovery | NSA consolidated w=0.5 − KMeans features (ari) | -0.163 [-0.205, -0.122] | effect | WORSE |
+| tecator | public | module_recovery | NSA consolidated w=0.5 − KMeans features (contiguity) | 0.000 [-0.002, 0.002] | info | INFO |
+| adni@null_y | restricted | nested_cv | NSA consolidated − PCA (r2, forest) | 0.032 [-0.028, 0.091] | null | PASS |
+| noise | public | module_recovery | NSA consolidated w=0.5 (mean vs 0) (stability) | -0.002 [-0.012, 0.008] | null | PASS |
+| metabric@shuffled | local | module_recovery | NSA consolidated w=0.5 (mean vs 0) (stability) | 0.000 [-0.000, 0.001] | null | PASS |
+
+## Skipped (explicit)
+- golub / nested_cv / SparsePCA: SparsePCA skipped: p=7129 > 500 (cost; sklearn SparsePCA is ~18 s/fit at p=2000)
+
+Solver health:
+
+| method | NSA fits | converged | max defect_D |
+|---|---|---|---|
+| NSA consolidated | 140 | 100% | 0.02 |
+| NSA consolidated (fixed w=.5,k=5) | 140 | 100% | 1.8e-12 |
+| NSA consolidated w=0.25 | 460 | 100% | 4.5e-07 |
+| NSA consolidated w=0.5 | 460 | 100% | 1.8e-06 |
+| NSA nonneg w=0.5 | 360 | 100% | 0.00082 |
+| NSA signed | 100 | 97% | 0.02 |
+| NSA signed (fixed w=.5,k=5) | 100 | 100% | 7e-05 |
+
+<!-- bench:standard:end -->
+
+## Evaluation results (v3.0.0, certified solver; superseded by the generated block above where they overlap)
 
 All numbers below were produced by the pure-PyTorch L-BFGS-B default with the
 shared certificate, on bases fitted **inside** every training fold or split.
@@ -144,6 +221,21 @@ Split-to-split SD of R² is 0.24–0.31, so the single-split value in earlier
 releases (+0.18 forest, from a solve at `defect_D = 0.006`) was not evidence
 either way. The effect survives with a converged solver: smaller, and now
 with an interval.
+
+**What the standard run shows** (`make bench`; full tables via `nsa-flow-bench report standard`; the block above is
+generated, the sentences below summarise it and can lag it):
+- *Prediction.* The ADNI CDRSB forest gain over tuned PCA survives nested CV of `w` and `k` (+0.147 [0.078, 0.216];
+  fixed `w=0.5, k=5`: +0.155) and is not produced by selection (permuted outcome: +0.032 [−0.028, 0.091]). Golub
+  is not distinguishable from tuned PCA (+0.016 [−0.076, 0.107], linear). On Tecator there is no linear gain and a clear
+  forest loss (−0.242 [−0.293, −0.192]).
+- *Module recovery.* NSA recovers a planted partition exactly and invents nothing from noise or column-shuffled data.
+  The signed consolidated mode (the pre-specified primary) is worse than k-means on 20 Newsgroups, METABRIC and PBMC3k
+  (ARI −0.11 to −0.16, intervals exclude 0). The non-negative mode (`mode="data"`) is competitive: more stable than
+  k-means on newsgroups and PBMC3k, higher pair recall there, more stable than NMF on all three; it is worse than
+  k-means on METABRIC stability/recall and on PBMC3k ARI. It is sensitive to input scaling (shifted raw data here;
+  standardised-then-shifted gave PBMC3k ARI 0.64 earlier).
+- *Cost.* NSA is far slower than PCA (e.g. n=1500, p=1000, k=5: 4.4 s signed, 10.8 s non-negative, 0.009 s PCA).
+- Group lists and marker lists are the authors' annotation; review before citing.
 
 **Public data** (`experiments/benchmark_new_public_data.py`, 5-fold; defect
 column is `defect_D` for every method, comparable to PCA)
