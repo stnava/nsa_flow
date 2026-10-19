@@ -1,4 +1,4 @@
-nsa\_flow.project
+﻿nsa\_flow.project
 =================
 
 .. automodule:: nsa_flow.project
@@ -11,4 +11,5 @@ nsa\_flow.project
       polar_factor
       project_nonneg
       project_scaled_stiefel
+      simlr_sparseness
    
