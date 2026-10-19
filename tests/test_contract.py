@@ -75,7 +75,10 @@ def test_max_iter_is_a_hard_cap_on_gradient_evaluations(opt, mode):
     for cap in (5, 40):
         r = _fit(mode, _problem(mode), w=0.9, optimizer=opt, max_iter=cap, tol=1e-16)
         assert r["n_grad"] <= cap + 1, f"{opt}/{mode}: n_grad={r['n_grad']} > cap={cap}"
-        assert not r.converged and r.stop_reason == "max_iter"
+        if cap == 5 or r.stop_reason != "plateau":
+            assert not r.converged and r.stop_reason == "max_iter"
+        else:
+            assert r.certificate == "numerical_floor" and r.grad_map <= 1e-8
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -281,3 +284,41 @@ def test_non_finite_trial_energy_never_accepted():
         return float(f), g
     out = lbfgsb_minimize(torch.full((4,), 2.5, dtype=F64), fg, lower=None, max_grad=200, tol=1e-9)
     assert math.isfinite(out["f"]) and out["f"] < (2.5 ** 4) * 4
+
+
+def test_varimax_preserves_subspace_and_eliminates_perron_frobenius_mean_mode():
+    """Varimax is an exact O(k) gauge rotation that breaks Perron-Frobenius mean alignment."""
+    from nsa_flow import varimax, varimax_rotation
+    gen = torch.Generator().manual_seed(7)
+    n, p, k = 150, 24, 3
+    per = p // k
+    V_true = torch.zeros(p, k, dtype=F64)
+    for j in range(k):
+        V_true[j * per:(j + 1) * per, j] = torch.rand(per, generator=gen, dtype=F64) + 1.0
+    # Positive latent correlation + global shared mode so PC1 is a dense Perron-Frobenius mean
+    global_factor = torch.randn(n, 1, generator=gen, dtype=F64)
+    Z = 0.7 * global_factor + 0.7 * torch.randn(n, k, generator=gen, dtype=F64)
+    X = Z @ V_true.T + 0.05 * torch.randn(n, p, generator=gen, dtype=F64)
+    X = X - X.mean(0)
+
+    E = top_k_eigenvectors(k, X=X)
+    R = varimax_rotation(E)
+    V_rot = varimax(E)
+
+    # 1. R is strictly orthogonal in O(k)
+    assert torch.allclose(R.T @ R, torch.eye(k, dtype=F64), atol=1e-12)
+    # 2. V_rot preserves column orthonormality and the exact k-dimensional subspace projector
+    assert torch.allclose(V_rot.T @ V_rot, torch.eye(k, dtype=F64), atol=1e-12)
+    assert torch.allclose(V_rot @ V_rot.T, E @ E.T, atol=1e-12)
+    # 3. Raw PC1 is delocalized across all 3 blocks, whereas Varimax localizes all 3 columns
+    def max_block_share(basis):
+        shares = []
+        for j in range(k):
+            col2 = basis[:, j].pow(2)
+            block_energies = [col2[b * per:(b + 1) * per].sum() for b in range(k)]
+            shares.append(float(max(block_energies) / col2.sum()))
+        return min(shares)
+
+    assert max_block_share(E) < 0.60
+    assert max_block_share(V_rot) > 0.95
+

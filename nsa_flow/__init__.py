@@ -46,6 +46,7 @@ from .energy import (
 from .angle import (angle_defect, cosine_matrix, grad_angle_defect,
                     gram_offdiag_defect, grad_gram_offdiag_defect)
 from .project import project_nonneg, project_scaled_stiefel, polar_factor, simlr_sparseness
+from .linalg import varimax, varimax_rotation
 from .solve import nsa_flow, NSAResult
 from .reconstruct import (GramOperator, nsa_flow_data, reconstruction_fidelity,
                           grad_reconstruction_fidelity, relax_into_nonneg)
@@ -76,8 +77,9 @@ __all__ = [
     # orthogonality (as against orthonormality)
     "angle_defect", "cosine_matrix", "grad_angle_defect",
     "gram_offdiag_defect", "grad_gram_offdiag_defect",
-    # projections
+    # projections & rotations
     "project_nonneg", "project_scaled_stiefel", "polar_factor", "simlr_sparseness",
+    "varimax", "varimax_rotation",
     # solver
     "nsa_flow", "NSAResult",
     "nsa_flow_data", "reconstruction_fidelity", "grad_reconstruction_fidelity",

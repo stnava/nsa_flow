@@ -52,7 +52,8 @@ sign flips and the result would depend on a shape heuristic.
 import torch
 
 __all__ = ["jacobi_eigh", "safe_eigh", "top_k_eigenvectors",
-           "leading_eigenvectors", "symmetric_rank"]
+           "leading_eigenvectors", "symmetric_rank",
+           "varimax_rotation", "varimax"]
 
 
 def _round_robin(n):
@@ -294,3 +295,95 @@ def leading_eigenvectors(k, S=None, X=None, canonical_sign=True):
     """Backwards-compatible alias for :func:`top_k_eigenvectors`."""
     E = top_k_eigenvectors(k, S=S, X=X)
     return E if canonical_sign else E
+
+
+def _polar_orthogonal(B):
+    """On-device orthogonal polar factor ``U V' in O(k)`` of a ``k x k`` matrix ``B``."""
+    k = B.shape[-1]
+    lam, V = safe_eigh(B.transpose(-2, -1) @ B)
+    eps = torch.finfo(B.dtype).eps
+    tiny = torch.finfo(B.dtype).tiny
+    if bool((lam.min(dim=-1).values <= eps * lam.max(dim=-1).values.clamp_min(tiny)).any()):
+        B_cpu = B.cpu() if B.device.type == "mps" else B
+        U, _, Vh = torch.linalg.svd(B_cpu, full_matrices=False)
+        return (U @ Vh).to(B.device)
+    inv_sqrt = lam.clamp_min(tiny).rsqrt()
+    Q = B @ ((V * inv_sqrt.unsqueeze(-2)) @ V.transpose(-2, -1))
+    eye = torch.eye(k, dtype=Q.dtype, device=Q.device)
+    return Q @ (1.5 * eye - 0.5 * (Q.transpose(-2, -1) @ Q))
+
+
+def varimax_rotation(E, normalize=True, eps=1e-6, max_iter=100):
+    r"""Orthogonal Varimax rotation matrix ``R in O(k)`` for basis ``E`` (``[p, k]``).
+
+    Maximises the Kaiser (1958) fourth-moment column-variance simplicity criterion
+
+    .. math::
+
+        \mathcal{V}(E R) = \sum_{j=1}^{k} \left[
+            \frac{1}{p} \sum_{i=1}^{p} (E R)_{ij}^{4}
+            - \left(\frac{1}{p} \sum_{i=1}^{p} (E R)_{ij}^{2}\right)^{2}
+        \right]
+
+    over ``R in O(k)`` via Lawley-Maxwell / GPA alternating polar projections.
+    Because ``R`` is orthogonal, ``(E R)(E R)' = E E'`` and ``(E R)'(E R) = R'(E'E)R``,
+    so both the subspace projector and column orthonormality are preserved to
+    machine precision while rotating the Perron-Frobenius global mean mode into
+    localised regional factors.
+    """
+    p, k = E.shape[-2], E.shape[-1]
+    eye = torch.eye(k, dtype=E.dtype, device=E.device)
+    if k < 2 or p < 2:
+        return eye
+
+    tiny = torch.finfo(E.dtype).tiny
+    if normalize:
+        row_norms = E.pow(2).sum(dim=-1, keepdim=True).sqrt()
+        X = torch.where(row_norms > tiny, E / row_norms.clamp_min(tiny), E)
+    else:
+        X = E
+
+    R = eye.clone()
+    d_prev = 0.0
+    for _ in range(max_iter):
+        Z = X @ R
+        col_mean_sq = Z.pow(2).sum(dim=-2, keepdim=True) / float(p)
+        B = X.transpose(-2, -1) @ (Z.pow(3) - Z * col_mean_sq)
+        R_new = _polar_orthogonal(B)
+        d = float((B * R_new).sum())
+        R = R_new
+        if d <= d_prev * (1.0 + eps):
+            break
+        d_prev = d
+    return R
+
+
+def varimax(E, normalize=True, eps=1e-6, max_iter=100, canonical_sign=True):
+    r"""Return the Varimax-rotated basis ``E R`` (``[p, k]``) with ``R in O(k)``.
+
+    When ``canonical_sign=True`` (default), each column's sign gauge is resolved
+    so its dominant L2 lobe is non-negative (with tie-breaking by largest-magnitude
+    entry), and columns are ordered deterministically by descending positive-lobe
+    L2 norm so repeated or dual-Gram calls return the same column order.
+    """
+    p, k = E.shape[-2], E.shape[-1]
+    if k < 2 or p < 2:
+        if canonical_sign and E.numel() > 0:
+            pos = torch.linalg.vector_norm(E.clamp_min(0.0), dim=-2, keepdim=True)
+            neg = torch.linalg.vector_norm((-E).clamp_min(0.0), dim=-2, keepdim=True)
+            E = torch.where(neg > pos, -E, E)
+        return E
+    R = varimax_rotation(E, normalize=normalize, eps=eps, max_iter=max_iter)
+    Z = (E @ R).contiguous()
+    if canonical_sign:
+        Z = _canonical_sign(Z)
+        pos = torch.linalg.vector_norm(Z.clamp_min(0.0), dim=-2)
+        neg = torch.linalg.vector_norm((-Z).clamp_min(0.0), dim=-2)
+        flip = torch.where(neg > pos, -torch.ones_like(pos), torch.ones_like(pos))
+        Z = Z * flip.unsqueeze(-2)
+        # Order deterministically by descending positive-lobe L2 norm
+        pos_after = torch.linalg.vector_norm(Z.clamp_min(0.0), dim=-2)
+        order = torch.argsort(pos_after, dim=-1, descending=True)
+        Z = Z[..., :, order].contiguous()
+    return Z
+

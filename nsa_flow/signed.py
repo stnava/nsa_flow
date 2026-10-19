@@ -199,7 +199,7 @@ import warnings
 import torch
 
 from .diagnostics import basis_report, default_tol, make_result, orth_terms
-from .linalg import leading_eigenvectors
+from .linalg import leading_eigenvectors, varimax
 from .optim import minimise
 from .project import project_nonneg
 from .reconstruct import (GramOperator, grad_reconstruction_fidelity,
@@ -338,8 +338,8 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="auto", orth="Cg", lobe=1.0,
         else:
             init_strat = init
 
-        if init_strat == "split":
-            if not is_centered_or_signed:
+        if init_strat in ("split", "varimax"):
+            if not is_centered_or_signed and init_strat == "split":
                 warnings.warn(
                     "nsa_flow_signed: init='split' on non-negative or uncentred "
                     "data produces V⁻ = max(0, −E) ≈ 0, a spurious fixed "
@@ -347,6 +347,11 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="auto", orth="Cg", lobe=1.0,
                     "Use the default init='auto' or 'adaptive', which seeds both lobes "
                     "through an adaptive homotopy path.",
                     DeprecationWarning, stacklevel=2)
+            E = (leading_eigenvectors(k, X=Xt) if ops.matrix_free
+                 else leading_eigenvectors(k, S=ops.S))
+            E = varimax(E)
+            W = torch.cat([E.clamp_min(0.0), (-E).clamp_min(0.0)], dim=-1).clone()
+        elif init_strat == "pca_split":
             E = (leading_eigenvectors(k, X=Xt) if ops.matrix_free
                  else leading_eigenvectors(k, S=ops.S))
             W = torch.cat([E.clamp_min(0.0), (-E).clamp_min(0.0)], dim=-1).clone()
@@ -361,7 +366,7 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="auto", orth="Cg", lobe=1.0,
                           dim=-1).clone()
         else:
             raise ValueError(
-                f"init must be 'auto' (default), 'split', 'adaptive', 'relax' or a [p, 2k] Tensor; "
+                f"init must be 'auto' (default), 'split', 'varimax', 'pca_split', 'adaptive', 'relax' or a [p, 2k] Tensor; "
                 f"got {init!r}.")
     else:
         W = torch.as_tensor(init).to(dtype=Xt.dtype, device=Xt.device).detach().clone()

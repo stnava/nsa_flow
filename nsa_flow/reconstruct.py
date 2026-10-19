@@ -37,7 +37,7 @@ a global minimum, and the relaxation path matters (see ``relax_into_nonneg``).
 import torch
 
 from .diagnostics import default_tol, make_result, orth_terms
-from .linalg import leading_eigenvectors
+from .linalg import leading_eigenvectors, varimax
 from .optim import minimise
 from .project import project_nonneg, _resolve_column_sign_gauge
 from .solve import NSAResult
@@ -226,7 +226,7 @@ def relax_into_nonneg(S, c, k, w, mus=None, max_iter=600, tol=1e-10, sigma=1e-4,
         # 0.02.  Do not trim it for speed.
         mus = [0.0] + [10.0 ** e for e in range(-3, 5)]
 
-    V = _resolve_column_sign_gauge(ops.leading(k))  # signed, oriented so dominant L2 mass is >= 0
+    V = varimax(ops.leading(k))  # Varimax-rotated top-k subspace, dominant L2 lobe >= 0
 
     def make(mu):
         def obj(Vv):
@@ -338,9 +338,13 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="D", max_iter=None,
         if k is None:
             raise ValueError("give k when init is a strategy name")
         E = ops.leading(k)
-        if init in ("clamp", "auto"):
-            # Resolve per-column sign gauge by dominant L2 mass before projecting
-            # top-k PCA eigenvectors onto the non-negative orthant.
+        if init in ("clamp", "auto", "varimax"):
+            # Rotate top-k PCA eigenvectors via orthogonal Varimax within the
+            # k-subspace (preserving E E' and E'E = I_k) so the Perron-Frobenius
+            # global mean mode is distributed into localized regional factors
+            # before resolving column sign gauge and clamping at zero.
+            V = varimax(E).clamp_min(0.0).clone()
+        elif init == "pca_clamp":
             V = _resolve_column_sign_gauge(E).clamp_min(0.0).clone()
         elif init == "relax":
             # Homotopy path -- retained for backward compat and nsa_flow (anchored).
@@ -371,7 +375,7 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="D", max_iter=None,
         else:
             raise ValueError(
                 f"unknown init strategy {init!r}; "
-                "choose 'clamp', 'relax', 'nmf', or 'random'")
+                "choose 'clamp', 'varimax', 'pca_clamp', 'relax', 'nmf', or 'random'")
     elif init is None:
         raise ValueError("give either k with an init strategy, or an explicit init tensor")
     else:

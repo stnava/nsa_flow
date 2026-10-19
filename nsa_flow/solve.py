@@ -37,6 +37,7 @@ import torch
 from .diagnostics import default_tol, make_result, orth_terms
 from .energy import (energy, stiefel_defect_normalised, grad_stiefel_defect,
                      value_and_grad, aligned_target)
+from .linalg import varimax
 from .optim import minimise, optimizer_names
 from .project import project_nonneg, simlr_sparseness
 from .subspace import (SubspaceAnchor, negative_mass, subspace_fidelity,
@@ -339,8 +340,26 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
     if float(denom) <= 0:
         raise ValueError("target is all zeros; fidelity is undefined")
 
-    Y = (X0.clone() if init is None
-         else torch.as_tensor(init).to(dtype=X0.dtype, device=X0.device).detach().clone())
+    if init is None:
+        if fidelity == "subspace" and max_iter > 0 and float(w) > 0.0 and k > 1:
+            # Subspace fidelity depends only on range(X0), so any right-O(k)
+            # rotation X0 @ R is an equally faithful starting point inside
+            # range(X0). Rotating via Varimax breaks the Perron-Frobenius
+            # global mean mode before non-negative projection.
+            Y = varimax(X0)
+            if nonneg:
+                Y = Y.clamp_min(0.0).clone()
+        else:
+            Y = X0.clone()
+    elif isinstance(init, str):
+        if init == "varimax":
+            Y = varimax(X0)
+            if nonneg:
+                Y = Y.clamp_min(0.0).clone()
+        else:
+            raise ValueError(f"Unknown anchored init strategy {init!r}; choose 'varimax' or a Tensor")
+    else:
+        Y = torch.as_tensor(init).to(dtype=X0.dtype, device=X0.device).detach().clone()
     if Y.shape != X0.shape:
         raise ValueError(f"init shape {tuple(Y.shape)} != target shape {tuple(X0.shape)}")
 
