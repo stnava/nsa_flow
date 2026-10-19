@@ -41,7 +41,7 @@ tables:
 	PYTHONPATH=. python experiments/build_tables.py
 
 bench:
-	python -m nsa_flow.bench run --suite standard-fast --profile standard --jobs 5 --out bench_results
+	python -m nsa_flow.bench run --suite standard-fast --profile fast --jobs 5 --out bench_results
 
 bench-full:
 	python -m nsa_flow.bench run --suite standard-full --profile standard --jobs 5 --out bench_results

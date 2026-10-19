@@ -1,7 +1,7 @@
 """Profiles, parallel execution and cost estimation.
 
-Profiles trade breadth for time: ``smoke`` (seconds, synthetic), ``quick`` (minutes), ``standard`` (the
-reported numbers), ``full`` (more splits).  ``parallel_map`` runs items in loky workers; functions must be
+Profiles trade breadth for time: ``smoke`` (seconds, synthetic), ``quick`` (minutes), ``fast`` (standard splits with a
+smaller inner forest), ``standard`` (the reported numbers), ``full`` (more splits).  ``parallel_map`` runs items in loky workers; functions must be
 importable by module name (workers cannot unpickle functions defined in ``__main__``).
 """
 from __future__ import annotations
@@ -23,7 +23,8 @@ class Profile:
 PROFILES = {
     "smoke": Profile("smoke", 2, 2, 20, rf_trees_inner=10),
     "quick": Profile("quick", 5, 3, 50, rf_trees_inner=25),
-    "standard": Profile("standard", 20, 5, 100, rf_trees_inner=25),
+    "standard": Profile("standard", 20, 5, 100),                       # full-forest selection: the reference fidelity
+    "fast": Profile("fast", 20, 5, 100, rf_trees_inner=25),           # 25-tree selection: ~2-4x faster, attenuates small effects
     "full": Profile("full", 40, 5, 200, rf_trees_inner=50),
 }
 

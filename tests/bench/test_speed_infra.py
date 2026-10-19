@@ -50,15 +50,17 @@ def test_resume_reuses_finished_entries_and_recomputes_on_changed_inputs(tmp_pat
 
 
 def test_inner_selection_uses_the_smaller_forest(monkeypatch):
-    p = get_profile("standard")
-    assert 0 < p.rf_trees_inner < p.rf_trees and all(0 < q.rf_trees_inner <= q.rf_trees for q in PROFILES.values())
+    p = get_profile("fast")
+    assert 0 < p.rf_trees_inner < p.rf_trees and all(0 < q.rf_trees_inner <= q.rf_trees for q in PROFILES.values()
+                                                     if q.name not in ("standard",))
+    assert get_profile("standard").rf_trees_inner in (0, get_profile("standard").rf_trees)   # reference = full forest
     ds = get_dataset("planted")
     seen = []
     orig = nested_cv.score_models
     monkeypatch.setattr(nested_cv, "score_models",
                         lambda *a, **k: (seen.append(a[-1]), orig(*a, **k))[1])
     tr = np.arange(0, 200)
-    nested_cv.select_hp(ds, METHODS["PCA"], METHODS["PCA"].grid(get_profile("smoke")), tr, 1, get_profile("standard"))
+    nested_cv.select_hp(ds, METHODS["PCA"], METHODS["PCA"].grid(get_profile("smoke")), tr, 1, p)
     assert seen and set(seen) == {p.rf_trees_inner}
 
 

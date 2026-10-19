@@ -12,9 +12,9 @@ solver modules.
 pip install -e ".[bench]"            # numpy, pandas, scikit-learn, scipy, joblib (import nsa_flow needs none of them)
 nsa-flow-bench list                  # datasets (ok / MISSING + why, tier), methods, protocols, suites
 nsa-flow-bench run --suite smoke --profile smoke        # seconds, synthetic only
-nsa-flow-bench run --suite standard-fast --jobs 5       # daily driver: ~5 min with 5 workers (make bench)
-nsa-flow-bench run --suite standard-full --jobs 5       # everything, ~40 min (make bench-full); `standard` is the same suite
-nsa-flow-bench run --suite standard-fast --resume       # reuse finished entries of an interrupted run
+nsa-flow-bench run --suite standard-fast --profile fast --jobs 5   # daily driver: ~5 min with 5 workers (make bench)
+nsa-flow-bench run --suite standard-full --jobs 5       # everything, ~40 min, full-forest selection (make bench-full); `standard` is the same suite
+nsa-flow-bench run --suite standard-fast --profile fast --resume   # reuse finished entries of an interrupted run
 nsa-flow-bench run --suite standard-fast --public-only  # public datasets only
 nsa-flow-bench report standard [--brief]                # markdown from the latest stored run
 nsa-flow-bench report standard --brief --inject README.md:standard   # refresh a generated README block
@@ -52,7 +52,8 @@ tests/bench/      registry, leakage, determinism, schema, suites, reports, CLI, 
 Measured bottlenecks and what was done about them (bench code only):
 - **Downstream models, not NSA, dominate nested CV**: the linear model plus the forest take 84% (ADNI) to 97% (NHANES) of
   the time; basis fits are 3-16% (Tecator is the exception: NSA solves dominate). Hyper-parameters are therefore selected
-  with a smaller forest (`Profile.rf_trees_inner`, 25 trees in `standard`; reported outer fits keep 100). Agreement check
+  with a smaller forest in the `fast` profile (`Profile.rf_trees_inner = 25`; reported outer fits keep 100; the `standard`
+  profile selects with the full forest and is the reference fidelity). Agreement check
   on ADNI/Tecator: the same hyper-parameters in 67-83% of selections, outer scores within -0.004 +/- 0.008 of full-forest
   selection, selection 2.2-3.7x faster on ADNI (1.1x on Tecator).
 - **Every finished entry is saved at once** (`<run>/entries/entry_NN.csv|json`, `progress.log`); `--resume` reuses entries whose
@@ -62,7 +63,9 @@ Measured bottlenecks and what was done about them (bench code only):
   newsgroups, `metabric@shuffled`, speed, NHANES at 20,000 rows and the residual variant stay in the full suite.
   Wall time with 5 workers: about 4.5 minutes (adni 25 s, metabric 19 s, pbmc3k 44 s, adni@null_y 23 s, the seven factor-analysis
   entries 42 s, NHANES 41 + 42 + 8 s) against about 40 minutes for the full suite. At 6,000 rows NHANES has too little power to see
-  effects of 0.003-0.007 AUC; use `standard-full` for that claim.
+  effects of 0.003-0.007 AUC; use `standard-full` for that claim. **Cheap selection also attenuates small effects**: on NHANES raw
+  (20,000 rows) the legacy-init gain over PCA is +0.0074 [0.0049, 0.0100] with 100-tree inner selection and +0.0039 [0.0003, 0.0074]
+  with 25 trees, so `fast` is for development and guarding, not for small-effect claims.
 - Every manifest records a **core hash** (sha1 of the library sources outside `bench/`) and whether the tree was dirty; runs
   with different core hashes are different experiments, and `--resume` will not mix them.
 
@@ -177,17 +180,22 @@ mid-run (another session, a merge) silently mixes code versions. `nsa-flow-bench
 - Workers cannot unpickle functions defined in `__main__`; protocol workers live in importable modules.
 - Worker threads: each worker uses one torch/BLAS/OpenMP thread (`runtime.limit_threads`).
 
-## Standard run (reference, 2026-10-19, 20 splits/draws; Golub 10)
+## Standard run (reference, 2026-10-19, post-varimax-init core 115f30a, full-forest selection; 20 splits/draws, Golub and NHANES 10)
 | entry | primary contrast | estimate [95% CI] | status |
 |---|---|---|---|
-| adni (restricted) | NSA consolidated − PCA, forest R² | +0.147 [0.078, 0.216] | PASS |
-| golub | NSA consolidated − PCA, linear bal. acc. | +0.016 [−0.076, 0.107] | FAIL |
-| tecator | NSA consolidated − PCA, forest R² | −0.242 [−0.293, −0.192] | WORSE |
-| planted / newsgroups / metabric (local) / pbmc3k | ARI, NSA consolidated w=0.5 − k-means | +0.377 / −0.111 / −0.160 / −0.163 | PASS / WORSE ×3 |
+| adni (restricted) | NSA consolidated − PCA, forest R² | +0.155 [0.069, 0.242] | PASS |
+| golub | NSA consolidated − PCA, linear bal. acc. | +0.049 [−0.015, 0.113] | FAIL |
+| tecator | NSA consolidated − PCA, forest R² | −0.237 [−0.286, −0.188] | WORSE |
+| planted | ARI, NSA consolidated w=0.5 − k-means | +0.377 | PASS |
+| newsgroups / metabric (local) / pbmc3k | same | −0.076 / −0.166 / −0.207 | FAIL / WORSE / WORSE |
 | adni@null_y, noise, metabric@shuffled | null controls | within tolerance | PASS ×3 |
+| bfi, holzinger, fa_sim n=100/300/1000 | NSA.FA − PAF varimax, Hofmann complexity | −0.097, −0.031, −0.127, −0.084, −0.068 | FAIL (guard): reproduced-correlation error worsens |
+| fa_null, bfi@shuffled | null controls | ARI ≈ 0.03 | PASS ×2 |
+| nhanes / nhanes@density (AUC), nhanes@density survival (C-index) | NSA nonneg − PCA, forest | +0.001 / +0.003 / +0.007 | FAIL / FAIL / PASS |
 
-The non-negative mode (`mode="data"`) is competitive with k-means on module recovery and more stable than NMF; it is
-sensitive to input scaling. See the README for the interpretation.
+Initialiser A/B on NHANES raw (same data and splits, 100-tree selection): legacy `init="pca_clamp"` +0.0074 [0.0049, 0.0100];
+default (varimax) +0.0012 [−0.0020, 0.0045]. The non-negative mode (`mode="data"`) is competitive with k-means on module
+recovery and more stable than NMF; it is sensitive to input scaling and to the initialiser. See the README for the interpretation.
 
 ## Not yet ported
 `rapid_primary_benchmarks.py` (HTML report, diabetes, synthetic recovery), `benchmark_new_public_data.py` (Sonar,
