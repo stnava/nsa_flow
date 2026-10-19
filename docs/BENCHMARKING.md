@@ -12,8 +12,10 @@ solver modules.
 pip install -e ".[bench]"            # numpy, pandas, scikit-learn, scipy, joblib (import nsa_flow needs none of them)
 nsa-flow-bench list                  # datasets (ok / MISSING + why, tier), methods, protocols, suites
 nsa-flow-bench run --suite smoke --profile smoke        # seconds, synthetic only
-nsa-flow-bench run --suite standard --jobs 4            # the reported benchmarks (~25 min with 5 workers)
-nsa-flow-bench run --suite standard --public-only       # public datasets only
+nsa-flow-bench run --suite standard-fast --jobs 5       # daily driver: ~5 min with 5 workers (make bench)
+nsa-flow-bench run --suite standard-full --jobs 5       # everything, ~40 min (make bench-full); `standard` is the same suite
+nsa-flow-bench run --suite standard-fast --resume       # reuse finished entries of an interrupted run
+nsa-flow-bench run --suite standard-fast --public-only  # public datasets only
 nsa-flow-bench report standard [--brief]                # markdown from the latest stored run
 nsa-flow-bench report standard --brief --inject README.md:standard   # refresh a generated README block
 nsa-flow-bench check [--update]                         # smoke suite vs stored baseline
@@ -45,6 +47,24 @@ nsa_flow/bench/
   baseline_smoke.json   stored primary estimates for `check`
 tests/bench/      registry, leakage, determinism, schema, suites, reports, CLI, API, light-import
 ```
+
+## Speed
+Measured bottlenecks and what was done about them (bench code only):
+- **Downstream models, not NSA, dominate nested CV**: the linear model plus the forest take 84% (ADNI) to 97% (NHANES) of
+  the time; basis fits are 3-16% (Tecator is the exception: NSA solves dominate). Hyper-parameters are therefore selected
+  with a smaller forest (`Profile.rf_trees_inner`, 25 trees in `standard`; reported outer fits keep 100). Agreement check
+  on ADNI/Tecator: the same hyper-parameters in 67-83% of selections, outer scores within -0.004 +/- 0.008 of full-forest
+  selection, selection 2.2-3.7x faster on ADNI (1.1x on Tecator).
+- **Every finished entry is saved at once** (`<run>/entries/entry_NN.csv|json`, `progress.log`); `--resume` reuses entries whose
+  inputs (the pre-registered entry, the profile and the core hash) are unchanged, so a stopped run loses nothing.
+- **`standard-fast`** keeps the same pre-registered primaries as `standard-full` with cheaper settings: three prediction
+  methods, primary module variant only, 10 draws on the large expression sets, NHANES at 6,000 rows; golub, tecator,
+  newsgroups, `metabric@shuffled`, speed, NHANES at 20,000 rows and the residual variant stay in the full suite.
+  Wall time with 5 workers: about 4.5 minutes (adni 25 s, metabric 19 s, pbmc3k 44 s, adni@null_y 23 s, the seven factor-analysis
+  entries 42 s, NHANES 41 + 42 + 8 s) against about 40 minutes for the full suite. At 6,000 rows NHANES has too little power to see
+  effects of 0.003-0.007 AUC; use `standard-full` for that claim.
+- Every manifest records a **core hash** (sha1 of the library sources outside `bench/`) and whether the tree was dirty; runs
+  with different core hashes are different experiments, and `--resume` will not mix them.
 
 ## Why a package
 Benchmarks used to be ~50 scripts under `experiments/`, each with its own splits, baselines, grids, summaries and
@@ -147,7 +167,8 @@ or over budget.
 - **Suite entry.** `Entry(dataset, protocol, methods, Primary(metric, method, ref, model), expect)` in `suites.py`.
 
 ## Regression guard
-`nsa-flow-bench check` runs the smoke suite and compares its primary estimates with `baseline_smoke.json`
+Run long jobs from a clean checkout or `git worktree` pinned to a commit: a shared working tree whose branch or core sources change
+mid-run (another session, a merge) silently mixes code versions. `nsa-flow-bench check` runs the smoke suite and compares its primary estimates with `baseline_smoke.json`
 (tolerance 1e-3). Use `--update` only after an intended change.
 
 ## Troubleshooting

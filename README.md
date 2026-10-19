@@ -117,8 +117,10 @@ pip install -e ".[bench]"
 nsa-flow-bench list                       # datasets (ok / MISSING + why), methods, protocols, suites
 nsa-flow-bench fetch pbmc3k --download    # public data downloads only on explicit request, checksummed
 nsa-flow-bench run --suite smoke --profile smoke      # seconds, synthetic only
-nsa-flow-bench run --suite standard --jobs 4          # the reported benchmarks -> bench_results/
-nsa-flow-bench report standard                        # markdown from the stored rows
+nsa-flow-bench run --suite standard-fast --jobs 5     # daily driver, ~5 min (make bench) -> bench_results/
+nsa-flow-bench run --suite standard-full --jobs 5     # everything, ~40 min (make bench-full); `standard` is the same
+nsa-flow-bench run --suite standard-fast --resume     # reuse finished entries of an interrupted run
+nsa-flow-bench report standard-fast                   # markdown from the stored rows
 nsa-flow-bench check                                  # smoke suite vs stored baseline (solver regression guard)
 ```
 

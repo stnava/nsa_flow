@@ -27,7 +27,7 @@ def variants(method):
     return [((f"{method.name} w={c['w']}" if "w" in c else method.name), c) for c in method.module_cells]
 
 
-def _draw(ds, r, n_samples, method_names):
+def _draw(ds, r, n_samples, method_names, primary_only=False):
     from sklearn.metrics import adjusted_rand_score as ari_score
     limit_threads(1)
     rng = np.random.default_rng(r)
@@ -42,7 +42,7 @@ def _draw(ds, r, n_samples, method_names):
     rows = []
     for name in method_names:
         m = METHODS[name]
-        for label, cell in variants(m):
+        for label, cell in (variants(m)[:1] if primary_only else variants(m)):
             hp = {**cell, "k": k}
             V, cert = m.fit(rep, hp, 0, ctx)
             lab = dominant_assignment(V)
@@ -61,13 +61,13 @@ def _draw(ds, r, n_samples, method_names):
 
 
 @protocol("module_recovery")
-def run(ds, method_names, profile, jobs=1, seed0=0, n_samples=None, n_outer=None, **_):
+def run(ds, method_names, profile, jobs=1, seed0=0, n_samples=None, n_outer=None, primary_only=False, **_):
     use, skipped = [], []
     for name in method_names:
         ok, why = METHODS[name].applies(ds)
         (use if ok else skipped).append(name if ok else (name, why))
     n_samples = n_samples or ds.draw_n or ds.n // 2
-    items = [(ds, seed0 + r, n_samples, use) for r in range(n_outer or profile.n_outer)]
+    items = [(ds, seed0 + r, n_samples, use, primary_only) for r in range(n_outer or profile.n_outer)]
     df = pd.DataFrame([r for part in parallel_map(_draw, items, jobs) for r in part])
     for name, why in skipped:
         df = pd.concat([df, pd.DataFrame([dict(dataset=ds.name, protocol="module_recovery", method=name,

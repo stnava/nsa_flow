@@ -15,15 +15,16 @@ class Profile:
     name: str
     n_outer: int            # outer splits (prediction) / draws (module recovery); datasets may cap it
     n_inner: int            # inner folds
-    rf_trees: int
+    rf_trees: int                   # forest size for the outer (reported) fits
     max_method_minutes: float = 30.0
+    rf_trees_inner: int = 0         # forest size while selecting hyper-parameters in the inner CV (0 = same as rf_trees)
 
 
 PROFILES = {
-    "smoke": Profile("smoke", 2, 2, 20),
-    "quick": Profile("quick", 5, 3, 50),
-    "standard": Profile("standard", 20, 5, 100),
-    "full": Profile("full", 40, 5, 200),
+    "smoke": Profile("smoke", 2, 2, 20, rf_trees_inner=10),
+    "quick": Profile("quick", 5, 3, 50, rf_trees_inner=25),
+    "standard": Profile("standard", 20, 5, 100, rf_trees_inner=25),
+    "full": Profile("full", 40, 5, 200, rf_trees_inner=50),
 }
 
 

@@ -58,8 +58,8 @@ def _pred(ds, metric, model, expect="effect", methods=None, **params):
     return Entry(ds, "nested_cv", methods or DEFAULT_PREDICT, Primary(metric, NSA, "PCA", model), expect, params)
 
 
-def _mod(ds, expect="effect", metric="ari", ref="KMeans features"):
-    return Entry(ds, "module_recovery", MOD, Primary(metric, FIND, ref), expect)
+def _mod(ds, expect="effect", metric="ari", ref="KMeans features", methods=None, **params):
+    return Entry(ds, "module_recovery", methods or MOD, Primary(metric, FIND, ref), expect, params)
 
 
 def _fa(ds):
@@ -132,6 +132,56 @@ SUITES.add("standard", Suite("standard", "reported benchmarks: prediction, modul
           dict(max_n=20000, n_outer=10)),
 ]))
 SUITES["paper"] = SUITES["standard"]
+SUITES["standard-full"] = SUITES["standard"]
+
+# standard-fast: the daily-driver subset, target <= 10 minutes with 5 workers.  Same pre-registered primaries as
+# `standard`; cheaper settings: three prediction methods, primary module variant only, 10 draws on the large
+# expression sets, NHANES at 6,000 rows.  Left to standard-full: golub, tecator, newsgroups, metabric@shuffled, speed,
+# NHANES at 20,000 rows and the residual variant.
+_FAST_MODULE_METHODS = ["NSA consolidated", "NSA nonneg", "KMeans features", "NMF"]
+_FAST_PRED_METHODS = ["PCA", "NSA consolidated", "KMeans features"]
+_FAST_NHANES = dict(max_n=6000, n_outer=10, n_inner=3)
+SUITES.add("standard-fast", Suite("standard-fast", "daily-driver subset of standard (~10 min with 5 workers)", [
+    _pred("adni", "r2", "forest", methods=_FAST_PRED_METHODS),
+    _mod("planted"),
+    _mod("metabric", methods=_FAST_MODULE_METHODS, primary_only=True, n_outer=10),
+    _mod("pbmc3k", methods=_FAST_MODULE_METHODS, primary_only=True, n_outer=10),
+    _pred("adni@null_y", "r2", "forest", "null", _FAST_PRED_METHODS),
+    Entry("noise", "module_recovery", ["NSA consolidated", "KMeans features", "PCA"],
+          Primary("stability", FIND, None), "null"),
+    _fa("bfi"), _fa("holzinger"), _fa("fa_sim_n100"), _fa("fa_sim_n300"), _fa("fa_sim_n1000"),
+    _fa_null("fa_null"), _fa_null("bfi@shuffled"),
+    Entry("nhanes", "nested_cv", NHANES_METHODS, Primary("auc", "NSA nonneg", "PCA", "forest"), "effect",
+          dict(_FAST_NHANES)),
+    Entry("nhanes@density", "nested_cv", NHANES_METHODS, Primary("auc", "NSA nonneg", "PCA", "forest"), "effect",
+          dict(_FAST_NHANES)),
+    Entry("nhanes@density", "survival", NHANES_METHODS, Primary("cindex", "NSA nonneg", "PCA", "forest"), "effect",
+          dict(max_n=6000, n_outer=10)),
+]))
+
+_AB_NSA = ["NSA consolidated", "NSA consolidated (legacy init)", "NSA nonneg", "NSA nonneg (legacy init)"]
+_AB_MOD = ["KMeans features"] + _AB_NSA
+
+
+def _ab_pred(ds, metric, nsa, legacy, methods, **params):
+    """Paired A/B of the library's default initialiser against the legacy one on identical splits (info only)."""
+    return Entry(ds, "nested_cv", methods, Primary(metric, legacy, nsa, "forest"), "info", params)
+
+
+def _ab_mod(ds):
+    return Entry(ds, "module_recovery", _AB_MOD, Primary("ari", "NSA nonneg (legacy init) w=0.5", "NSA nonneg w=0.5"),
+                 "info", dict(primary_only=True, n_outer=10))
+
+
+SUITES.add("init_ab", Suite("init_ab", "A/B of the default initialiser vs the legacy one (info only; minutes)", [
+    _ab_pred("adni", "r2", "NSA consolidated", "NSA consolidated (legacy init)",
+             ["PCA", "NSA consolidated", "NSA consolidated (legacy init)"]),
+    _ab_pred("nhanes", "auc", "NSA nonneg", "NSA nonneg (legacy init)", ["PCA", "NSA nonneg", "NSA nonneg (legacy init)"],
+             **NHANES_CAP),
+    _ab_pred("nhanes@density", "auc", "NSA nonneg", "NSA nonneg (legacy init)",
+             ["PCA", "NSA nonneg", "NSA nonneg (legacy init)"], **NHANES_CAP),
+    _ab_mod("pbmc3k"), _ab_mod("metabric"), _ab_mod("newsgroups"),
+]))
 
 SUITES.add("nhanes", Suite("nhanes", "NHANES dietary -> mortality: AUC, energy-adjusted variants, survival C-index", [
     _nhanes("nhanes"), _nhanes("nhanes@density"), _nhanes("nhanes@residual"),

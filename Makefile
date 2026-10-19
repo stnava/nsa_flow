@@ -1,11 +1,12 @@
-.PHONY: help install test theory bench bench-smoke bench-check bench-report speed experiments tables paper rmd-paper dist release clean docs docs-clean
+.PHONY: help install test theory bench bench-full bench-smoke bench-check bench-report speed experiments tables paper rmd-paper dist release clean docs docs-clean
 
 help:
 	@echo "install      - editable install with experiment + test extras"
 	@echo "test         - run the full test suite (theory, solver, layers)"
 	@echo "theory       - run only the theory property battery"
 	@echo "experiments  - run all paper experiments -> paper/results, paper/figs"
-	@echo "bench        - full nsa_flow.bench standard suite -> bench_results/ (nsa-flow-bench run)"
+	@echo "bench        - standard-fast suite (~10 min) -> bench_results/ (nsa-flow-bench run)"
+	@echo "bench-full   - standard-full suite (~40 min)"
 	@echo "bench-smoke  - smoke suite (seconds, synthetic only)"
 	@echo "bench-check  - smoke suite vs stored baseline (solver regression guard)"
 	@echo "bench-report - markdown report of the latest standard run"
@@ -40,7 +41,10 @@ tables:
 	PYTHONPATH=. python experiments/build_tables.py
 
 bench:
-	python -m nsa_flow.bench run --suite standard --profile standard --jobs 4 --out bench_results
+	python -m nsa_flow.bench run --suite standard-fast --profile standard --jobs 5 --out bench_results
+
+bench-full:
+	python -m nsa_flow.bench run --suite standard-full --profile standard --jobs 5 --out bench_results
 
 bench-smoke:
 	python -m nsa_flow.bench run --suite smoke --profile smoke --out bench_results
@@ -49,7 +53,7 @@ bench-check:
 	python -m nsa_flow.bench check
 
 bench-report:
-	python -m nsa_flow.bench report standard
+	python -m nsa_flow.bench report standard-fast
 
 speed:
 	PYTHONPATH=. python experiments/speed_vs_pca.py

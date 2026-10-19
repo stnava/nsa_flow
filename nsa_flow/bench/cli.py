@@ -48,7 +48,7 @@ def cmd_run(a):
     from .runner import run_suite
     suite = SUITES.get_or_raise(a.suite)
     rows, summary, verdicts, run_dir = run_suite(
-        suite, a.profile, a.jobs, a.out, only=a.only, budget_min=a.budget_min, public_only=a.public_only,
+        suite, a.profile, a.jobs, a.out, only=a.only, budget_min=a.budget_min, public_only=a.public_only, resume=a.resume,
         command=" ".join(["nsa-flow-bench"] + sys.argv[1:]))
     from .report import verdict_table
     print("\n" + verdict_table(verdicts))
@@ -101,6 +101,8 @@ def main(argv=None):
     p.add_argument("--jobs", type=int, default=1); p.add_argument("--out", default="bench_results")
     p.add_argument("--only", nargs="*"); p.add_argument("--budget-min", type=float, default=None)
     p.add_argument("--public-only", action="store_true", help="skip restricted/local datasets")
+    p.add_argument("--resume", nargs="?", const="latest", default=None,
+                   help="reuse finished entries of an unfinished run (RUN_DIR, or no value for the latest)")
     p.set_defaults(fn=cmd_run)
     p = sub.add_parser("report"); p.add_argument("run", help="run directory or suite name (latest)")
     p.add_argument("--out", default="bench_results"); p.add_argument("--inject", help="FILE:NAME marker block")

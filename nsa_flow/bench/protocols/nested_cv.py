@@ -99,7 +99,7 @@ def select_hp(ds, method, grid, tr, seed, profile):
         acc = {m: [] for m in MODELS}
         for (a, b), (rtr, rva) in zip(folds, prepped):
             V, _ = method.fit(rtr, hp, seed, ctx)
-            sc = score_models(ds, V, method.key, rtr, rva, a, b, seed, profile.rf_trees)
+            sc = score_models(ds, V, method.key, rtr, rva, a, b, seed, profile.rf_trees_inner or profile.rf_trees)
             for m in MODELS:
                 acc[m].append(sc[m])
         for m in MODELS:

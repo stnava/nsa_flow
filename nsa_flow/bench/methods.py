@@ -45,12 +45,14 @@ class Method:
         return True, ""
 
 
-def _nsa(rep, hp, seed, ctx, mode, consolidate=False):
+def _nsa(rep, hp, seed, ctx, mode, consolidate=False, init=None):
+    """NSA fit through the public API.  ``init`` selects a named initialiser (``None`` = the library default)."""
     from nsa_flow import nsa_flow
+    kw = {} if init is None else {"init": init}
     if mode == "signed":
-        r = nsa_flow(rep["c"], k=hp["k"], mode="signed", w=hp["w"], consolidate=consolidate)
+        r = nsa_flow(rep["c"], k=hp["k"], mode="signed", w=hp["w"], consolidate=consolidate, **kw)
     else:
-        r = nsa_flow(rep["pos"], k=hp["k"], mode="data", w=hp["w"])
+        r = nsa_flow(rep["pos"], k=hp["k"], mode="data", w=hp["w"], **kw)
     return r.Y.detach().cpu().numpy(), {"converged": bool(r["converged"]), "defect_D": float(r["defect_D"])}
 
 
@@ -125,6 +127,13 @@ def _register():
                                    [{"w": 0.5}, {"w": 0.25}], family="nsa"))
     reg("NSA nonneg", Method("NSA nonneg", lambda *a: _nsa(*a, "data"), "pos", _nsa_grids(),
                              [{"w": 0.5}], family="nsa", note="mode='data' on non-negatively shifted data"))
+    # legacy initialisers (PCA eigenvectors with sign gauge, before the varimax default of nsa_flow 115f30a):
+    # an A/B axis for the init change; they need a library that accepts init="pca_split" / "pca_clamp"
+    reg("NSA consolidated (legacy init)", Method("NSA consolidated (legacy init)",
+                                                 lambda *a: _nsa(*a, "signed", True, "pca_split"), "c", _nsa_grids(),
+                                                 [{"w": 0.5}], family="nsa", note="init='pca_split'"))
+    reg("NSA nonneg (legacy init)", Method("NSA nonneg (legacy init)", lambda *a: _nsa(*a, "data", False, "pca_clamp"),
+                                           "pos", _nsa_grids(), [{"w": 0.5}], family="nsa", note="init='pca_clamp'"))
     reg("Thresholded PCA", Method("Thresholded PCA", _thresholded_pca, "c",
                                   _simple_grids(frac=[0.1, 0.2, 0.4]), [{"frac": 0.2}]))
     reg("SparsePCA", Method("SparsePCA", _sparse_pca, "c", _simple_grids(alpha=[1.0, 4.0]), [{"alpha": 1.0}],

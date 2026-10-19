@@ -11,7 +11,8 @@ from . import methods, protocols, suites  # noqa: F401  (import registers method
 from .datasets import DatasetUnavailable, get_dataset, tier_of
 from .metrics import long_summary
 from .registry import METHODS, PROTOCOLS
-from .results import manifest, save_run
+from .results import (core_hash, entry_key, finalize_run, load_entry, manifest, save_entry,
+                      start_run)
 from .runtime import get_profile, probe_fit_seconds
 
 
@@ -106,64 +107,82 @@ def evaluate_verdicts(suite, summary, only=None, skipped_entries=()):
     return out
 
 
+def _skip(e, info, reason, log, kind="skip"):
+    log(f"[{kind}] {e.dataset} / {e.protocol}: {reason}")
+    frame = pd.DataFrame([dict(dataset=e.dataset, protocol=e.protocol, method="*", skipped_reason=str(reason))])
+    return frame, dict(info, status="skipped", reason=str(reason)), True
+
+
+def _run_entry(e, suite_name, profile, jobs, budget_min, public_only, log):
+    """Run one entry; returns (rows, info, skipped)."""
+    info = dict(dataset=e.dataset, protocol=e.protocol, expect=e.expect, tier=tier_of(e.dataset),
+                primary=None if e.primary is None else asdict(e.primary), methods=e.methods)
+    if public_only and info["tier"] != "public":
+        return _skip(e, info, f"{e.dataset} is tier {info['tier']!r}; --public-only runs public datasets only", log)
+    try:
+        ds = None if e.protocol == "speed" else get_dataset(e.dataset)
+    except DatasetUnavailable as ex:
+        return _skip(e, info, ex, log)
+    est = estimate_minutes(e, ds, profile, jobs)
+    log(f"[run ] {e.dataset} / {e.protocol}  est {est:.1f} min  "
+        f"(n={getattr(ds, 'n', '-')}, p={getattr(ds, 'p', '-')}, profile={profile.name}, jobs={jobs})")
+    if budget_min is not None and est > budget_min:
+        return _skip(e, info, f"estimated {est:.1f} min > budget {budget_min} min", log)
+    t0 = time.time()
+    df = PROTOCOLS[e.protocol](ds, e.methods, profile, jobs=jobs, **e.params)
+    df["suite"] = suite_name
+    info = dict(info, status="ran", seconds=round(time.time() - t0, 1), estimate_min=round(est, 2),
+                fingerprint=None if ds is None else ds.fingerprint(), n=getattr(ds, "n", None), p=getattr(ds, "p", None),
+                dataset_meta={k: v for k, v in (ds.meta if ds else {}).items()
+                              if k in ("annotation", "null", "source", "outcome", "groups")})
+    log(f"       done in {time.time() - t0:.0f}s")
+    return df, info, False
+
+
 def run_suite(suite, profile="standard", jobs=1, out="bench_results", only=None, budget_min=None,
-              command="", save=True, log=None, public_only=False):
+              command="", save=True, log=None, public_only=False, resume=None):
+    """Run a suite.  Every finished entry is saved at once under ``<out>/<suite>/<run>/entries`` (with a
+    ``progress.log``), so a stopped run loses nothing; ``resume`` (a run directory, or ``"latest"`` for the unfinished
+    run of this suite) reuses entries whose inputs (entry, profile, core hash) are unchanged."""
     import os
+    from pathlib import Path
     log = log or (lambda *a: print(*a, flush=True))     # flushed: redirected stdout is block-buffered
     os.environ.setdefault("PYTHONWARNINGS", "ignore")           # inherited by loky workers
     profile = get_profile(profile) if isinstance(profile, str) else profile
+    core = core_hash()
+    run_dir = None
+    if save:
+        if resume:
+            run_dir = (Path(out) / suite.name / (Path(out) / suite.name / "running.txt").read_text().strip()
+                       if resume == "latest" else Path(resume))
+            log(f"[resume] {run_dir}")
+        else:
+            run_dir = start_run(out, suite.name)
     frames, infos, skipped = [], [], []
-    for e in suite.entries:
+    for idx, e in enumerate(suite.entries):
         if only and not (e.dataset in only or e.dataset.split("@")[0] in only):
             continue
-        info = dict(dataset=e.dataset, protocol=e.protocol, expect=e.expect, tier=tier_of(e.dataset),
-                    primary=None if e.primary is None else asdict(e.primary), methods=e.methods)
-        if public_only and info["tier"] != "public":
-            why = f"{e.dataset} is tier {info['tier']!r}; --public-only runs public datasets only"
-            log(f"[skip] {e.dataset} / {e.protocol}: {why}")
-            frames.append(pd.DataFrame([dict(dataset=e.dataset, protocol=e.protocol, method="*",
-                                             skipped_reason=why)]))
-            infos.append(dict(info, status="skipped", reason=why))
-            skipped.append(e.dataset)
-            continue
-        try:
-            ds = None if e.protocol == "speed" else get_dataset(e.dataset)
-        except DatasetUnavailable as ex:
-            log(f"[skip] {e.dataset} / {e.protocol}: {ex}")
-            frames.append(pd.DataFrame([dict(dataset=e.dataset, protocol=e.protocol, method="*",
-                                             skipped_reason=str(ex))]))
-            infos.append(dict(info, status="skipped", reason=str(ex)))
-            skipped.append(e.dataset)
-            continue
-        est = estimate_minutes(e, ds, profile, jobs)
-        log(f"[run ] {e.dataset} / {e.protocol}  est {est:.1f} min  "
-            f"(n={getattr(ds, 'n', '-')}, p={getattr(ds, 'p', '-')}, profile={profile.name}, jobs={jobs})")
-        if budget_min is not None and est > budget_min:
-            why = f"estimated {est:.1f} min > budget {budget_min} min"
-            log(f"[skip] {e.dataset} / {e.protocol}: {why}")
-            frames.append(pd.DataFrame([dict(dataset=e.dataset, protocol=e.protocol, method="*",
-                                             skipped_reason=why)]))
-            infos.append(dict(info, status="skipped", reason=why))
-            skipped.append(e.dataset)
-            continue
-        t0 = time.time()
-        df = PROTOCOLS[e.protocol](ds, e.methods, profile, jobs=jobs, **e.params)
-        df["suite"] = suite.name
+        key = entry_key(e, profile.name, core["core_hash"])
+        cached = load_entry(run_dir, idx, key) if (run_dir is not None and resume) else None
+        if cached is not None:
+            df, info = cached
+            log(f"[done] {e.dataset} / {e.protocol} (resumed, {info.get('seconds', '?')}s)")
+            skip = info.get("status") == "skipped"
+        else:
+            df, info, skip = _run_entry(e, suite.name, profile, jobs, budget_min, public_only, log)
+            if run_dir is not None:
+                save_entry(run_dir, idx, key, df, info)
         frames.append(df)
-        infos.append(dict(info, status="ran", seconds=round(time.time() - t0, 1), estimate_min=round(est, 2),
-                          fingerprint=None if ds is None else ds.fingerprint(),
-                          n=getattr(ds, "n", None), p=getattr(ds, "p", None),
-                          dataset_meta={k: v for k, v in (ds.meta if ds else {}).items()
-                                        if k in ("annotation", "null", "source", "outcome", "groups")}))
-        log(f"       done in {time.time() - t0:.0f}s")
+        infos.append(info)
+        if skip:
+            skipped.append(e.dataset)
     rows = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     refs = sorted({e.primary.ref for e in suite.entries if e.primary and e.primary.ref} | {"PCA", "KMeans features", "NMF"})
     valid = rows[rows.get("value").notna()] if "value" in rows else rows.iloc[0:0]
     summary = long_summary(valid, refs) if len(valid) else pd.DataFrame()
     verdicts = evaluate_verdicts(suite, summary, skipped_entries=set(skipped))
-    run_dir = None
     if save:
         man = manifest(suite, profile, jobs, infos, command)
-        run_dir = save_run(out, suite.name, rows, man, summary, verdicts)
+        finalize_run(run_dir, suite.name, rows, man, summary, verdicts)
         log(f"saved {run_dir}")
     return rows, summary, verdicts, run_dir
