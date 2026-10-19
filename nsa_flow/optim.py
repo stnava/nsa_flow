@@ -629,7 +629,12 @@ def _tlbfgsb(Y, energy_fn, grad_fn, proj, *, max_iter=2000, tol=1e-9, sigma=1e-4
                 Y0 = proj(Y)
                 mask_t = None
 
-            lo = torch.zeros(Y0.numel(), dtype=Y0.dtype, device=Y0.device) if bounded else None
+            if bounded:
+                lo = torch.zeros(Y0.numel(), dtype=Y0.dtype, device=Y0.device)
+            elif mask is not None:
+                lo = torch.full((Y0.numel(),), float("-inf"), dtype=Y0.dtype, device=Y0.device)
+            else:
+                lo = None
             hi = None
 
             def cb_native(it, f, gmap, n_grad, n_fun):

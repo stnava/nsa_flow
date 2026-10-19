@@ -416,3 +416,34 @@ def test_matrix_free_handles_p_far_larger_than_n():
     assert r["matrix_free"] is True
     assert r.Y.shape == (6000, 4)
     assert (r.Y >= 0).all() and torch.isfinite(r.Y).all()
+
+
+def test_simlr_sparseness_resolves_column_sign_gauge_for_mostly_negative_columns():
+    """A 100%-negative or 95%-negative column under nonneg=True must flip sign
+    gauge rather than be wiped to zero or inverted onto its 5% positive noise."""
+    from nsa_flow.project import simlr_sparseness
+    p = 100
+    Y = torch.zeros(p, 2, dtype=F64)
+    # Column 0: 100% negative, strongest entries in rows 0..19
+    Y[:20, 0] = -torch.linspace(2.0, 1.0, 20, dtype=F64)
+    Y[20:, 0] = -0.1
+    # Column 1: 95% negative (strong signal in rows 20..39) + 5% small positive noise in rows 95..99
+    Y[20:40, 1] = -torch.linspace(2.0, 1.0, 20, dtype=F64)
+    Y[:20, 1] = -0.1
+    Y[40:95, 1] = -0.1
+    Y[95:, 1] = 0.05
+
+    # In nonneg=True mode at q=0.8 (keep top 20 entries per column):
+    out_nonneg = simlr_sparseness(Y, sparseness=0.8, nonneg=True, alg="hard")
+    assert (out_nonneg >= 0).all()
+    assert int((out_nonneg[:20, 0] > 0).sum()) == 20
+    assert int((out_nonneg[20:, 0] > 0).sum()) == 0
+    assert int((out_nonneg[20:40, 1] > 0).sum()) == 20
+    assert int((out_nonneg[95:, 1] > 0).sum()) == 0
+
+    # In signed mode (nonneg=False) at q=0.8: retains top 20 negative entries with negative sign
+    out_signed = simlr_sparseness(Y, sparseness=0.8, nonneg=False, alg="hard")
+    assert int((out_signed[:20, 0] < 0).sum()) == 20
+    assert int((out_signed[20:40, 1] < 0).sum()) == 20
+    assert int((out_signed[95:, 1] != 0).sum()) == 0
+

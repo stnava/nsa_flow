@@ -39,7 +39,7 @@ import torch
 from .diagnostics import default_tol, make_result, orth_terms
 from .linalg import leading_eigenvectors
 from .optim import minimise
-from .project import project_nonneg
+from .project import project_nonneg, _resolve_column_sign_gauge
 from .solve import NSAResult
 
 __all__ = ["reconstruction_fidelity", "grad_reconstruction_fidelity", "nsa_flow_data",
@@ -226,7 +226,7 @@ def relax_into_nonneg(S, c, k, w, mus=None, max_iter=600, tol=1e-10, sigma=1e-4,
         # 0.02.  Do not trim it for speed.
         mus = [0.0] + [10.0 ** e for e in range(-3, 5)]
 
-    V = ops.leading(k)                          # signed, NOT abs: the mu=0 optimum
+    V = _resolve_column_sign_gauge(ops.leading(k))  # signed, oriented so dominant L2 mass is >= 0
 
     def make(mu):
         def obj(Vv):
@@ -254,7 +254,8 @@ def relax_into_nonneg(S, c, k, w, mus=None, max_iter=600, tol=1e-10, sigma=1e-4,
 
 def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="D", max_iter=None,
                   tol=None, sigma=1e-4, dtype=None, device=None, verbose=False,
-                  keep_trace=False, matrix_free=None, optimizer=None):
+                  keep_trace=False, matrix_free=None, optimizer=None,
+                  sparseness=None):
     """Fit a non-negative, near-orthonormal basis ``V`` reconstructing ``X``.
 
     Parameters
@@ -338,9 +339,9 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="D", max_iter=None,
             raise ValueError("give k when init is a strategy name")
         E = ops.leading(k)
         if init in ("clamp", "auto"):
-            # Project top-k PCA eigenvectors onto non-neg orthant.  Fast and
-            # lands in the same basin as "relax" for the reconstruction objective.
-            V = E.clamp_min(0.0).clone()
+            # Resolve per-column sign gauge by dominant L2 mass before projecting
+            # top-k PCA eigenvectors onto the non-negative orthant.
+            V = _resolve_column_sign_gauge(E).clamp_min(0.0).clone()
         elif init == "relax":
             # Homotopy path -- retained for backward compat and nsa_flow (anchored).
             V = relax_into_nonneg(ops, c, k, float(w), trS=trS)
@@ -420,16 +421,42 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="D", max_iter=None,
                    verbose=verbose, trace=trace, caller="nsa_flow_data", w=w,
                    problem_spec=problem_spec)
     V = rep.Y
+    iters, stop, gmap = rep.iters, rep.stop, rep.grad_map
+    n_grad, n_energy = rep.n_grad, rep.n_energy
+    seconds = rep.seconds
+
+    if sparseness is not None and float(sparseness) > 0.0:
+        from .project import simlr_sparseness
+        import warnings
+        Vs = simlr_sparseness(V, float(sparseness), nonneg=True, alg="soft",
+                              only_if_denser=True)
+        if not torch.equal(Vs, V):
+            mask = (Vs != 0).to(V.dtype)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                rep_sp = minimise(
+                    Vs, _energy, _grad_and_energy, project_nonneg,
+                    optimizer=optimizer, max_iter=max_iter, tol=tol,
+                    sigma=sigma, mask=mask, verbose=False, trace=None,
+                    caller="nsa_flow_data (sparse-support)", w=w,
+                    problem_spec=problem_spec)
+            V = rep_sp.Y * mask
+            iters += rep_sp.iters
+            n_grad += rep_sp.n_grad
+            n_energy += rep_sp.n_energy
+            seconds += rep_sp.seconds
+            stop, gmap = rep_sp.stop, rep_sp.grad_map
+
     E_final, F_final, D_final = energy_of(V)
 
     return make_result(
         NSAResult, Y=V, w=w, orth=orth, mode="data", optimizer=rep["optimizer"],
         energy=float(E_final), fidelity=float(F_final), defect=float(D_final),
-        iters=rep.iters, stop=rep.stop, grad_map=rep.grad_map, tol=tol,
-        seconds=rep.seconds,
+        iters=iters, stop=stop, grad_map=gmap, tol=tol,
+        seconds=seconds,
         energy_start=rep["energy_start"],
         grad_map_start=rep["grad_map_start"],
         target=None, matrix_free=bool(matrix_free), nonneg=True, align=False,
-        n_grad=rep.n_grad, n_energy=rep.n_energy, scale_ratio=float("nan"),
+        n_grad=n_grad, n_energy=n_energy, scale_ratio=float("nan"),
         w_schedule=[float(w)], trace=trace,
     )

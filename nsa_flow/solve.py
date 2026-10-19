@@ -38,7 +38,7 @@ from .diagnostics import default_tol, make_result, orth_terms
 from .energy import (energy, stiefel_defect_normalised, grad_stiefel_defect,
                      value_and_grad, aligned_target)
 from .optim import minimise, optimizer_names
-from .project import project_nonneg
+from .project import project_nonneg, simlr_sparseness
 from .subspace import (SubspaceAnchor, negative_mass, subspace_fidelity,
                        grad_subspace_fidelity)
 
@@ -159,7 +159,8 @@ def _subspace_vg(anchor, inv_k):
 def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, tol=None,
                       continuation=0, w_start=0.0, sigma=1e-4, dtype=None, device=None,
                       verbose=False, keep_trace=False, compile=False, align=False,
-                      fidelity="auto", neg_mass_tol=0.01, orth="D", optimizer=None):
+                      fidelity="auto", neg_mass_tol=0.01, orth="D", optimizer=None,
+                      sparseness=None):
     """Fit a non-negative, near-orthogonal ``Y`` close to ``target``.
 
     Parameters
@@ -251,6 +252,10 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
         ``1e-4`` in float32 -- because a fixed ``1e-9`` is below float32 machine
         epsilon (``1.2e-7``) and so can never be met, which would silently turn
         every single-precision call into a ``max_iter`` run.
+    sparseness : float in (0, 1), optional
+        Column-wise quantile sparseness target (default ``None``). When given,
+        selects the top ``(1 - sparseness)`` support per column after the main
+        solve and re-optimises ``E_w(Y)`` restricted to that fixed support.
 
     Notes
     -----
@@ -401,6 +406,45 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
         n_grad += rep.n_grad
         n_energy += rep.n_energy
 
+    if sparseness is not None and float(sparseness) > 0.0:
+        q_val = float(sparseness)
+        Ys = simlr_sparseness(Y, q_val, nonneg=bool(nonneg), alg="soft",
+                              only_if_denser=True)
+        if not torch.equal(Ys, Y):
+            mask = (Ys != 0).to(Y.dtype)
+            wi_last = ws[-1]
+
+            def _anc_energy_sp(Yc, _w=wi_last):
+                return float(vg(Yc, X0, _w, denom, inv_k, eye_k, align)[0])
+
+            def _anc_grad_and_energy_sp(Yc, _w=wi_last):
+                E_v, _, _, g_v = vg(Yc, X0, _w, denom, inv_k, eye_k, align)
+                return float(E_v), g_v
+
+            problem_spec_sp = {
+                "mode": "anchored",
+                "target": X0,
+                "denom": float(denom),
+                "w": float(wi_last),
+                "orth": orth,
+                "fidelity": fidelity,
+                "chol": (anchor.chol if fidelity == "subspace" else None),
+                "align": align,
+            }
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                rep_sp = minimise(
+                    Ys, _anc_energy_sp, _anc_grad_and_energy_sp, proj,
+                    optimizer=optimizer, max_iter=max_iter, tol=tol,
+                    sigma=sigma, mask=mask, verbose=False, trace=None,
+                    caller="nsa_flow (anchored, sparse-support)", w=wi_last,
+                    problem_spec=problem_spec_sp)
+            Y = rep_sp.Y * mask
+            stop, gmap = rep_sp.stop, rep_sp.grad_map
+            total_iters += rep_sp.iters
+            n_grad += rep_sp.n_grad
+            n_energy += rep_sp.n_energy
+
     if fidelity == "subspace":
         # both terms are degree-0 homogeneous, so the scale is a free gauge;
         # fix it at the target's scale rather than leaving it arbitrary
@@ -431,7 +475,7 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
 
 def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=None,
              consolidate=False, optimizer=None, init=None, max_iter=None,
-             tol=None, fidelity="auto", **kwargs):
+             tol=None, fidelity="auto", sparseness=None, **kwargs):
     """Unified high-level entry point for NSA-Flow representation learning.
 
     Automatically inspects input structure, data sign distribution, and task
@@ -481,6 +525,8 @@ def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=None,
         > ``neg_mass_tol``, which is right for one-shot basis recovery from PCA
         loadings and wrong for a prox.  Explicit here, not in ``**kwargs``,
         because downstream code detects the capability by signature.
+    sparseness : float in (0, 1), optional
+        Column-wise quantile sparseness target (default ``None``).
     **kwargs :
         Additional arguments forwarded to the selected solver.
 
@@ -525,20 +571,22 @@ def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=None,
         from .reconstruct import nsa_flow_data
         init_strat = "clamp" if init in (None, "auto") else init
         return nsa_flow_data(X, k=k, w=w, init=init_strat, max_iter=iter_cap,
-                             tol=tol, optimizer=optimizer, **kwargs)
+                             tol=tol, optimizer=optimizer, sparseness=sparseness,
+                             **kwargs)
 
     if mode in ("signed", "contrast"):
         from .signed import nsa_flow_signed
         init_strat = init if init is not None else "auto"
         return nsa_flow_signed(X, k=k, w=w, init=init_strat, consolidate=consolidate,
                                max_iter=iter_cap, tol=tol, optimizer=optimizer,
-                               **kwargs)
+                               sparseness=sparseness, **kwargs)
 
     if mode in ("anchored", "target"):
         return _nsa_flow_anchored(X, w=w, nonneg=(True if nonneg is None else nonneg),
                                   init=init, fidelity=fidelity,
                                   max_iter=iter_cap, tol=tol, optimizer=optimizer,
-                                  **kwargs)
+                                  sparseness=sparseness, **kwargs)
 
     raise ValueError(
         f"Unknown mode {mode!r}; choose 'auto', 'data', 'signed' or 'anchored'")
+

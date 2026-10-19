@@ -45,7 +45,7 @@ from .energy import (
 )
 from .angle import (angle_defect, cosine_matrix, grad_angle_defect,
                     gram_offdiag_defect, grad_gram_offdiag_defect)
-from .project import project_nonneg, project_scaled_stiefel, polar_factor
+from .project import project_nonneg, project_scaled_stiefel, polar_factor, simlr_sparseness
 from .solve import nsa_flow, NSAResult
 from .reconstruct import (GramOperator, nsa_flow_data, reconstruction_fidelity,
                           grad_reconstruction_fidelity, relax_into_nonneg)
@@ -77,7 +77,7 @@ __all__ = [
     "angle_defect", "cosine_matrix", "grad_angle_defect",
     "gram_offdiag_defect", "grad_gram_offdiag_defect",
     # projections
-    "project_nonneg", "project_scaled_stiefel", "polar_factor",
+    "project_nonneg", "project_scaled_stiefel", "polar_factor", "simlr_sparseness",
     # solver
     "nsa_flow", "NSAResult",
     "nsa_flow_data", "reconstruction_fidelity", "grad_reconstruction_fidelity",

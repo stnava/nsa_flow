@@ -271,7 +271,7 @@ def _split(W):
 def nsa_flow_signed(X, k=None, w=0.5, *, init="auto", orth="Cg", lobe=1.0,
                     max_iter=None, tol=None, sigma=1e-4, dtype=None, device=None,
                     verbose=False, keep_trace=False, consolidate=False,
-                    optimizer=None):
+                    optimizer=None, sparseness=None):
     """Fit ``V = V+ - V-`` with ``[V+|V-] >= 0`` near-disjoint, reconstructing ``X``.
 
     Returns an ``NSAResult`` whose ``Y`` is the signed ``V`` of shape ``[p, k]``;
@@ -434,6 +434,29 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="auto", orth="Cg", lobe=1.0,
         n_energy += rep2.n_energy
         iters += rep2.iters
         stop, gmap = rep2.stop, rep2.grad_map
+
+    if sparseness is not None and float(sparseness) > 0.0:
+        from .project import simlr_sparseness
+        Vp_c, Vm_c = _split(W)
+        V_c = Vp_c - Vm_c
+        Vs = simlr_sparseness(V_c, float(sparseness), nonneg=False, alg="soft",
+                              only_if_denser=True)
+        if not torch.equal(Vs, V_c):
+            W_sp = torch.cat([Vs.clamp_min(0.0), (-Vs).clamp_min(0.0)], dim=-1)
+            mask_sp = (W_sp != 0).to(W.dtype)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                rep_sp = minimise(
+                    W_sp, _energy, _grad_and_energy, project_nonneg,
+                    optimizer=optimizer, max_iter=iter_cap, tol=tol,
+                    sigma=sigma, mask=mask_sp, verbose=False, trace=None,
+                    caller="nsa_flow_signed (sparse-support)", w=w,
+                    problem_spec=problem_spec)
+            W = rep_sp.Y * mask_sp
+            n_grad += rep_sp.n_grad
+            n_energy += rep_sp.n_energy
+            iters += rep_sp.iters
+            stop, gmap = rep_sp.stop, rep_sp.grad_map
 
     E_final, F_final, D_final = parts_energy(W)
     Vp, Vm = _split(W)

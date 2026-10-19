@@ -230,7 +230,7 @@ def _cauchy_point(x, g, lo, hi, H, max_breakpoints=512):
     d = -g * moving0
     fixed = t <= 0                                    # already at a bound, leaving
     bound = lo if lo is not None else hi
-    x_cp = x * moving0 + (bound * (1.0 - moving0) if bound is not None else 0.0)
+    x_cp = torch.where(t > 0, x, bound if bound is not None else torch.zeros_like(x))
 
     two_m = H.W.shape[1]
     p = H.W.transpose(0, 1) @ d if two_m else torch.zeros(0, dtype=x.dtype,
@@ -501,7 +501,7 @@ def lbfgsb_minimize(x0, fun_grad, fun=None, *, lower=0.0, upper=None, mask=None,
     if mask is not None:
         mb = mask.reshape(-1).to(torch.bool)
         if lo is None:
-            lo = torch.zeros(x.numel(), dtype=dtype, device=device)
+            lo = torch.full((x.numel(),), float("-inf"), dtype=dtype, device=device)
         lo = torch.where(mb, lo, torch.zeros_like(lo))
         hi = (torch.full_like(lo, float("inf")) if hi is None else hi)
         hi = torch.where(mb, hi, torch.zeros_like(hi))

@@ -12,12 +12,92 @@ import torch
 
 from .linalg import safe_eigh
 
-__all__ = ["project_nonneg", "project_scaled_stiefel", "polar_factor"]
+__all__ = ["project_nonneg", "project_scaled_stiefel", "polar_factor",
+           "simlr_sparseness", "_resolve_column_sign_gauge"]
 
 
 def project_nonneg(Y):
     """Euclidean projection onto ``{Y >= 0}``."""
     return Y.clamp_min(0.0)
+
+
+def _resolve_column_sign_gauge(Y):
+    """Flip any column j whose negative-part L2 norm exceeds its positive-part L2 norm."""
+    if Y.numel() == 0 or Y.ndim < 2:
+        return Y
+    pos = torch.linalg.vector_norm(Y.clamp_min(0.0), dim=0)
+    neg = torch.linalg.vector_norm((-Y).clamp_min(0.0), dim=0)
+    sign = torch.where(neg > pos, -torch.ones_like(pos), torch.ones_like(pos))
+    return Y * sign.unsqueeze(0)
+
+
+def simlr_sparseness(Y, sparseness=None, nonneg=False, alg="soft", only_if_denser=False):
+    r"""Column-wise quantile soft/hard thresholding (R ``ANTsR::simlr`` convention).
+
+    For each column ``j`` of ``Y`` (shape ``[p, k]``), retains at most the top
+    ``n_keep = max(1, round(p * (1 - sparseness)))`` entries by magnitude and
+    shrinks surviving entries by the ``(1 - sparseness)`` order-statistic
+    threshold when ``alg == 'soft'``.
+
+    When ``nonneg=True``, resolves the per-column sign gauge first (flipping any
+    column whose negative-part L2 norm exceeds its positive-part L2 norm) before
+    clamping at zero, so a predominantly negative or all-negative column is not
+    zeroed out or inverted onto noise.
+
+    When ``only_if_denser=True``, any column whose existing zero fraction is
+    already ``>= sparseness`` is left untouched so a naturally sparser non-negative
+    parts column is never degraded by redundant shrinkage.
+    """
+    if nonneg:
+        Y = _resolve_column_sign_gauge(Y).clamp_min(0.0)
+    if sparseness is None:
+        return Y
+    q = float(sparseness)
+    if q <= 0.0 or Y.numel() == 0:
+        return Y
+    q = min(q, 0.999)
+    p, k = Y.shape
+    if p <= 1 or k == 0:
+        return Y
+    n_keep = max(1, int(round(p * (1.0 - q))))
+    if n_keep >= p:
+        return Y
+
+    cols_out = []
+    use_soft = (str(alg).lower() != "hard")
+    for j in range(k):
+        col = Y[:, j]
+        mag = col.abs()
+        max_mag = float(mag.detach().max())
+        if max_mag <= 0.0:
+            cols_out.append(torch.zeros_like(col))
+            continue
+        if only_if_denser:
+            nnz_j = int((mag.detach() > 1e-12 * max_mag).sum())
+            if nnz_j <= n_keep:
+                # Zero out tiny numerical dust below 1e-12 * max_mag and keep intact
+                clean_mask = mag > 1e-12 * max_mag
+                cols_out.append(torch.where(clean_mask, col, torch.zeros_like(col)))
+                continue
+        vals, idx_sort = torch.sort(mag, descending=True)
+        thresh = vals[n_keep].detach()
+        if use_soft and float((vals[0] - thresh).detach()) > 1e-12:
+            shrunk = torch.sign(col) * torch.clamp(mag - thresh, min=0.0)
+            if int((shrunk.detach().abs() > 0).sum()) > n_keep:
+                keep_mask = torch.zeros(p, dtype=torch.bool, device=Y.device)
+                keep_mask[idx_sort[:n_keep]] = True
+                shrunk = torch.where(keep_mask, shrunk, torch.zeros_like(shrunk))
+            if float(shrunk.detach().abs().max()) <= 0.0:
+                keep_mask = torch.zeros(p, dtype=torch.bool, device=Y.device)
+                keep_mask[idx_sort[:n_keep]] = True
+                cols_out.append(torch.where(keep_mask, col, torch.zeros_like(col)))
+            else:
+                cols_out.append(shrunk)
+        else:
+            keep_mask = torch.zeros(p, dtype=torch.bool, device=Y.device)
+            keep_mask[idx_sort[:n_keep]] = True
+            cols_out.append(torch.where(keep_mask, col, torch.zeros_like(col)))
+    return torch.stack(cols_out, dim=1)
 
 
 class _PolarFactor(torch.autograd.Function):

@@ -76,7 +76,7 @@ class NSAFlow(*_Base):
 
     def __init__(self, n_components=6, w=0.5, mode="auto", consolidate=False,
                  optimizer=None, init="auto", max_iter=None, tol=None,
-                 center=True, **kwargs):
+                 center=True, sparseness=None, **kwargs):
         self.center = center
         self.n_components = n_components
         self.w = w
@@ -86,6 +86,7 @@ class NSAFlow(*_Base):
         self.init = init
         self.max_iter = max_iter
         self.tol = tol
+        self.sparseness = sparseness
         self.kwargs = kwargs
         # sklearn's clone() reconstructs an estimator from get_params(), which
         # is derived from the __init__ signature and therefore cannot see
@@ -95,7 +96,7 @@ class NSAFlow(*_Base):
             setattr(self, key, val)
 
     _INIT_PARAMS = ("n_components", "w", "mode", "consolidate",
-                    "optimizer", "init", "max_iter", "tol", "center")
+                    "optimizer", "init", "max_iter", "tol", "center", "sparseness")
 
     def get_params(self, deep=True):
         """``BaseEstimator.get_params`` plus the ``**kwargs`` passthrough."""
@@ -151,6 +152,7 @@ class NSAFlow(*_Base):
             X_arr - self.mean_, k=self.n_components, w=self.w, mode=self.mode,
             consolidate=self.consolidate, optimizer=self.optimizer,
             init=self.init, max_iter=self.max_iter, tol=self.tol,
+            sparseness=self.sparseness,
             **self.kwargs
         )
         self.result_ = res
