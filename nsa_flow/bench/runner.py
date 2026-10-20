@@ -28,7 +28,7 @@ def estimate_minutes(entry, ds, profile, jobs) -> float:
         for name in entry.methods:
             m = FA_METHODS[name]
             t0 = _t.time()
-            m.fit(ds.X, k, m.default, 0)
+            m.fit(ds.X, k, m.default, 0, keys=ds.meta.get("keys"))
             fits = profile.n_outer * (3 + 3 * max(len(m.grid(profile)), 1) * profile.n_inner)
             total += (_t.time() - t0) * fits
         return total / max(jobs, 1) / 60.0

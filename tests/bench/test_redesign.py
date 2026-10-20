@@ -162,3 +162,12 @@ def test_suites_carry_the_corrected_primaries():
     assert fas and all(e.primary.method == "NSA rotation" and e.primary.ref == "PAF promax" and
                        e.primary.guards[0][:2] == ("recon_err", "lt") for e in fas)
     assert all("NSA nonneg (multistart)" in e.methods and "KMeans features (n_init=30)" in e.methods for e in mods)
+
+
+def test_cost_estimate_runs_for_every_default_fa_method():
+    """Regression: the estimator once called FA methods without item keys and crashed on the keyed variant."""
+    from nsa_flow.bench.runner import estimate_minutes
+    from nsa_flow.bench.suites import Entry, Primary
+    from nsa_flow.bench.fa.methods import DEFAULT_FA
+    e = Entry("fa_sim_n100", "factor_analysis", DEFAULT_FA, Primary("hofmann", "NSA rotation", "PAF promax", direction="lt"))
+    assert estimate_minutes(e, get_dataset("fa_sim_n100"), get_profile("smoke"), 1) >= 0.0
