@@ -151,57 +151,45 @@ print(ev.report())
 
 ### Latest standard run
 <!-- bench:standard:start -->
-# nsa_flow.bench report: standard
-profile `standard` · nsa_flow 3.3.4 (git f320b6a) · torch 2.13.0 · sklearn 1.9.0 · 2026-10-19T15:48:01
+# nsa_flow.bench report: standard-fast
+profile `fast` · nsa_flow 3.4.0 (git 8fe9639) · torch 2.13.0 · sklearn 1.9.0 · 2026-10-19T21:43:17
 
 ## Pre-registered primary contrasts
 | dataset | tier | protocol | contrast (metric, model) | estimate [95% CI] | expect | status |
 |---|---|---|---|---|---|---|
-| adni | restricted | nested_cv | NSA consolidated − PCA (r2, forest) | 0.155 [0.069, 0.242] | effect | PASS |
-| golub | public | nested_cv | NSA consolidated − PCA (balanced_accuracy, linear) | 0.049 [-0.015, 0.113] | effect | FAIL |
-| tecator | public | nested_cv | NSA consolidated − PCA (r2, forest) | -0.237 [-0.286, -0.188] | effect | WORSE |
-| planted | public | module_recovery | NSA consolidated w=0.5 − KMeans features (ari) | 0.377 [0.319, 0.436] | effect | PASS |
-| newsgroups | public | module_recovery | NSA consolidated w=0.5 − KMeans features (ari) | -0.076 [-0.153, 0.001] | effect | FAIL |
-| metabric | local | module_recovery | NSA consolidated w=0.5 − KMeans features (ari) | -0.166 [-0.208, -0.123] | effect | WORSE |
-| pbmc3k | public | module_recovery | NSA consolidated w=0.5 − KMeans features (ari) | -0.207 [-0.251, -0.164] | effect | WORSE |
-| tecator | public | module_recovery | NSA consolidated w=0.5 − KMeans features (contiguity) | -0.028 [-0.031, -0.024] | info | INFO |
-| adni@null_y | restricted | nested_cv | NSA consolidated − PCA (r2, forest) | 0.013 [-0.042, 0.069] | null | PASS |
-| noise | public | module_recovery | NSA consolidated w=0.5 (mean vs 0) (stability) | -0.002 [-0.016, 0.012] | null | PASS |
-| metabric@shuffled | local | module_recovery | NSA consolidated w=0.5 (mean vs 0) (stability) | -0.000 [-0.001, 0.000] | null | PASS |
-| bfi | public | factor_analysis | NSA.FA − PAF varimax (hofmann) | -0.097 [-0.101, -0.093] | effect | FAIL (guard) [guards: recon_err 0.148 [0.136, 0.161] FAILS; cfa_rmsea 0.000 [-0.000, 0.001] ok; cfa_cfi -0.002 [-0.007, 0.002] ok] |
-| holzinger | public | factor_analysis | NSA.FA − PAF varimax (hofmann) | -0.031 [-0.036, -0.025] | effect | FAIL (guard) [guards: recon_err 0.084 [0.044, 0.124] FAILS; cfa_rmsea 0.001 [-0.001, 0.003] ok; cfa_cfi -0.002 [-0.005, 0.002] ok] |
-| fa_sim_n100 | public | factor_analysis | NSA.FA − PAF varimax (hofmann) | -0.127 [-0.152, -0.101] | effect | FAIL (guard) [guards: recon_err 0.011 [-0.013, 0.036] FAILS; cfa_rmsea n/a; cfa_cfi n/a] |
-| fa_sim_n300 | public | factor_analysis | NSA.FA − PAF varimax (hofmann) | -0.084 [-0.090, -0.078] | effect | FAIL (guard) [guards: recon_err 0.020 [-0.009, 0.048] FAILS; cfa_rmsea n/a; cfa_cfi n/a] |
-| fa_sim_n1000 | public | factor_analysis | NSA.FA − PAF varimax (hofmann) | -0.068 [-0.070, -0.065] | effect | FAIL (guard) [guards: recon_err 0.056 [0.036, 0.077] FAILS; cfa_rmsea -0.000 [-0.000, 0.000] ok; cfa_cfi 0.000 [-0.000, 0.000] ok] |
-| fa_null | public | factor_analysis | NSA.FA (mean vs 0) (ari) | 0.030 [0.011, 0.050] | null | PASS |
-| bfi@shuffled | public | factor_analysis | NSA.FA (mean vs 0) (ari) | 0.028 [0.004, 0.051] | null | PASS |
-| nhanes | public | nested_cv | NSA nonneg − PCA (auc, forest) | 0.001 [-0.002, 0.004] | effect | FAIL |
-| nhanes@density | public | nested_cv | NSA nonneg − PCA (auc, forest) | 0.003 [-0.000, 0.007] | effect | FAIL |
-| nhanes@density | public | survival | NSA nonneg − PCA (cindex, forest) | 0.007 [0.003, 0.011] | effect | PASS |
-
-## Skipped (explicit)
-- golub / nested_cv / SparsePCA: SparsePCA skipped: p=7129 > 500 (cost; sklearn SparsePCA is ~18 s/fit at p=2000)
+| adni | restricted | nested_cv | NSA consolidated − PCA (r2, forest) | 0.132 [0.055, 0.209] | effect | PASS |
+| planted | public | module_recovery | NSA nonneg (multistart) w=0.5 − KMeans features (ari) | 0.434 [0.308, 0.560] | effect | PASS |
+| metabric | local | module_recovery | NSA nonneg (multistart) w=0.5 − KMeans features (ari) | -0.030 [-0.048, -0.011] | effect | WORSE |
+| pbmc3k | public | module_recovery | NSA nonneg (multistart) w=0.5 − KMeans features (ari) | -0.044 [-0.167, 0.080] | effect | FAIL |
+| adni@null_y | restricted | nested_cv | NSA consolidated − PCA (r2, forest) | 0.017 [-0.048, 0.082] | null | PASS |
+| noise | public | module_recovery | NSA nonneg (multistart) w=0.5 (mean vs 0) (stability) | -0.005 [-0.014, 0.003] | null | PASS |
+| bfi | public | factor_analysis | NSA rotation − PAF promax (hofmann) | -0.033 [-0.036, -0.031] | effect | PASS [guards: recon_err 0.000 [-0.000, 0.000] ok] |
+| holzinger | public | factor_analysis | NSA rotation − PAF promax (hofmann) | -0.010 [-0.013, -0.008] | effect | PASS [guards: recon_err 0.000 [-0.000, 0.000] ok] |
+| fa_sim_n100 | public | factor_analysis | NSA rotation − PAF promax (hofmann) | -0.017 [-0.039, 0.005] | effect | FAIL [guards: recon_err 0.000 [-0.000, 0.000] ok] |
+| fa_sim_n300 | public | factor_analysis | NSA rotation − PAF promax (hofmann) | -0.002 [-0.002, -0.001] | effect | PASS [guards: recon_err 0.000 [0.000, 0.000] ok] |
+| fa_sim_n1000 | public | factor_analysis | NSA rotation − PAF promax (hofmann) | -0.001 [-0.002, -0.001] | effect | PASS [guards: recon_err 0.000 [-0.000, 0.000] ok] |
+| fa_null | public | factor_analysis | NSA rotation (mean vs 0) (ari) | 0.022 [0.004, 0.040] | null | PASS |
+| bfi@shuffled | public | factor_analysis | NSA rotation (mean vs 0) (ari) | 0.034 [0.007, 0.062] | null | PASS |
+| nhanes | public | nested_cv | NSA nonneg − PCA (auc, forest) | 0.001 [-0.006, 0.009] | effect | FAIL |
+| nhanes@density | public | nested_cv | NSA nonneg − PCA (auc, forest) | 0.004 [-0.004, 0.011] | effect | FAIL |
+| nhanes@density | public | survival | NSA nonneg − PCA (cindex, forest) | -0.001 [-0.007, 0.005] | effect | FAIL |
 
 Solver health:
 
 | method | NSA fits | converged | max defect_D |
 |---|---|---|---|
-| NSA consolidated | 140 | 100% | 2.6e-11 |
-| NSA consolidated (fixed w=.5,k=5) | 140 | 100% | 1.8e-12 |
-| NSA consolidated w=0.25 | 460 | 100% | 8e-07 |
-| NSA consolidated w=0.5 | 460 | 100% | 1.2e-06 |
-| NSA nonneg | 60 | 100% | 0.00043 |
-| NSA nonneg (shuffled support) | 60 | 100% | 0.00042 |
-| NSA nonneg w=0.5 | 360 | 100% | 0.00082 |
-| NSA signed | 100 | 100% | 0.00018 |
-| NSA signed (fixed w=.5,k=5) | 100 | 100% | 5.7e-05 |
-| NSA.FA | 1860 | 100% | 0.019 |
-| NSA.FA (tuned) | 1860 | 100% | 0.092 |
-| NSA.FA post | 1360 | 100% | 0.021 |
-| NSA.FA post (tuned) | 1360 | 100% | 0.11 |
-| PAF varimax | 1855 | 88% | nan |
-| Thresholded PAF | 1360 | 100% | nan |
-| Thresholded PAF (tuned) | 1360 | 100% | nan |
+| NSA consolidated | 120 | 100% | 2.6e-11 |
+| NSA consolidated (fixed w=.5,k=5) | 80 | 100% | 1.6e-13 |
+| NSA consolidated (scores PCA-rotated) | 80 | 100% | 2.6e-11 |
+| NSA keyed non-negative | 1460 | 100% | 0.026 |
+| NSA keyed non-negative (tuned) | 1460 | 100% | 0.063 |
+| NSA nonneg | 80 | 100% | 0.0015 |
+| NSA nonneg (multistart) w=0.5 | 128 | 100% | 0.00081 |
+| NSA nonneg (scores PCA-rotated) | 40 | 100% | 0.0015 |
+| NSA nonneg (shuffled support) | 80 | 100% | 0.0011 |
+| NSA rotation | 1995 | 100% | 9.4e-13 |
+| NSA.FA shrink | 1460 | 100% | 0.019 |
+| PAF varimax | 1460 | 100% | nan |
 
 <!-- bench:standard:end -->
 
@@ -243,30 +231,29 @@ releases (+0.18 forest, from a solve at `defect_D = 0.006`) was not evidence
 either way. The effect survives with a converged solver: smaller, and now
 with an interval.
 
-**What the standard run shows** (reference run 2026-10-19 on the post-varimax-init core `115f30a`, `standard` profile with
-full-forest selection, 20 splits/draws, Golub and NHANES 10; `make bench-full`; the generated block above is the record, these
-sentences summarise it and can lag it):
-- *Prediction.* The ADNI CDRSB forest gain over tuned PCA survives nested CV of `w` and `k` (+0.155 [0.069, 0.242]; the
-  pre-merge run gave +0.147) and is not produced by selection (permuted outcome: +0.013 [−0.042, 0.069]). Golub is not
-  distinguishable from tuned PCA (+0.049 [−0.015, 0.113], linear). Tecator has a clear forest loss (−0.237 [−0.286, −0.188]).
-  NHANES (dietary → mortality, 20,000-row subsample, covariates in every model): NSA non-negative minus PCA is +0.001
-  [−0.002, 0.004] AUC on raw nutrients and +0.003 [−0.000, 0.007] per 1000 kcal, and +0.007 [0.003, 0.011] C-index
-  (survey-weighted survival); the shuffled-support control is at or below PCA on raw nutrients.
-- *Module recovery.* NSA recovers a planted partition exactly and invents nothing from noise or column-shuffled data. The signed
-  consolidated mode (the pre-specified primary) is worse than k-means on METABRIC (ARI −0.166) and PBMC3k (−0.207) and not
-  distinguishable on 20 Newsgroups (−0.076 [−0.153, 0.001]). The non-negative mode (`mode="data"`) is competitive: more stable
-  than k-means on newsgroups (0.152 vs 0.128) and PBMC3k (0.580 vs 0.482), higher pair recall on PBMC3k (0.964 vs 0.942), and
-  more stable than NMF on all three; it is worse than k-means on METABRIC stability (0.838 vs 0.886) and recall.
-- *Factor analysis.* NSA.FA (`w = 0.5`) lowers Hofmann complexity on every dataset (BFI −0.097, Holzinger −0.031, simulated
-  −0.068 to −0.127) but fails the pre-registered fit guard everywhere (reproduced-correlation error +0.15 on BFI, +0.08 on
-  Holzinger); the null controls pass.
-- *The core initialiser matters.* The library's default initialiser changed to varimax-rotated PCA (`115f30a`). On NHANES raw
-  nutrients the legacy initialiser (`init="pca_clamp"`) gives +0.0074 [0.0049, 0.0100] over PCA and the new default +0.0012
-  [−0.0020, 0.0045], same data, splits and 100-tree inner selection: the gain on raw nutrients depended on the old initialiser.
-  On module recovery the two initialisers differ by about ±0.05–0.07 ARI in both directions (`init_ab` suite).
-- *Selection fidelity.* Selecting hyper-parameters with a 25-tree forest (`--profile fast`) is 2–4× faster and attenuates small
-  effects (the legacy-init NHANES gain falls from +0.0074 to +0.0039), so use `fast` for development and `standard` for claims.
-- *Cost.* NSA is far slower than PCA (e.g. n=1500, p=1000, k=5: 4.4 s signed, 10.8 s non-negative, 0.009 s PCA).
+**What the benchmarks show.** The block above is the record: the `standard-fast` run of 2026-10-19 on core `115f30a` (profile `fast`,
+20 splits; module recovery 6 draws). Entries the redesign did not touch and that the fast suite does not run (Golub, Tecator,
+newsgroups, NHANES at 20,000 rows) are quoted from the earlier full run and are marked (full). The `standard-full` re-run with the
+redesigned module-recovery and factor-analysis entries was started but not completed for this release.
+- *Prediction.* The ADNI CDRSB forest gain over tuned PCA survives nested CV of `w` and `k` (+0.132 [0.055, 0.209]; full: +0.155)
+  and is not produced by selection (permuted outcome +0.017 [−0.048, 0.082]). **It is an axis-alignment effect**: the same NSA
+  scores PCA-rotated give −0.023 against PCA, and a linear model (rotation invariant) keeps its small gain. Tecator (full): a
+  forest loss of −0.237 [−0.286, −0.188] with 0.98-correlated band scores; rotating the scores restores PCA's 0.926. Golub (full) is
+  not distinguishable from tuned PCA (+0.049 [−0.015, 0.113], linear). NHANES (full, 20,000 rows): +0.001 raw, +0.003 per 1000 kcal,
+  survival C-index +0.007 [0.003, 0.011]; at 6,000 rows (fast) nothing is significant (power). The loss of the raw-nutrient gain
+  (+0.0074 → +0.0012) comes from the library's new varimax initialiser (A/B with 100-tree selection).
+- *Module recovery (corrected primary: non-negative mode, multistart, vs k-means with the same number of starts).* Planted
+  partition +0.434 ARI. PBMC3k −0.044 [−0.167, 0.080] (not distinguishable; pair accuracy at k = 2 × groups 1.000 vs 0.968).
+  METABRIC −0.030 [−0.048, −0.011] (ARI 0.398 vs 0.428; the oracle ceiling without background is 0.871). Signed consolidated NSA,
+  the earlier primary, is the worst method on both and is no longer the primary. Caveats: the lowest-energy start is not reliably
+  the best-ARI start; k-means with 30 starts is stronger than with 4; scaling (raw vs standardise-then-shift) is dataset dependent.
+- *Factor analysis.* The right baselines are oblique (promax, oblimin: same fit as PAF, simpler than varimax). Used as a
+  fit-preserving rotation, NSA gives simpler loadings than promax at identical fit: Hofmann complexity −0.033 [−0.036, −0.031]
+  (BFI), −0.010 (Holzinger), −0.002 to −0.017 on simulated data (not significant at n = 100). The gains are small. Keyed
+  non-negative NSA gives the simplest structure (BFI complexity 1.22, 1 cross-loading) and the best recovery on simulated data
+  (Tucker 0.989–0.994) at a fit cost (BFI reproduced-correlation error 0.38 vs 0.27). The first design, shrinking loadings,
+  is dominated by oblique rotation and is kept only as a secondary row.
+- *Cost.* NSA is far slower than PCA (n=1500, p=1000, k=5: 4.4 s signed, 10.8 s non-negative, 0.009 s PCA).
 - Group lists and marker lists are the authors' annotation; review before citing.
 
 **Public data** (`experiments/benchmark_new_public_data.py`, 5-fold; defect

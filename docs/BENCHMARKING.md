@@ -196,22 +196,26 @@ mid-run (another session, a merge) silently mixes code versions. `nsa-flow-bench
 - Workers cannot unpickle functions defined in `__main__`; protocol workers live in importable modules.
 - Worker threads: each worker uses one torch/BLAS/OpenMP thread (`runtime.limit_threads`).
 
-## Standard run (reference, 2026-10-19, post-varimax-init core 115f30a, full-forest selection; 20 splits/draws, Golub and NHANES 10)
+## Reference results (2026-10-19)
+`standard-fast`, profile `fast`, core 115f30a (module recovery 6 draws); (full) = from the earlier `standard-full` run, not re-run
+after the redesign.
 | entry | primary contrast | estimate [95% CI] | status |
 |---|---|---|---|
-| adni (restricted) | NSA consolidated − PCA, forest R² | +0.155 [0.069, 0.242] | PASS |
-| golub | NSA consolidated − PCA, linear bal. acc. | +0.049 [−0.015, 0.113] | FAIL |
-| tecator | NSA consolidated − PCA, forest R² | −0.237 [−0.286, −0.188] | WORSE |
-| planted | ARI, NSA consolidated w=0.5 − k-means | +0.377 | PASS |
-| newsgroups / metabric (local) / pbmc3k | same | −0.076 / −0.166 / −0.207 | FAIL / WORSE / WORSE |
-| adni@null_y, noise, metabric@shuffled | null controls | within tolerance | PASS ×3 |
-| bfi, holzinger, fa_sim n=100/300/1000 | NSA.FA − PAF varimax, Hofmann complexity | −0.097, −0.031, −0.127, −0.084, −0.068 | FAIL (guard): reproduced-correlation error worsens |
-| fa_null, bfi@shuffled | null controls | ARI ≈ 0.03 | PASS ×2 |
-| nhanes / nhanes@density (AUC), nhanes@density survival (C-index) | NSA nonneg − PCA, forest | +0.001 / +0.003 / +0.007 | FAIL / FAIL / PASS |
+| adni (restricted) | NSA consolidated − PCA, forest R² | +0.132 [0.055, 0.209] (full +0.155) | PASS |
+| adni, scores PCA-rotated (control) | same scores rotated − PCA | −0.023 | gain vanishes: axis effect |
+| adni@null_y | null | +0.017 [−0.048, 0.082] | PASS |
+| planted / pbmc3k / metabric (local) | ARI, NSA nonneg multistart − k-means (4 starts each) | +0.434 / −0.044 [−0.167, 0.080] / −0.030 [−0.048, −0.011] | PASS / FAIL / WORSE |
+| noise | stability, null | −0.005 | PASS |
+| bfi, holzinger, fa_sim n=100/300/1000 | NSA rotation − PAF promax, Hofmann (fit guard ok: identical fit) | −0.033, −0.010, −0.017, −0.002, −0.001 | PASS, PASS, FAIL (n=100), PASS, PASS |
+| fa_null, bfi@shuffled | null (ARI) | 0.022, 0.034 | PASS ×2 |
+| nhanes, nhanes@density (AUC), density survival (C) | NSA nonneg − PCA, forest (6,000 rows) | +0.001 / +0.004 / −0.001 | FAIL ×3 (underpowered; full at 20,000: +0.001 / +0.003 / +0.007) |
+| golub, tecator (full) | NSA consolidated − PCA | +0.049 [−0.015, 0.113] / −0.237 [−0.286, −0.188] | FAIL / WORSE |
 
 Initialiser A/B on NHANES raw (same data and splits, 100-tree selection): legacy `init="pca_clamp"` +0.0074 [0.0049, 0.0100];
-default (varimax) +0.0012 [−0.0020, 0.0045]. The non-negative mode (`mode="data"`) is competitive with k-means on module
-recovery and more stable than NMF; it is sensitive to input scaling and to the initialiser. See the README for the interpretation.
+default (varimax) +0.0012 [−0.0020, 0.0045]. Diagnostic findings behind the redesign: Tecator/ADNI forest results are
+axis-alignment effects (PCA-rotating the scores removes the ADNI gain and restores PCA on Tecator); signed consolidated NSA is not
+a clustering method; the lowest-energy NSA start is not reliably the best-ARI start; oblique rotation, not varimax, is the
+baseline for factor-analysis simplicity.
 
 ## Not yet ported
 `rapid_primary_benchmarks.py` (HTML report, diabetes, synthetic recovery), `benchmark_new_public_data.py` (Sonar,
