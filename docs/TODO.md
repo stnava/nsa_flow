@@ -1,4 +1,4 @@
-# What next — decision memo (updated 2026-10-19, v3.4.0)
+# What next — decision memo (updated 2026-10-19, v3.5.0)
 
 ## Done since the 2026-09-19 memo
 - **A. Native kernel (CPU):** fused C++ L-BFGS-B iteration shipped v3.2.0–3.3.2 (6–11×,
