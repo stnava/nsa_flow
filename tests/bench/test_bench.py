@@ -91,7 +91,7 @@ def test_nested_cv_rows_schema_and_determinism():
     b = PROTOCOLS["nested_cv"](ds, ["PCA", "NSA consolidated"], SMOKE)
     assert {"dataset", "protocol", "split", "method", "variant", "model", "metric", "value"} <= set(a.columns)
     assert set(a.columns) <= set(COLUMNS)
-    assert set(a.model) == {"linear", "forest"} and set(a.variant) == {"tuned", "fixed"}
+    assert set(a.model) == {"linear", "forest", ""} and set(a.variant) == {"tuned", "fixed", "control"}   # "" = collinearity rows
     pd.testing.assert_frame_equal(a.drop(columns="seconds"), b.drop(columns="seconds"))
     assert a[a.method.str.startswith("NSA")].cert_converged.notna().all()           # certificate recorded
 

@@ -59,7 +59,8 @@ class Dataset:
     # ---------------------------------------------------------------- preprocessing
     def prep(self, tr, te):
         """Representations of the train/test rows fitted on ``tr`` only: ``c`` (centred, optionally
-        standardised, optionally top-variance) and ``pos`` (shifted by the training minimum, clipped >= 0)."""
+        standardised, optionally top-variance), ``pos`` (raw scale shifted by the training minimum, clipped >= 0) and
+        ``cpos`` (``c`` shifted by its training minimum: standardise-then-shift)."""
         Xtr, Xte = self.X[tr], self.X[te]
         if self.top_variance and self.top_variance < self.p:
             keep = np.argsort(Xtr.var(0))[-self.top_variance:]
@@ -67,8 +68,10 @@ class Dataset:
         mu = Xtr.mean(0)
         sd = Xtr.std(0) + 1e-12 if self.standardize else 1.0
         mn = Xtr.min(0)
-        return ({"c": (Xtr - mu) / sd, "pos": np.clip(Xtr - mn, 0, None)},
-                {"c": (Xte - mu) / sd, "pos": np.clip(Xte - mn, 0, None)})
+        ctr, cte = (Xtr - mu) / sd, (Xte - mu) / sd
+        cmn = ctr.min(0)
+        return ({"c": ctr, "pos": np.clip(Xtr - mn, 0, None), "cpos": np.clip(ctr - cmn, 0, None)},
+                {"c": cte, "pos": np.clip(Xte - mn, 0, None), "cpos": np.clip(cte - cmn, 0, None)})
 
     # ---------------------------------------------------------------- derived null controls
     def derive(self, kind: str, seed: int = 0) -> "Dataset":

@@ -159,10 +159,12 @@ def tucker_congruence(L, target):
     return float(C[r, c].mean()), (r, c)
 
 
-def reproduced_correlation_error(R, L, uniqueness=None):
-    """Relative Frobenius error of the off-diagonal of R against L L' (diagonal ignored: communalities are free)."""
+def reproduced_correlation_error(R, L, phi=None):
+    """Relative Frobenius error of the off-diagonal of R against L Phi L' (Phi = identity for orthogonal factors;
+    the diagonal is ignored because communalities are free)."""
     R = np.asarray(R, float)
-    M = np.asarray(L, float) @ np.asarray(L, float).T
+    L = np.asarray(L, float)
+    M = L @ (np.eye(L.shape[1]) if phi is None else np.asarray(phi, float)) @ L.T
     off = ~np.eye(len(R), dtype=bool)
     return float(np.linalg.norm((R - M)[off]) / max(np.linalg.norm(R[off]), 1e-300))
 

@@ -45,15 +45,36 @@ class Method:
         return True, ""
 
 
-def _nsa(rep, hp, seed, ctx, mode, consolidate=False, init=None):
-    """NSA fit through the public API.  ``init`` selects a named initialiser (``None`` = the library default)."""
+def _nsa_result(rep, hp, mode, consolidate=False, init=None, pos_key="pos"):
     from nsa_flow import nsa_flow
     kw = {} if init is None else {"init": init}
     if mode == "signed":
-        r = nsa_flow(rep["c"], k=hp["k"], mode="signed", w=hp["w"], consolidate=consolidate, **kw)
-    else:
-        r = nsa_flow(rep["pos"], k=hp["k"], mode="data", w=hp["w"], **kw)
+        return nsa_flow(rep["c"], k=hp["k"], mode="signed", w=hp["w"], consolidate=consolidate, **kw)
+    return nsa_flow(rep[pos_key], k=hp["k"], mode="data", w=hp["w"], **kw)
+
+
+def _nsa(rep, hp, seed, ctx, mode, consolidate=False, init=None, pos_key="pos"):
+    """NSA fit through the public API.  ``init`` selects a named initialiser (``None`` = the library default);
+    ``pos_key`` picks the non-negative representation (``pos`` raw-scale shift, ``cpos`` standardise-then-shift)."""
+    r = _nsa_result(rep, hp, mode, consolidate, init, pos_key)
     return r.Y.detach().cpu().numpy(), {"converged": bool(r["converged"]), "defect_D": float(r["defect_D"])}
+
+
+MULTISTART_INITS = ("varimax", "pca_clamp", "nmf", "random", "relax")
+
+
+def _nsa_multistart(rep, hp, seed, ctx):
+    """Non-negative NSA from several initialisers, keeping the lowest-energy solution (hp['starts'] limits how many;
+    the first is the library default).  The objective is non-convex and the start matters (PBMC3k ARI 0.71-0.87 across
+    inits), so this is the budget-matched counterpart of k-means ``n_init``."""
+    import torch
+    best = None
+    for i, init in enumerate(MULTISTART_INITS[: int(hp.get("starts", len(MULTISTART_INITS)))]):
+        torch.manual_seed(seed * 100 + i)
+        r = _nsa_result(rep, hp, "data", init=init)
+        if best is None or float(r["energy"]) < float(best["energy"]):
+            best = r
+    return best.Y.detach().cpu().numpy(), {"converged": bool(best["converged"]), "defect_D": float(best["defect_D"])}
 
 
 def _pca(rep, hp, seed, ctx):
@@ -88,7 +109,7 @@ def _kmeans(rep, hp, seed, ctx):
     W = rep["c"].T
     if ctx.get("spherical"):
         W = W / (np.linalg.norm(W, axis=1, keepdims=True) + 1e-12)
-    lab = KMeans(hp["k"], n_init=3, random_state=seed).fit_predict(W)
+    lab = KMeans(hp["k"], n_init=int(hp.get("n_init", 5)), random_state=seed).fit_predict(W)
     V = np.zeros((rep["c"].shape[1], hp["k"]))
     V[np.arange(V.shape[0]), lab] = 1.0 / np.sqrt(np.bincount(lab, minlength=hp["k"]))[lab]
     return V, {}
@@ -139,7 +160,15 @@ def _register():
     reg("SparsePCA", Method("SparsePCA", _sparse_pca, "c", _simple_grids(alpha=[1.0, 4.0]), [{"alpha": 1.0}],
                             max_p=500, note="sklearn SparsePCA is ~18 s/fit at p=2000"))
     reg("NMF", Method("NMF", _nmf, "pos", _simple_grids()))
-    reg("KMeans features", Method("KMeans features", _kmeans, "c", _simple_grids()))
+    reg("KMeans features", Method("KMeans features", _kmeans, "c", _simple_grids(),
+                                  note="n_init=5, matched to the 5 starts of NSA nonneg (multistart)"))
+    reg("KMeans features (n_init=30)", Method("KMeans features (n_init=30)", lambda r, hp, s, c: _kmeans(r, {**hp, "n_init": 30}, s, c),
+                                              "c", _simple_grids(), note="strong restart budget"))
+    reg("NSA nonneg (multistart)", Method("NSA nonneg (multistart)", _nsa_multistart, "pos", _nsa_grids(), [{"w": 0.5}],
+                                          family="nsa", note="lowest energy of 5 initialisers"))
+    reg("NSA nonneg (standardised)", Method("NSA nonneg (standardised)", lambda *a: _nsa(*a, "data", False, None, "cpos"),
+                                            "cpos", _nsa_grids(), [{"w": 0.5}], family="nsa",
+                                            note="standardise-then-shift input"))
     one = {"smoke": [{"k": 0}], "quick": [{"k": 0}], "standard": [{"k": 0}]}
     reg("Ceiling (all features)", Method("Ceiling (all features)", _ceiling, "c", one, family="control",
                                           note="V = I; upper reference for any reduction"))
@@ -152,4 +181,5 @@ _register()
 
 DEFAULT_PREDICT = ["PCA", "NSA signed", "NSA consolidated", "Thresholded PCA", "SparsePCA", "NMF",
                    "KMeans features"]
-DEFAULT_MODULES = ["NSA consolidated", "NSA nonneg", "KMeans features", "NMF", "PCA"]
+DEFAULT_MODULES = ["NSA nonneg (multistart)", "NSA nonneg", "NSA nonneg (standardised)", "NSA consolidated",
+                   "KMeans features", "KMeans features (n_init=30)", "NMF", "PCA"]

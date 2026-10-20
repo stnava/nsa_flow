@@ -13,8 +13,8 @@ from nsa_flow.bench import protocols, suites  # noqa: F401,E402
 from nsa_flow.bench.datasets import DatasetUnavailable, get_dataset  # noqa: E402
 from nsa_flow.bench.datasets.psychometric import simulate_factor_model  # noqa: E402
 from nsa_flow.bench.fa.cfa import fit_cfa  # noqa: E402
-from nsa_flow.bench.fa.nsa_fa import nsa_fa, nsa_fa_post  # noqa: E402
-from nsa_flow.bench.fa.paf import corr, paf, paf_varimax, varimax  # noqa: E402
+from nsa_flow.bench.fa.nsa_fa import nsa_fa, nsa_fa_post, nsa_rotation  # noqa: E402
+from nsa_flow.bench.fa.paf import corr, oblimin, paf, paf_varimax, promax, varimax  # noqa: E402
 from nsa_flow.bench.metrics import (cross_loadings, hofmann_complexity, orthogonality_defect,  # noqa: E402
                                     reproduced_correlation_error, tucker_congruence)
 from nsa_flow.bench.registry import PROTOCOLS  # noqa: E402
@@ -115,12 +115,12 @@ def test_fa_protocol_schema_no_leakage_and_nulls(monkeypatch):
     seen = []
     m = fam.FA_METHODS["PAF varimax"]
     orig = m.fit
-    monkeypatch.setattr(m, "fit", lambda X, k, hp, seed: (seen.append(X.copy()), orig(X, k, hp, seed))[1])
+    monkeypatch.setattr(m, "fit", lambda X, k, hp, seed, keys=None: (seen.append(X.copy()), orig(X, k, hp, seed, keys))[1])
     P = get_profile("smoke")
-    df = PROTOCOLS["factor_analysis"](ds, ["PAF varimax", "NSA.FA"], P, n_outer=2)
+    df = PROTOCOLS["factor_analysis"](ds, ["PAF varimax", "NSA rotation"], P, n_outer=2)
     assert {"hofmann", "ari", "tucker", "recon_err", "score_validity", "stability_ari"} <= set(df.metric)
     assert "cfa_rmsea" not in set(df.metric)               # test split (60) < 5 respondents per item (25): CFA skipped
-    big = PROTOCOLS["factor_analysis"](get_dataset("fa_sim_n1000"), ["PAF varimax"], P, n_outer=1)
+    big = PROTOCOLS["factor_analysis"](get_dataset("fa_sim_n1000"), ["PAF promax"], P, n_outer=1)
     assert {"cfa_rmsea", "cfa_cfi", "cfa_tli", "cfa_srmr", "cfa_bic"} <= set(big.metric)
     assert set(df.protocol) == {"factor_analysis"} and df.value.notna().all()
     from sklearn.model_selection import train_test_split
@@ -128,7 +128,7 @@ def test_fa_protocol_schema_no_leakage_and_nulls(monkeypatch):
     train_rows = {tuple(r) for r in ds.X[tr]}
     first = seen[:3]                                     # fit on train, then the two stability halves
     assert all({tuple(r) for r in X} <= train_rows for X in first)
-    null = PROTOCOLS["factor_analysis"](get_dataset("fa_null"), ["NSA.FA"], get_profile("quick"), n_outer=4)
+    null = PROTOCOLS["factor_analysis"](get_dataset("fa_null"), ["NSA rotation"], get_profile("quick"), n_outer=4)
     assert abs(null[null.metric == "ari"].value.mean()) < 0.2                            # no structure, no recovery
 
 
@@ -155,6 +155,6 @@ def test_evaluate_fa_standalone_and_suite_registered():
     from nsa_flow.bench import api
     from nsa_flow.bench.registry import SUITES
     X, L, groups = simulate_factor_model(400, seed=5)
-    ev = api.evaluate_fa(X, 5, groups=groups, true_loadings=L, methods=["PAF varimax", "NSA.FA"], profile="smoke")
-    assert "tucker" in set(ev.rows.metric) and "NSA.FA" in ev.report()
+    ev = api.evaluate_fa(X, 5, groups=groups, true_loadings=L, methods=["PAF promax", "NSA rotation"], profile="smoke")
+    assert "tucker" in set(ev.rows.metric) and "NSA rotation" in ev.report()
     assert {"fa"} <= set(SUITES) and any(e.protocol == "factor_analysis" for e in SUITES["standard"].entries)

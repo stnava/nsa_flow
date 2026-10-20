@@ -6,6 +6,9 @@ labels.  Over random sample draws (``Profile.n_outer`` of them), per method and 
   stability    split-half ARI of assignments over all fitted features, same k
   recall2k     k = 2 x groups: fraction of same-group pairs placed together
   separation2k k = 2 x groups: fraction of different-group pairs placed apart
+  pba_x{m}     pair balanced accuracy (recall + separation) / 2 at k = m x groups, m in ``k_factors`` (default 1, 2, 4, 8);
+               fairer than ARI when unlabelled background must also be partitioned.  Multistart NSA is used at m <= 2 only
+  Ceiling      an oracle row: k-means on the labelled features alone (no background), k = groups
   contiguity   ordered features only: fraction of adjacent features in the same module
 Datasets without ``groups`` (Tecator) get stability and contiguity at ``k = 5``.
 """
@@ -27,7 +30,7 @@ def variants(method):
     return [((f"{method.name} w={c['w']}" if "w" in c else method.name), c) for c in method.module_cells]
 
 
-def _draw(ds, r, n_samples, method_names, primary_only=False):
+def _draw(ds, r, n_samples, method_names, primary_only=False, k_factors=(1, 2, 4, 8)):
     from sklearn.metrics import adjusted_rand_score as ari_score
     limit_threads(1)
     rng = np.random.default_rng(r)
@@ -52,22 +55,41 @@ def _draw(ds, r, n_samples, method_names, primary_only=False):
             vals = {"stability": ari_score(dominant_assignment(va), dominant_assignment(vb))}
             if labelled is not None:
                 vals["ari"] = ari_score(ds.groups[labelled], lab[labelled])
-                lab2 = dominant_assignment(m.fit(rep, {**cell, "k": 2 * k}, 0, ctx)[0])
-                vals["recall2k"], vals["separation2k"] = pair_scores(lab2[labelled], ds.groups[labelled])
+                for mult in k_factors:
+                    if mult == 1:
+                        lab_m = lab
+                    else:
+                        hp_m = {**cell, "k": mult * k, **({"starts": 1} if mult > 2 else {})}
+                        lab_m = dominant_assignment(m.fit(rep, hp_m, 0, ctx)[0])
+                    rec, sep = pair_scores(lab_m[labelled], ds.groups[labelled])
+                    vals[f"pba_x{mult}"] = (rec + sep) / 2
+                    if mult == 2:
+                        vals["recall2k"], vals["separation2k"] = rec, sep
             if ds.ordered:
                 vals["contiguity"] = contiguity(V)
             rows += [dict(base, metric=mt, value=float(v)) for mt, v in vals.items()]
+    if labelled is not None:                                      # oracle ceiling: no background to cluster through
+        from sklearn.cluster import KMeans
+        lab_c = KMeans(k, n_init=10, random_state=r).fit_predict(rep["c"][:, labelled].T)
+        full = -np.ones(ds.p, int)
+        full[labelled] = lab_c
+        rec, sep = pair_scores(full[labelled], ds.groups[labelled])
+        base = dict(dataset=ds.name, protocol="module_recovery", split=r, method="Ceiling (k-means on labelled only)",
+                    variant="draw", model="", cert_converged=None, cert_defect=None)
+        rows += [dict(base, metric="ari", value=float(ari_score(ds.groups[labelled], lab_c))),
+                 dict(base, metric="pba_x1", value=float((rec + sep) / 2))]
     return rows
 
 
 @protocol("module_recovery")
-def run(ds, method_names, profile, jobs=1, seed0=0, n_samples=None, n_outer=None, primary_only=False, **_):
+def run(ds, method_names, profile, jobs=1, seed0=0, n_samples=None, n_outer=None, primary_only=False,
+        k_factors=(1, 2, 4, 8), **_):
     use, skipped = [], []
     for name in method_names:
         ok, why = METHODS[name].applies(ds)
         (use if ok else skipped).append(name if ok else (name, why))
     n_samples = n_samples or ds.draw_n or ds.n // 2
-    items = [(ds, seed0 + r, n_samples, use, primary_only) for r in range(n_outer or profile.n_outer)]
+    items = [(ds, seed0 + r, n_samples, use, primary_only, tuple(k_factors)) for r in range(n_outer or profile.n_outer)]
     df = pd.DataFrame([r for part in parallel_map(_draw, items, jobs) for r in part])
     for name, why in skipped:
         df = pd.concat([df, pd.DataFrame([dict(dataset=ds.name, protocol="module_recovery", method=name,

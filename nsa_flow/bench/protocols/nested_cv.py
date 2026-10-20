@@ -53,12 +53,18 @@ def inner_splits(ds, tr, n_inner, seed):
         yield tr[a], tr[b]
 
 
-def score_models(ds, V, key, rep_tr, rep_te, tr, te, seed, trees):
-    """{model: score}: R^2 (regression), balanced accuracy or AUC (classification) for linear and forest."""
+def score_models(ds, V, key, rep_tr, rep_te, tr, te, seed, trees, rotate=False):
+    """{model: score}: R^2 (regression), balanced accuracy or AUC (classification) for linear and forest.
+    ``rotate=True`` is the axis control: the same scores rotated onto their principal axes (a linear model is invariant to
+    it, a forest is not), separating "better subspace" from "axis-aligned features a tree can split on"."""
     from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
     from sklearn.linear_model import LinearRegression, LogisticRegression
     from sklearn.metrics import balanced_accuracy_score, r2_score, roc_auc_score
     Ztr, Zte = rep_tr[key] @ V, rep_te[key] @ V
+    if rotate and Ztr.shape[1] > 1:                  # control: rotate the scores onto their principal axes (training rows)
+        from sklearn.decomposition import PCA
+        pc = PCA(n_components=Ztr.shape[1]).fit(Ztr)
+        Ztr, Zte = pc.transform(Ztr), pc.transform(Zte)
     Ctr = Cte = None
     if ds.covariates is not None:
         Ctr, Cte = ds.covariates[tr], ds.covariates[te]
@@ -134,11 +140,11 @@ def _outer_split_impl(ds, split, tr, te, method_names, profile, seed0):
             t0 = time.time()
             V, cert = method.fit(rep_tr, hp, seed, ctx)
             sc = score_models(ds, V, method.key, rep_tr, rep_te, tr, te, seed, profile.rf_trees)
-            cache[key] = (sc, sparsity(V), support_overlap(V), cert, time.time() - t0)
+            cache[key] = (sc, sparsity(V), support_overlap(V), cert, time.time() - t0, V)
         return cache[key]
 
     def emit(label, method, hp, inner_best, sel_s, model, variant):
-        sc, sp, ov, cert, fit_s = outer_fit(method, hp)
+        sc, sp, ov, cert, fit_s, _ = outer_fit(method, hp)
         rows.append(dict(dataset=ds.name, protocol="nested_cv", split=split, method=label, variant=variant,
                          model=model, metric=metric, value=sc[model], inner_value=inner_best,
                          hp=json.dumps(hp), sparsity=sp, overlap=ov, seconds=sel_s + fit_s,
@@ -152,6 +158,24 @@ def _outer_split_impl(ds, split, tr, te, method_names, profile, seed0):
         sel_s = time.time() - t0
         for m in MODELS:
             emit(name, method, chosen[m], inner_best[m], sel_s, m, "tuned")
+        # score collinearity of the forest-selected basis (training rows): the diagnostic behind the Tecator result
+        fit_f = outer_fit(method, chosen["forest"])
+        V, cert_f = fit_f[5], fit_f[3]
+        S = rep_tr[method.key] @ V
+        C = np.nan_to_num(np.corrcoef(S.T)) if S.shape[1] > 1 else np.zeros((1, 1))
+        rows.append(dict(dataset=ds.name, protocol="nested_cv", split=split, method=name, variant="tuned", model="",
+                         metric="score_collinearity", cert_converged=cert_f.get("converged"),
+                         cert_defect=cert_f.get("defect_D"),
+                         value=float(np.abs(C[~np.eye(len(C), dtype=bool)]).mean()) if len(C) > 1 else 0.0))
+        if method.family == "nsa" and S.shape[1] > 1:
+            for m in MODELS:                                       # axis control: same scores, PCA-rotated
+                hp = chosen[m]
+                fit_m = outer_fit(method, hp)
+                Vm, cert_m = fit_m[5], fit_m[3]
+                sc = score_models(ds, Vm, method.key, rep_tr, rep_te, tr, te, seed, profile.rf_trees, rotate=True)
+                rows.append(dict(dataset=ds.name, protocol="nested_cv", split=split, method=f"{name} (scores PCA-rotated)",
+                                 variant="control", model=m, metric=metric, value=sc[m], hp=json.dumps(hp),
+                                 cert_converged=cert_m.get("converged"), cert_defect=cert_m.get("defect_D")))
         if method.family == "nsa" and name != "NSA nonneg":
             hp = {"w": FIXED["w"], "k": fixed_k}
             for m in MODELS:

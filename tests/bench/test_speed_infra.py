@@ -69,8 +69,9 @@ def test_primary_only_module_variants():
     P = get_profile("smoke")
     full = PROTOCOLS["module_recovery"](ds, ["NSA consolidated"], P)
     one = PROTOCOLS["module_recovery"](ds, ["NSA consolidated"], P, primary_only=True)
-    assert set(full.method) == {"NSA consolidated w=0.5", "NSA consolidated w=0.25"}
-    assert set(one.method) == {"NSA consolidated w=0.5"}
+    real = lambda df: {m for m in df.method if not m.startswith("Ceiling")}
+    assert real(full) == {"NSA consolidated w=0.5", "NSA consolidated w=0.25"}
+    assert real(one) == {"NSA consolidated w=0.5"}
 
 
 def test_standard_fast_is_a_cheaper_subset_with_the_same_primaries():

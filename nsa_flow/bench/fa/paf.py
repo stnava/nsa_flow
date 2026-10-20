@@ -20,10 +20,19 @@ class FAResult:
     iterations: int = 0
     converged: bool = True
     cert: dict = field(default_factory=dict)
+    phi: np.ndarray | None = None         # factor correlations (None = orthogonal factors, identity)
 
     @property
     def uniqueness(self):
         return 1.0 - self.communality
+
+    @property
+    def factor_corr(self):
+        return np.eye(self.loadings.shape[1]) if self.phi is None else self.phi
+
+    def implied(self):
+        """Model-implied correlation L Phi L' (diagonal = communalities)."""
+        return self.loadings @ self.factor_corr @ self.loadings.T
 
 
 def corr(X):
@@ -126,3 +135,70 @@ def threshold_loadings(L, tau):
     """Hard simple structure: zero every loading with |lambda| < tau."""
     out = np.where(np.abs(L) >= tau, L, 0.0)
     return out
+
+
+def _result(L, phi, base: FAResult | None = None, cert=None) -> FAResult:
+    phi = None if phi is None else np.asarray(phi, float)
+    Lm = np.asarray(L, float)
+    comm = np.einsum("ik,kl,il->i", Lm, np.eye(Lm.shape[1]) if phi is None else phi, Lm)
+    return FAResult(Lm, comm, 0 if base is None else base.iterations, True if base is None else base.converged,
+                    {} if cert is None else cert, phi)
+
+
+def promax(L, m=4):
+    """``stats::promax``/``psych::Promax``: varimax, then a power target; returns (pattern loadings, factor correlations)."""
+    xx, rot = varimax(L)
+    Q = xx * np.abs(xx) ** (m - 1)
+    U = np.linalg.lstsq(xx, Q, rcond=None)[0]
+    U = U * np.sqrt(np.diag(np.linalg.inv(U.T @ U)))
+    Uf = rot @ U
+    ui = np.linalg.inv(Uf)
+    return np.asarray(L, float) @ Uf, ui @ ui.T
+
+
+def oblimin(A, gam=0.0, maxit=1000, eps=1e-5):
+    """Oblique oblimin rotation by gradient projection (Bernaards & Jennrich); ``gam = 0`` is quartimin.
+    Returns (pattern loadings, factor correlations)."""
+    A = np.asarray(A, float)
+    p, k = A.shape
+    T = np.eye(k)
+
+    def vgq(L):
+        X = (L ** 2) @ (1 - np.eye(k))
+        if gam:
+            X = (np.eye(p) - gam / p) @ X
+        return (L ** 2 * X).sum() / 4, L * X
+
+    L = A @ np.linalg.inv(T).T
+    f, Gq = vgq(L)
+    G = -(L.T @ Gq @ np.linalg.inv(T)).T
+    al = 1.0
+    for _ in range(maxit):
+        Gp = G - T @ np.diag((T * G).sum(0))
+        s = np.sqrt((Gp ** 2).sum())
+        if s < eps:
+            break
+        al *= 2
+        for _ in range(11):
+            X = T - al * Gp
+            Tt = X / np.sqrt((X ** 2).sum(0))
+            L = A @ np.linalg.inv(Tt).T
+            ft, Gq = vgq(L)
+            if ft < f - 0.5 * s ** 2 * al:
+                break
+            al /= 2
+        T, f = Tt, ft
+        G = -(L.T @ Gq @ np.linalg.inv(T)).T
+    return A @ np.linalg.inv(T).T, T.T @ T
+
+
+def paf_promax(R, k, **kw) -> FAResult:
+    base = paf(R, k, **kw)
+    L, phi = promax(base.loadings)
+    return _result(L, phi, base)
+
+
+def paf_oblimin(R, k, **kw) -> FAResult:
+    base = paf(R, k, **kw)
+    L, phi = oblimin(base.loadings)
+    return _result(L, phi, base)

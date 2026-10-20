@@ -6,10 +6,11 @@ pre-registered default (``w = 0.5`` for NSA.FA) and, if it has a grid, a ``tuned
 chosen by inner CV on the training rows with an unsupervised criterion (held-out reproduced-correlation error).
 
 Metrics (per split, per method):
-  hofmann, cross_loadings, sparsity, ortho_defect    interpretability of the loadings
+  hofmann, cross_loadings, sparsity, ortho_defect    interpretability of the (pattern) loadings
+  factor_corr                                        mean |off-diagonal| factor correlation (0 for orthogonal methods)
   ari, tucker                                        recovery of the known item->scale map / true loadings
-  recon_err, heywood                                 test off-diagonal reproduced-correlation error; items with
-                                                     communality > 1
+  recon_err, heywood                                 test off-diagonal reproduced-correlation error of L Phi L'; items
+                                                     with model-implied communality > 1
   cfa_rmsea, cfa_cfi, cfa_tli, cfa_srmr, cfa_bic     ML-CFA of the method's own simple structure on the test covariance
                                                      (only when the test split has >= 5 respondents per item; it is
                                                      identical across methods whenever their assignments agree)
@@ -46,6 +47,10 @@ def _splits(n, n_splits, seed0=0):
         yield s, tr, te
 
 
+def _keys(ds):
+    return ds.meta.get("keys")
+
+
 def select_hp(ds, method, tr, seed, profile, k):
     """Inner CV over the training rows; criterion = held-out reproduced-correlation error."""
     from sklearn.model_selection import KFold
@@ -57,8 +62,8 @@ def select_hp(ds, method, tr, seed, profile, k):
     for hp in grid:
         e = []
         for a, b in folds:
-            res = method.fit(ds.X[tr[a]], k, hp, seed)
-            e.append(reproduced_correlation_error(corr(ds.X[tr[b]]), res.loadings))
+            res = method.fit(ds.X[tr[a]], k, hp, seed, keys=_keys(ds))
+            e.append(reproduced_correlation_error(corr(ds.X[tr[b]]), res.loadings, res.phi))
         errs.append(np.mean(e))
     best = int(np.argmin(errs))
     return grid[best], float(errs[best])
@@ -71,12 +76,13 @@ def _scale_totals(ds, Z):
     return np.column_stack([(Z[:, groups == g] * keys[groups == g]).sum(1) for g in sorted(set(groups[groups >= 0]))])
 
 
-def _score_validity(ds, L, tr, te):
+def _score_validity(ds, L, phi, tr, te):
     from scipy.optimize import linear_sum_assignment
     mu, sd = ds.X[tr].mean(0), ds.X[tr].std(0, ddof=1) + 1e-12
     Zte = (ds.X[te] - mu) / sd
     R = corr(ds.X[tr])
-    F = Zte @ np.linalg.solve(R + 1e-8 * np.eye(len(R)), L)               # regression (Thurstone) scores
+    P = np.eye(L.shape[1]) if phi is None else phi
+    F = Zte @ np.linalg.solve(R + 1e-8 * np.eye(len(R)), L @ P)           # regression (Thurstone) scores W = R^-1 L Phi
     T = _scale_totals(ds, Zte)
     C = np.abs(np.corrcoef(F.T, T.T)[: F.shape[1], F.shape[1]:])
     r, c = linear_sum_assignment(-C)
@@ -100,12 +106,14 @@ def _evaluate(ds, res, tr, te, k, seed, method, hp):
     Rte = corr(ds.X[te])
     vals = {"hofmann": float(hofmann_complexity(L).mean()), "cross_loadings": float(cross_loadings(L)),
             "sparsity": float((np.abs(L) < 0.1).mean()), "ortho_defect": orthogonality_defect(L),
-            "recon_err": reproduced_correlation_error(Rte, L), "heywood": float(((L ** 2).sum(1) > 1.0).sum())}
+            "recon_err": reproduced_correlation_error(Rte, L, res.phi),
+            "heywood": float((np.diag(res.implied()) > 1.0).sum()),
+            "factor_corr": 0.0 if res.phi is None else float(np.abs(res.phi[~np.eye(len(res.phi), dtype=bool)]).mean())}
     if ds.groups is not None:
         lab = dominant_assignment(L)
         lab_idx = ds.groups >= 0
         vals["ari"] = float(adjusted_rand_score(ds.groups[lab_idx], lab[lab_idx]))
-        vals["score_validity"] = _score_validity(ds, L, tr, te)
+        vals["score_validity"] = _score_validity(ds, L, res.phi, tr, te)
     if "true_loadings" in ds.meta:
         vals["tucker"] = tucker_congruence(L, ds.meta["true_loadings"])[0]
     if len(te) >= MIN_CFA_RATIO * ds.p:       # CFA on a test covariance needs at least ~5 respondents per item
@@ -113,7 +121,8 @@ def _evaluate(ds, res, tr, te, k, seed, method, hp):
     rng = np.random.default_rng(seed)
     perm = rng.permutation(tr)
     ha, hb = perm[: len(tr) // 2], perm[len(tr) // 2:]
-    La, Lb = method.fit(ds.X[ha], k, hp, seed).loadings, method.fit(ds.X[hb], k, hp, seed).loadings
+    La = method.fit(ds.X[ha], k, hp, seed, keys=_keys(ds)).loadings
+    Lb = method.fit(ds.X[hb], k, hp, seed, keys=_keys(ds)).loadings
     vals["stability_ari"] = float(adjusted_rand_score(dominant_assignment(La), dominant_assignment(Lb)))
     vals["stability_tucker"] = tucker_congruence(La, Lb)[0]
     return vals
@@ -132,7 +141,7 @@ def _one_split(ds, split, tr, te, method_names, profile):
             variants.append(("tuned", f"{name} (tuned)", hp_t, inner))
         for variant, label, hp, inner in variants:
             t0 = time.time()
-            res = m.fit(ds.X[tr], k, hp, seed)
+            res = m.fit(ds.X[tr], k, hp, seed, keys=_keys(ds))
             vals = _evaluate(ds, res, tr, te, k, seed, m, hp)
             cert = res.cert or {}
             for metric, v in vals.items():

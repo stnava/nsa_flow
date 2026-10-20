@@ -50,7 +50,8 @@ class Suite:
 
 
 NSA = "NSA consolidated"
-FIND = "NSA consolidated w=0.5"
+FIND = "NSA consolidated w=0.5"                       # signed consolidated (kept as a secondary row)
+FIND_NN = "NSA nonneg (multistart) w=0.5"             # module-recovery primary: the non-negative data mode, 5 starts
 MOD = DEFAULT_MODULES
 
 
@@ -59,24 +60,27 @@ def _pred(ds, metric, model, expect="effect", methods=None, **params):
 
 
 def _mod(ds, expect="effect", metric="ari", ref="KMeans features", methods=None, **params):
-    return Entry(ds, "module_recovery", methods or MOD, Primary(metric, FIND, ref), expect, params)
+    """Module recovery.  Corrected primary (after a diagnostic study): the NON-NEGATIVE mode with multistart against
+    k-means with the same number of starts (``KMeans features``, n_init=5).  The earlier primary, signed consolidated NSA,
+    finds variance-ranked contrasts and is not a clustering method; it stays in the tables as a secondary row."""
+    return Entry(ds, "module_recovery", methods or MOD, Primary(metric, FIND_NN, ref), expect, params)
 
 
 def _fa(ds):
-    """Interpretability gain of NSA.FA (w=0.5) over PAF+varimax, guarded by non-inferior fit.
+    """Does NSA used as a fit-preserving ROTATION give simpler loadings than promax (the right baseline: oblique, same fit)?
 
-    The fit guard is the held-out reproduced-correlation error (+0.02 allowed).  An earlier draft guarded on CFA
-    RMSEA/CFI, which was vacuous: the CFA is fitted on each method's own dominant-item assignment, so it is
-    identical across methods whenever the assignments agree and cannot register loading shrinkage.  The CFA
-    indices are still reported, and kept as secondary guards."""
+    The fit guard is the held-out reproduced-correlation error (NSA rotation preserves the PAF fit by construction, so a
+    +0.01 allowance is generous).  Earlier drafts compared a loading-shrinking NSA.FA with varimax and guarded on CFA
+    indices; shrinking is dominated by oblique rotation and the CFA guard was vacuous (it is fitted on each method's own
+    item assignment and so is identical across methods whenever assignments agree), see docs/BENCHMARKING.md.
+    The keyed non-negative variant is reported in the tables as a simplicity/fit trade-off row, without a verdict."""
     return Entry(ds, "factor_analysis", DEFAULT_FA,
-                 Primary("hofmann", "NSA.FA", "PAF varimax", direction="lt",
-                         guards=(("recon_err", "lt", 0.02), ("cfa_rmsea", "lt", 0.01),
-                                 ("cfa_cfi", "gt", 0.02))), "effect")
+                 Primary("hofmann", "NSA rotation", "PAF promax", direction="lt",
+                         guards=(("recon_err", "lt", 0.01),)), "effect")
 
 
 def _fa_null(ds):
-    return Entry(ds, "factor_analysis", ["PAF varimax", "NSA.FA"], Primary("ari", "NSA.FA", None, tol=0.1), "null")
+    return Entry(ds, "factor_analysis", ["PAF promax", "NSA rotation"], Primary("ari", "NSA rotation", None, tol=0.1), "null")
 
 
 NHANES_METHODS = ["PCA", "NMF", "NSA nonneg", "NSA nonneg (shuffled support)", "Ceiling (all features)"]
@@ -93,13 +97,13 @@ def _nhanes(ds="nhanes"):
 
 SUITES.add("smoke", Suite("smoke", "seconds, synthetic only; guards the harness and the solver", [
     _pred("planted", "r2", "forest", "info", ["PCA", "NSA consolidated", "KMeans features"]),
-    Entry("planted", "module_recovery", ["NSA consolidated", "NSA nonneg", "KMeans features", "PCA"],
-          Primary("ari", FIND, "KMeans features"), "info"),
-    Entry("noise", "module_recovery", ["NSA consolidated", "KMeans features", "PCA"],
-          Primary("stability", FIND, None), "null"),
+    Entry("planted", "module_recovery", ["NSA nonneg (multistart)", "NSA nonneg", "KMeans features", "PCA"],
+          Primary("ari", FIND_NN, "KMeans features"), "info", dict(k_factors=(1, 2))),
+    Entry("noise", "module_recovery", ["NSA nonneg (multistart)", "KMeans features", "PCA"],
+          Primary("stability", FIND_NN, None), "null", dict(k_factors=(1,))),
     Entry("noise", "speed", ["PCA", "NSA consolidated", "NSA nonneg"]),
-    Entry("fa_sim_n300", "factor_analysis", ["PAF varimax", "NSA.FA"],
-          Primary("hofmann", "NSA.FA", "PAF varimax", direction="lt"), "info"),
+    Entry("fa_sim_n300", "factor_analysis", ["PAF promax", "NSA rotation"],
+          Primary("hofmann", "NSA rotation", "PAF promax", direction="lt"), "info"),
 ]))
 
 SUITES.add("fa", Suite("fa", "factor analysis: interpretability vs fit, recovery, stability; with null controls", [
@@ -114,16 +118,16 @@ SUITES.add("standard", Suite("standard", "reported benchmarks: prediction, modul
     _pred("tecator", "r2", "forest"),
     # module recovery against known groups (primary: ARI of pre-specified NSA consolidated w=0.5 vs k-means)
     _mod("planted"),
-    _mod("newsgroups"),
-    _mod("metabric"),
-    _mod("pbmc3k"),
-    Entry("tecator", "module_recovery", MOD, Primary("contiguity", FIND, "KMeans features"), "info"),
+    _mod("newsgroups", n_outer=10),                 # multistart NSA is expensive; 10 draws suffice for these effect sizes
+    _mod("metabric", n_outer=10),                 # multistart NSA is expensive; 10 draws suffice for these effect sizes
+    _mod("pbmc3k", n_outer=10),                 # multistart NSA is expensive; 10 draws suffice for these effect sizes
+    Entry("tecator", "module_recovery", MOD, Primary("contiguity", FIND_NN, "KMeans features"), "info"),
     # null controls: structure must not be invented; selection must not add optimism
     _pred("adni@null_y", "r2", "forest", "null", ["PCA", "NSA consolidated", "KMeans features"]),
-    Entry("noise", "module_recovery", ["NSA consolidated", "KMeans features", "PCA"],
-          Primary("stability", FIND, None), "null"),
-    Entry("metabric@shuffled", "module_recovery", ["NSA consolidated", "KMeans features", "PCA"],
-          Primary("stability", FIND, None), "null"),
+    Entry("noise", "module_recovery", ["NSA nonneg (multistart)", "KMeans features", "PCA"],
+          Primary("stability", FIND_NN, None), "null", dict(k_factors=(1,))),
+    Entry("metabric@shuffled", "module_recovery", ["NSA nonneg (multistart)", "KMeans features", "PCA"],
+          Primary("stability", FIND_NN, None), "null", dict(primary_only=True, n_outer=10, k_factors=(1,))),
     Entry("speed", "speed", ["PCA", "NSA consolidated", "NSA nonneg"]),
     _fa("bfi"), _fa("holzinger"), _fa("fa_sim_n100"), _fa("fa_sim_n300"), _fa("fa_sim_n1000"),
     _fa_null("fa_null"), _fa_null("bfi@shuffled"),
@@ -138,17 +142,18 @@ SUITES["standard-full"] = SUITES["standard"]
 # `standard`; cheaper settings: three prediction methods, primary module variant only, 10 draws on the large
 # expression sets, NHANES at 6,000 rows.  Left to standard-full: golub, tecator, newsgroups, metabric@shuffled, speed,
 # NHANES at 20,000 rows and the residual variant.
-_FAST_MODULE_METHODS = ["NSA consolidated", "NSA nonneg", "KMeans features", "NMF"]
+_FAST_MODULE_METHODS = ["NSA nonneg (multistart)", "NSA nonneg", "KMeans features", "NMF"]
+_FAST_MODULE = dict(primary_only=True, n_outer=6, k_factors=(1, 2, 4))
 _FAST_PRED_METHODS = ["PCA", "NSA consolidated", "KMeans features"]
 _FAST_NHANES = dict(max_n=6000, n_outer=10, n_inner=3)
 SUITES.add("standard-fast", Suite("standard-fast", "daily-driver subset of standard (~10 min with 5 workers)", [
     _pred("adni", "r2", "forest", methods=_FAST_PRED_METHODS),
     _mod("planted"),
-    _mod("metabric", methods=_FAST_MODULE_METHODS, primary_only=True, n_outer=10),
-    _mod("pbmc3k", methods=_FAST_MODULE_METHODS, primary_only=True, n_outer=10),
+    _mod("metabric", methods=_FAST_MODULE_METHODS, **_FAST_MODULE),
+    _mod("pbmc3k", methods=_FAST_MODULE_METHODS, **_FAST_MODULE),
     _pred("adni@null_y", "r2", "forest", "null", _FAST_PRED_METHODS),
-    Entry("noise", "module_recovery", ["NSA consolidated", "KMeans features", "PCA"],
-          Primary("stability", FIND, None), "null"),
+    Entry("noise", "module_recovery", ["NSA nonneg (multistart)", "KMeans features", "PCA"],
+          Primary("stability", FIND_NN, None), "null", dict(k_factors=(1,))),
     _fa("bfi"), _fa("holzinger"), _fa("fa_sim_n100"), _fa("fa_sim_n300"), _fa("fa_sim_n1000"),
     _fa_null("fa_null"), _fa_null("bfi@shuffled"),
     Entry("nhanes", "nested_cv", NHANES_METHODS, Primary("auc", "NSA nonneg", "PCA", "forest"), "effect",
