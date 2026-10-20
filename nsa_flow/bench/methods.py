@@ -60,13 +60,14 @@ def _nsa(rep, hp, seed, ctx, mode, consolidate=False, init=None, pos_key="pos"):
     return r.Y.detach().cpu().numpy(), {"converged": bool(r["converged"]), "defect_D": float(r["defect_D"])}
 
 
-MULTISTART_INITS = ("varimax", "pca_clamp", "nmf", "random", "relax")
+MULTISTART_INITS = ("varimax", "pca_clamp", "nmf", "random")     # "relax" is ~5x slower and never won on energy
 
 
 def _nsa_multistart(rep, hp, seed, ctx):
     """Non-negative NSA from several initialisers, keeping the lowest-energy solution (hp['starts'] limits how many;
     the first is the library default).  The objective is non-convex and the start matters (PBMC3k ARI 0.71-0.87 across
-    inits), so this is the budget-matched counterpart of k-means ``n_init``."""
+    inits), so this is the budget-matched counterpart of k-means ``n_init`` (both use 4 starts).  Caveat measured on
+    METABRIC/PBMC3k: the lowest-energy start is not reliably the best-ARI start (energies differ in the 4th digit)."""
     import torch
     best = None
     for i, init in enumerate(MULTISTART_INITS[: int(hp.get("starts", len(MULTISTART_INITS)))]):
@@ -109,7 +110,7 @@ def _kmeans(rep, hp, seed, ctx):
     W = rep["c"].T
     if ctx.get("spherical"):
         W = W / (np.linalg.norm(W, axis=1, keepdims=True) + 1e-12)
-    lab = KMeans(hp["k"], n_init=int(hp.get("n_init", 5)), random_state=seed).fit_predict(W)
+    lab = KMeans(hp["k"], n_init=int(hp.get("n_init", 4)), random_state=seed).fit_predict(W)
     V = np.zeros((rep["c"].shape[1], hp["k"]))
     V[np.arange(V.shape[0]), lab] = 1.0 / np.sqrt(np.bincount(lab, minlength=hp["k"]))[lab]
     return V, {}
@@ -161,11 +162,11 @@ def _register():
                             max_p=500, note="sklearn SparsePCA is ~18 s/fit at p=2000"))
     reg("NMF", Method("NMF", _nmf, "pos", _simple_grids()))
     reg("KMeans features", Method("KMeans features", _kmeans, "c", _simple_grids(),
-                                  note="n_init=5, matched to the 5 starts of NSA nonneg (multistart)"))
+                                  note="n_init=4, matched to the 4 starts of NSA nonneg (multistart)"))
     reg("KMeans features (n_init=30)", Method("KMeans features (n_init=30)", lambda r, hp, s, c: _kmeans(r, {**hp, "n_init": 30}, s, c),
                                               "c", _simple_grids(), note="strong restart budget"))
     reg("NSA nonneg (multistart)", Method("NSA nonneg (multistart)", _nsa_multistart, "pos", _nsa_grids(), [{"w": 0.5}],
-                                          family="nsa", note="lowest energy of 5 initialisers"))
+                                          family="nsa", note="lowest energy of 4 initialisers"))
     reg("NSA nonneg (standardised)", Method("NSA nonneg (standardised)", lambda *a: _nsa(*a, "data", False, None, "cpos"),
                                             "cpos", _nsa_grids(), [{"w": 0.5}], family="nsa",
                                             note="standardise-then-shift input"))
@@ -181,5 +182,5 @@ _register()
 
 DEFAULT_PREDICT = ["PCA", "NSA signed", "NSA consolidated", "Thresholded PCA", "SparsePCA", "NMF",
                    "KMeans features"]
-DEFAULT_MODULES = ["NSA nonneg (multistart)", "NSA nonneg", "NSA nonneg (standardised)", "NSA consolidated",
-                   "KMeans features", "KMeans features (n_init=30)", "NMF", "PCA"]
+DEFAULT_MODULES = ["NSA nonneg (multistart)", "NSA nonneg (standardised)", "NSA consolidated",
+                   "KMeans features", "KMeans features (n_init=30)", "NMF", "PCA"]   # multistart's first start IS the default nonneg fit

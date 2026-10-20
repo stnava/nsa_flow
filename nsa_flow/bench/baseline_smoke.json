@@ -1,6 +1,6 @@
 {
   "planted|nested_cv|r2|NSA consolidated": 0.113218,
   "planted|module_recovery|ari|NSA nonneg (multistart) w=0.5": 0.53477,
-  "noise|module_recovery|stability|NSA nonneg (multistart) w=0.5": -0.003666,
+  "noise|module_recovery|stability|NSA nonneg (multistart) w=0.5": -0.009746,
   "fa_sim_n300|factor_analysis|hofmann|NSA rotation": -0.000698
 }

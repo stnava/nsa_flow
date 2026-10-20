@@ -105,10 +105,21 @@ dataset is skipped with the places that were searched. ADNI reads `NSA_BENCH_ADN
 - `nested_cv`: outer splits per dataset convention (holdout, k-fold, stratified k-fold); everything (centring,
   feature selection, standardisation, basis, model) is fitted inside each training portion; selection is separate
   for each downstream model (linear / forest); regression reports R², classification balanced accuracy.
+  **Axis control:** every NSA method also gets a `(scores PCA-rotated)` row (the same scores rotated onto their principal
+  axes; a linear model is invariant to it, a forest is not) and a `score_collinearity` metric (mean |off-diagonal correlation|
+  of the training scores). They separate "better subspace" from "axis-aligned features a tree can split on": on ADNI the
+  forest gain over PCA (+0.122) disappears under the rotation (-0.009); on Tecator collinear NSA/band scores (0.98) give the same
+  forest R² as the raw wavelengths (0.69-0.72) and rotating them restores PCA's 0.926.
 - `module_recovery`: feature modules vs known groups with unlabelled background present. Per random sample draw:
-  `ari` (k = #groups, the usual primary), `stability` (split-half assignment ARI), `recall2k`/`separation2k`
-  (k = 2 × #groups pair scores), `contiguity` (ordered features). Datasets without groups get stability and
-  contiguity.
+  `ari` (k = #groups), `stability` (split-half assignment ARI), `recall2k`/`separation2k` and `pba_x{m}` (pair balanced
+  accuracy (recall + separation)/2 at k = m × #groups for m in 1, 2, 4, 8: fairer than ARI when background must also be
+  partitioned), `contiguity` (ordered features), and an oracle **ceiling** row (k-means on the labelled features alone).
+  **Primary (corrected after a diagnostic study):** the non-negative data mode with multistart (`NSA nonneg (multistart)`:
+  lowest energy of 4 initialisers, the first being the library default) against `KMeans features` with the same number of
+  starts (`n_init=4`). Signed consolidated NSA is a secondary row: it finds variance-ranked contrasts and is not a clustering
+  method (METABRIC ARI 0.23, PBMC3k 0.74, the worst of all methods). Also reported: `KMeans features (n_init=30)`,
+  `NSA nonneg (standardised)` (standardise-then-shift; the default `NSA nonneg` shifts raw-scale data), NMF, PCA.
+  Datasets without groups get stability and contiguity.
 - `factor_analysis`: repeated 80/20 splits of respondents; every method is fitted on the training rows (correlation
   built from them) with the dataset's known number of factors. Each method has a `fixed` row at its pre-registered
   default (`w = 0.5` for NSA.FA) and, if it has a grid, a `tuned` row (inner CV, criterion = held-out
@@ -124,25 +135,30 @@ dataset is skipped with the places that were searched. ADNI reads `NSA_BENCH_ADN
 - `speed`: best-of-3 fit time on seeded synthetic shapes.
 
 ## Factor analysis
-Methods (`FA_METHODS`): `PAF`, `PAF varimax` (the reference), `NSA.FA`, `NSA.FA post`, `ML varimax`, `PCA varimax`,
-`Thresholded PAF`. NSA.FA is written for this benchmark from the public `nsa_flow()` API: each PAF iteration takes the
-leading eigen-loadings of R with the current communalities on the diagonal, refines them with the signed anchored mode
-(`nsa_flow(L, w, mode="anchored", nonneg=False)`), rotates (varimax) and updates communalities with damping
-(`eta_h = 0.5`; it stops when the reproduced-correlation energy and the communalities settle, and reports the solver's own certificate). `w = 0.5` is the default and
-the pre-registered setting; `NSA.FA post` regularises once after ordinary PAF. PAF and varimax follow `psych::fa(fm="pa")`
-and `stats::varimax`; the CFA follows lavaan (`std.lv`); all three are tested against R when Rscript, psych and lavaan are
-present (`tests/bench/test_fa.py`), plus golden Holzinger-Swineford values (chi-square 85.306, df 24, CFI 0.931,
-RMSEA 0.092).
-Datasets (public): `bfi` (psych, 25 items, 5 scales, reverse keys applied only to scale totals), `holzinger`
-(lavaan, 9 tests, 3 factors), `fa_sim_n100/300/1000` (5 factors x 5 items, known loadings), `fa_null` (i.i.d. items) and
-`bfi@shuffled`. `bfi` and `holzinger` are exported once from R with `nsa-flow-bench fetch bfi --download` (no network; needs
-Rscript with psych and lavaan).
-Pre-registered primary: `NSA.FA - PAF varimax` on Hofmann complexity (lower is better) with non-inferiority guards on fit
-(`recon_err` +0.02, `cfa_rmsea` +0.01, `cfa_cfi` -0.02). The guards are listed in the verdict row; a PASS whose guard fails
-is reported `FAIL (guard)`; a guard that cannot be evaluated (CFA skipped on a small test split) is `n/a` and does not
-decide. History: an earlier draft guarded only on CFA RMSEA/CFI, which is vacuous (see above); `recon_err` was added as the
-fit guard because it measures what the guard was meant to measure. Null controls require NSA.FA's recovery ARI on
-unstructured items to be within 0.1 of zero.
+Methods (`FA_METHODS`): `PAF varimax`, **`PAF promax`** and **`PAF oblimin`** (oblique; they preserve the PAF fit exactly and are
+the right baselines for any simple-structure method; validated against R `stats::promax` / `GPArotation` when available),
+`NSA rotation`, `NSA keyed non-negative`, `NSA.FA shrink` (legacy), `ML varimax`, `PCA varimax`, `Thresholded promax`.
+Written for this benchmark from the public `nsa_flow()` API; PAF and varimax follow `psych::fa(fm="pa")` and
+`stats::varimax`, the CFA follows lavaan (`std.lv`); tests compare all of them with R when Rscript, psych, lavaan and
+GPArotation are present, plus golden Holzinger-Swineford values (chi-square 85.306, df 24, CFI 0.931, RMSEA 0.092).
+- **NSA rotation** (default `w = 0.5`) is NSA as a fit-preserving rotation: PAF, then a simple-structure basis of the SAME
+  subspace (`fidelity="subspace"`), then factor correlations by least squares. The model-implied correlation, hence the fit,
+  is PAF's by construction. In exploratory runs it did not depend on `w` (subspace fidelity leaves `w` no trade-off to make).
+- **NSA keyed non-negative**: items are reverse-keyed (`meta["keys"]`) and a non-negative anchored subspace is requested:
+  independent-cluster structure, trading some reproduced-correlation fit for simplicity (the deleted cross-loadings).
+- **NSA.FA shrink** (the first design: loadings shrunk toward orthogonal columns at every PAF iteration) is dominated by
+  oblique rotation (higher fit error, no simpler structure) and is kept only as a secondary row.
+Datasets (public): `bfi`, `holzinger`, `fa_sim_n100/300/1000` (5 factors x 5 items, factor correlation 0.2, known loadings),
+`fa_null`, `bfi@shuffled`; `bfi` and `holzinger` are exported once from R with `nsa-flow-bench fetch bfi --download`.
+Metrics per held-out split: interpretability (`hofmann`, `cross_loadings`, `sparsity`, `ortho_defect`, `factor_corr`),
+recovery (`ari`, `tucker`), fit (`recon_err` of L Phi L', `heywood`, ML-CFA `cfa_*` when the test split has at least 5
+respondents per item), `score_validity` (regression scores W = R^-1 L Phi) and `stability_*`. CFA indices are identical across
+methods whenever item assignments agree, so `recon_err` is the fit guard.
+**Pre-registered primary:** `NSA rotation - PAF promax` on Hofmann complexity (lower is better) with the guard `recon_err` +0.01
+(a fit-preserving method should not lose fit); a PASS whose guard fails is `FAIL (guard)`, a guard that cannot be evaluated is
+`n/a`. The keyed non-negative row is reported as a simplicity/fit trade-off, without a verdict. Null controls require NSA
+rotation's recovery ARI on unstructured items to be within 0.1 of zero. History: the first design compared the shrinking
+NSA.FA with varimax; an oblique baseline and a fit-preserving use of the prox were the missing pieces.
 
 ## NHANES
 `nhanes` (CDC NHANES + NCHS linked mortality, public provenance; a cleaned release is read from

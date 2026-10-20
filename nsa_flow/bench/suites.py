@@ -63,6 +63,7 @@ def _mod(ds, expect="effect", metric="ari", ref="KMeans features", methods=None,
     """Module recovery.  Corrected primary (after a diagnostic study): the NON-NEGATIVE mode with multistart against
     k-means with the same number of starts (``KMeans features``, n_init=5).  The earlier primary, signed consolidated NSA,
     finds variance-ranked contrasts and is not a clustering method; it stays in the tables as a secondary row."""
+    params = {"primary_only": True, "k_factors": (1, 2, 4), **params}      # primary variants; k grid 1, 2, 4 (cost)
     return Entry(ds, "module_recovery", methods or MOD, Primary(metric, FIND_NN, ref), expect, params)
 
 
@@ -97,7 +98,7 @@ def _nhanes(ds="nhanes"):
 
 SUITES.add("smoke", Suite("smoke", "seconds, synthetic only; guards the harness and the solver", [
     _pred("planted", "r2", "forest", "info", ["PCA", "NSA consolidated", "KMeans features"]),
-    Entry("planted", "module_recovery", ["NSA nonneg (multistart)", "NSA nonneg", "KMeans features", "PCA"],
+    Entry("planted", "module_recovery", ["NSA nonneg (multistart)", "KMeans features", "PCA"],
           Primary("ari", FIND_NN, "KMeans features"), "info", dict(k_factors=(1, 2))),
     Entry("noise", "module_recovery", ["NSA nonneg (multistart)", "KMeans features", "PCA"],
           Primary("stability", FIND_NN, None), "null", dict(k_factors=(1,))),
@@ -142,13 +143,13 @@ SUITES["standard-full"] = SUITES["standard"]
 # `standard`; cheaper settings: three prediction methods, primary module variant only, 10 draws on the large
 # expression sets, NHANES at 6,000 rows.  Left to standard-full: golub, tecator, newsgroups, metabric@shuffled, speed,
 # NHANES at 20,000 rows and the residual variant.
-_FAST_MODULE_METHODS = ["NSA nonneg (multistart)", "NSA nonneg", "KMeans features", "NMF"]
-_FAST_MODULE = dict(primary_only=True, n_outer=6, k_factors=(1, 2, 4))
+_FAST_MODULE_METHODS = ["NSA nonneg (multistart)", "KMeans features", "NMF"]
+_FAST_MODULE = dict(primary_only=True, n_outer=6, k_factors=(1, 2))
 _FAST_PRED_METHODS = ["PCA", "NSA consolidated", "KMeans features"]
 _FAST_NHANES = dict(max_n=6000, n_outer=10, n_inner=3)
 SUITES.add("standard-fast", Suite("standard-fast", "daily-driver subset of standard (~10 min with 5 workers)", [
     _pred("adni", "r2", "forest", methods=_FAST_PRED_METHODS),
-    _mod("planted"),
+    _mod("planted", methods=_FAST_MODULE_METHODS, **_FAST_MODULE),
     _mod("metabric", methods=_FAST_MODULE_METHODS, **_FAST_MODULE),
     _mod("pbmc3k", methods=_FAST_MODULE_METHODS, **_FAST_MODULE),
     _pred("adni@null_y", "r2", "forest", "null", _FAST_PRED_METHODS),

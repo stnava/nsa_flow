@@ -7,7 +7,7 @@ labels.  Over random sample draws (``Profile.n_outer`` of them), per method and 
   recall2k     k = 2 x groups: fraction of same-group pairs placed together
   separation2k k = 2 x groups: fraction of different-group pairs placed apart
   pba_x{m}     pair balanced accuracy (recall + separation) / 2 at k = m x groups, m in ``k_factors`` (default 1, 2, 4, 8);
-               fairer than ARI when unlabelled background must also be partitioned.  Multistart NSA is used at m <= 2 only
+               fairer than ARI when unlabelled background must also be partitioned.  Multistart NSA is used at m <= 2 only, and for the stability halves the default start only
   Ceiling      an oracle row: k-means on the labelled features alone (no background), k = groups
   contiguity   ordered features only: fraction of adjacent features in the same module
 Datasets without ``groups`` (Tecator) get stability and contiguity at ``k = 5``.
@@ -51,7 +51,8 @@ def _draw(ds, r, n_samples, method_names, primary_only=False, k_factors=(1, 2, 4
             lab = dominant_assignment(V)
             base = dict(dataset=ds.name, protocol="module_recovery", split=r, method=label, variant="draw",
                         model="", cert_converged=cert.get("converged"), cert_defect=cert.get("defect_D"))
-            va, vb = m.fit(rep_a, hp, 0, ctx)[0], m.fit(rep_b, hp, 0, ctx)[0]
+            hp_half = {**hp, "starts": 1}                      # stability: default start only (cost)
+            va, vb = m.fit(rep_a, hp_half, 0, ctx)[0], m.fit(rep_b, hp_half, 0, ctx)[0]
             vals = {"stability": ari_score(dominant_assignment(va), dominant_assignment(vb))}
             if labelled is not None:
                 vals["ari"] = ari_score(ds.groups[labelled], lab[labelled])

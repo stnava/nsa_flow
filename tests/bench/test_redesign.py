@@ -94,7 +94,7 @@ def test_multistart_keeps_the_lowest_energy_and_respects_starts(monkeypatch):
         pass
 
     def fake_result(rep, hp, mode, consolidate=False, init=None, pos_key="pos"):
-        energies = {"varimax": 3.0, "pca_clamp": 1.0, "nmf": 2.0, "random": 0.5, "relax": 4.0}
+        energies = {"varimax": 3.0, "pca_clamp": 1.0, "nmf": 2.0, "random": 0.5}
         calls.append(init)
         r = Fake(energy=energies[init], converged=True, defect_D=0.0)
         r.Y = torch.full((4, 2), energies[init])
@@ -117,7 +117,7 @@ def test_kmeans_restart_budgets(monkeypatch):
     rep, _ = ds.prep(np.arange(200), np.arange(200, 300))
     METHODS["KMeans features"].fit(rep, {"k": 5}, 0, {})
     METHODS["KMeans features (n_init=30)"].fit(rep, {"k": 5}, 0, {})
-    assert seen == [5, 30]
+    assert seen == [4, 30]
 
 
 def test_module_protocol_pair_accuracy_grid_and_ceiling():
