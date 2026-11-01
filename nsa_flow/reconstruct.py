@@ -432,7 +432,7 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="D", max_iter=None,
     if sparseness is not None and float(sparseness) > 0.0:
         from .project import simlr_sparseness
         import warnings
-        Vs = simlr_sparseness(V, float(sparseness), nonneg=True, alg="soft",
+        Vs = simlr_sparseness(V, float(sparseness), nonneg=True, alg="hard",
                               only_if_denser=True)
         if not torch.equal(Vs, V):
             mask = (Vs != 0).to(V.dtype)

@@ -427,7 +427,7 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
 
     if sparseness is not None and float(sparseness) > 0.0:
         q_val = float(sparseness)
-        Ys = simlr_sparseness(Y, q_val, nonneg=bool(nonneg), alg="soft",
+        Ys = simlr_sparseness(Y, q_val, nonneg=bool(nonneg), alg="hard",
                               only_if_denser=True)
         if not torch.equal(Ys, Y):
             mask = (Ys != 0).to(Y.dtype)

@@ -447,3 +447,129 @@ def test_simlr_sparseness_resolves_column_sign_gauge_for_mostly_negative_columns
     assert int((out_signed[20:40, 1] < 0).sum()) == 20
     assert int((out_signed[95:, 1] != 0).sum()) == 0
 
+
+def test_simlr_sparseness_preserves_rank_on_all_signed_2x2_hadamard_bases():
+    """All 8 orthonormal 2x2 matrices with tied magnitudes |Q_ij| = 1/sqrt(2)
+    must remain rank-2 and orthogonal under quantile sparseness."""
+    from nsa_flow.project import simlr_sparseness
+    s = 2.0 ** -0.5
+    checked = 0
+    for signs in itertools.product([-1.0, 1.0], repeat=4):
+        Q = s * torch.tensor([[signs[0], signs[1]], [signs[2], signs[3]]], dtype=F64)
+        if not torch.allclose(Q.T @ Q, torch.eye(2, dtype=F64)):
+            continue
+        checked += 1
+        for nonneg in (False, True):
+            for alg in ("soft", "hard"):
+                for oid in (False, True):
+                    Y = simlr_sparseness(Q, sparseness=0.5, nonneg=nonneg,
+                                         alg=alg, only_if_denser=oid)
+                    assert int(torch.linalg.matrix_rank(Y)) == 2, (
+                        f"rank collapsed on signs={signs}, nonneg={nonneg}, alg={alg}, oid={oid}: {Y}"
+                    )
+                    G = Y.T @ Y
+                    assert abs(float(G[0, 1])) < 1e-12
+    assert checked == 8
+
+
+def test_nsa_flow_200_draws_standardized_2x2_never_collapses_to_rank_1():
+    """Regression for the 35/200 intermittent rank-1 collapse on standardized n x 2 PCA bases."""
+    from nsa_flow import nsa_flow_signed
+    from nsa_flow.linalg import top_k_eigenvectors
+    from nsa_flow.project import simlr_sparseness
+    g = torch.Generator().manual_seed(1)
+    for draw in range(200):
+        X = torch.randn(80, 2, generator=g, dtype=F64)
+        X = (X - X.mean(0)) / X.std(0)
+        E = top_k_eigenvectors(2, X=X)
+        assert int(torch.linalg.matrix_rank(simlr_sparseness(E, 0.5, nonneg=False))) == 2, f"draw {draw}"
+        assert int(torch.linalg.matrix_rank(simlr_sparseness(E, 0.5, nonneg=True))) == 2, f"draw {draw}"
+        r_anc = nsa_flow(E, w=0.5, nonneg=False, sparseness=0.5)
+        assert int(torch.linalg.matrix_rank(r_anc.Y)) == 2, f"anchored draw {draw}"
+    # Also check nsa_flow_signed across 50 standardized draws
+    g2 = torch.Generator().manual_seed(0)
+    for draw in range(50):
+        X = torch.randn(80, 2, generator=g2, dtype=F64)
+        X = (X - X.mean(0)) / X.std(0)
+        r_sig = nsa_flow_signed(X, k=2, w=0.5, sparseness=0.5)
+        assert int(torch.linalg.matrix_rank(r_sig.Y)) == 2, f"signed draw {draw}"
+
+
+def test_simlr_sparseness_float32_near_tied_and_scale_equivariant():
+    """1-ULP float32 jitter on a Hadamard basis must not shrink column norms to eps_f32,
+    nsa_flow(..., sparseness=0.5) in float32 must not stall at a near-zero warm start,
+    and scaling Y by alpha must scale output by alpha."""
+    from nsa_flow.project import simlr_sparseness
+    # 1-ULP float32 jitter around 1/sqrt(2) (previously shrank column norms to 1.19e-7)
+    s32 = float(2.0 ** -0.5)
+    eps32 = torch.finfo(torch.float32).eps
+    E_ulp = torch.tensor([[s32 + eps32, -(s32 - eps32)],
+                          [s32 - eps32,   s32 + eps32]], dtype=torch.float32)
+    Y_ulp = simlr_sparseness(E_ulp, 0.5, nonneg=False, alg="soft")
+    assert int(torch.linalg.matrix_rank(Y_ulp)) == 2
+    assert float(Y_ulp.norm(dim=0).min()) > 0.7
+
+    # 200 standardized float32 SVD draws through simlr_sparseness(hard) and nsa_flow
+    g = torch.Generator().manual_seed(0)
+    for draw in range(200):
+        X = torch.randn(50, 2, generator=g, dtype=torch.float32)
+        X = (X - X.mean(0)) / X.std(0)
+        _, _, Vh = torch.linalg.svd(X, full_matrices=False)
+        E = Vh.T
+        Yh = simlr_sparseness(E, 0.5, nonneg=False, alg="hard")
+        assert int(torch.linalg.matrix_rank(Yh)) == 2, f"f32 hard draw {draw}"
+        assert float(Yh.norm(dim=0).min()) > 0.7, f"f32 hard norm draw {draw}"
+        r = nsa_flow(E, w=0.5, nonneg=False, sparseness=0.5)
+        assert int(torch.linalg.matrix_rank(r.Y)) == 2, f"f32 nsa_flow draw {draw}"
+        assert float(r.Y.norm(dim=0).min()) > 0.5, f"f32 nsa_flow norm collapsed on draw {draw}: {r.Y}"
+        assert r.energy < 0.30, f"f32 nsa_flow stalled at high energy on draw {draw}: {r}"
+
+    Q = (2.0 ** -0.5) * torch.tensor([[1.0, 1.0], [1.0, -1.0]], dtype=F64)
+    base = simlr_sparseness(Q, 0.5, nonneg=False, alg="soft")
+    for alpha in (1e-15, 1e-6, 1e6):
+        scaled = simlr_sparseness(alpha * Q, 0.5, nonneg=False, alg="soft")
+        assert torch.allclose(scaled, alpha * base, rtol=1e-12, atol=0.0)
+
+
+def test_simlr_sparseness_and_varimax_preserve_rank_on_walsh_hadamard():
+    """4x4 Walsh-Hadamard preserves full rank under quantile sparseness and escapes
+    the V=0 global minimum in varimax."""
+    from nsa_flow import varimax
+    from nsa_flow.project import simlr_sparseness
+    H2 = (2.0 ** -0.5) * torch.tensor([[1.0, 1.0], [1.0, -1.0]], dtype=F64)
+    V2 = varimax(H2)
+    assert torch.allclose(V2.T @ V2, torch.eye(2, dtype=F64), atol=1e-12)
+    assert float(V2.abs().amax(dim=0).min()) > 0.999
+
+    H4 = 0.5 * torch.tensor([
+        [1.0,  1.0,  1.0,  1.0],
+        [1.0, -1.0,  1.0, -1.0],
+        [1.0,  1.0, -1.0, -1.0],
+        [1.0, -1.0, -1.0,  1.0],
+    ], dtype=F64)
+    V4 = varimax(H4)
+    assert torch.allclose(V4.T @ V4, torch.eye(4, dtype=F64), atol=1e-12)
+    assert float(V4.abs().amax(dim=0).min()) > 0.999
+    for q in (0.75, 0.5, 0.25):
+        Y4 = simlr_sparseness(H4, sparseness=q, nonneg=False)
+        assert int(torch.linalg.matrix_rank(Y4)) == 4, f"H4 rank collapsed at q={q}: {Y4}"
+
+
+def test_simlr_sparseness_untied_unchanged_and_zero_tail_safe():
+    """Untied columns match exact soft/hard quantile shrinkage; sparse columns with
+    zero tails do not treat zero entries as boundary ties."""
+    from nsa_flow.project import simlr_sparseness
+    Y = torch.tensor([[0.9, -0.2], [0.5, 0.8], [0.2, -0.4], [0.1, 0.05]], dtype=F64)
+    out_soft = simlr_sparseness(Y, sparseness=0.5, nonneg=False, alg="soft")
+    # n_keep = 2; thresh col0 = 0.2 -> [0.7, 0.3, 0, 0]; thresh col1 = 0.2 -> [0, 0.6, -0.2, 0]
+    expected_soft = torch.tensor([[0.7, 0.0], [0.3, 0.6], [0.0, -0.2], [0.0, 0.0]], dtype=F64)
+    assert torch.allclose(out_soft, expected_soft, atol=1e-15)
+
+    # Sparse column with huge zero tail (only_if_denser=False)
+    Z = torch.zeros(2000, 2, dtype=F64)
+    Z[0, 0], Z[1, 0] = 2.0, 1.0
+    Z[2, 1], Z[3, 1] = 3.0, 1.5
+    out_z = simlr_sparseness(Z, sparseness=0.5, nonneg=True, alg="hard", only_if_denser=False)
+    assert torch.equal(out_z, Z)
+
+

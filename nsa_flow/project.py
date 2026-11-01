@@ -22,12 +22,35 @@ def project_nonneg(Y):
 
 
 def _resolve_column_sign_gauge(Y):
-    """Flip any column j whose negative-part L2 norm exceeds its positive-part L2 norm."""
+    """Flip any column j whose negative-part L2 norm exceeds its positive-part L2 norm.
+
+    When positive and negative lobe norms tie within working precision (e.g. a
+    Hadamard contrast column ``[+s, -s]``), resolves the tie against the row
+    energy of unambiguous columns so tied columns orient onto distinct rows.
+    """
     if Y.numel() == 0 or Y.ndim < 2:
         return Y
     pos = torch.linalg.vector_norm(Y.clamp_min(0.0), dim=0)
     neg = torch.linalg.vector_norm((-Y).clamp_min(0.0), dim=0)
     sign = torch.where(neg > pos, -torch.ones_like(pos), torch.ones_like(pos))
+    if Y.shape[1] > 1:
+        eps_rel = 16.0 * torch.finfo(Y.dtype).eps
+        scale = pos + neg
+        tied = (scale > 0) & ((pos - neg).abs() <= eps_rel * scale)
+        if bool(tied.any()):
+            Yd = Y.detach()
+            unambig_pos = (Yd[:, ~tied] * sign[~tied].unsqueeze(0)).clamp_min(0.0)
+            row_mass = unambig_pos.pow(2).sum(dim=1)
+            sign = sign.clone()
+            for j in torch.nonzero(tied, as_tuple=False).flatten().tolist():
+                c_pos = Yd[:, j].clamp_min(0.0)
+                c_neg = (-Yd[:, j]).clamp_min(0.0)
+                if float((c_neg.pow(2) * row_mass).sum()) < float((c_pos.pow(2) * row_mass).sum()):
+                    sign[j] = -1.0
+                    row_mass = row_mass + c_neg.pow(2)
+                else:
+                    sign[j] = 1.0
+                    row_mass = row_mass + c_pos.pow(2)
     return Y * sign.unsqueeze(0)
 
 
@@ -38,6 +61,12 @@ def simlr_sparseness(Y, sparseness=None, nonneg=False, alg="soft", only_if_dense
     ``n_keep = max(1, round(p * (1 - sparseness)))`` entries by magnitude and
     shrinks surviving entries by the ``(1 - sparseness)`` order-statistic
     threshold when ``alg == 'soft'``.
+
+    When magnitudes tie at the ``n_keep``-th order-statistic boundary, breaks
+    ties jointly across columns to minimise squared cosine overlap with already-
+    committed columns (and row usage count), preserving column rank and
+    orthogonality on Hadamard and standardised symmetric bases while leaving
+    untied columns unchanged.
 
     When ``nonneg=True``, resolves the per-column sign gauge first (flipping any
     column whose negative-part L2 norm exceeds its positive-part L2 norm) before
@@ -63,40 +92,117 @@ def simlr_sparseness(Y, sparseness=None, nonneg=False, alg="soft", only_if_dense
     if n_keep >= p:
         return Y
 
-    cols_out = []
+    eps_dtype = torch.finfo(Y.dtype).eps
+    eps_tie_rel = 16.0 * eps_dtype
+    cols_out = [None] * k
+    pending = []
     use_soft = (str(alg).lower() != "hard")
+
     for j in range(k):
         col = Y[:, j]
         mag = col.abs()
-        max_mag = float(mag.detach().max())
+        mag_d = mag.detach()
+        max_mag = float(mag_d.max())
         if max_mag <= 0.0:
-            cols_out.append(torch.zeros_like(col))
+            cols_out[j] = torch.zeros_like(col)
             continue
         if only_if_denser:
-            nnz_j = int((mag.detach() > 1e-12 * max_mag).sum())
+            nnz_j = int((mag_d > 1e-12 * max_mag).sum())
             if nnz_j <= n_keep:
                 # Zero out tiny numerical dust below 1e-12 * max_mag and keep intact
-                clean_mask = mag > 1e-12 * max_mag
-                cols_out.append(torch.where(clean_mask, col, torch.zeros_like(col)))
+                clean_mask = mag_d > 1e-12 * max_mag
+                cols_out[j] = torch.where(clean_mask, col, torch.zeros_like(col))
                 continue
-        vals, idx_sort = torch.sort(mag, descending=True)
-        thresh = vals[n_keep].detach()
-        if use_soft and float((vals[0] - thresh).detach()) > 1e-12:
-            shrunk = torch.sign(col) * torch.clamp(mag - thresh, min=0.0)
-            if int((shrunk.detach().abs() > 0).sum()) > n_keep:
-                keep_mask = torch.zeros(p, dtype=torch.bool, device=Y.device)
-                keep_mask[idx_sort[:n_keep]] = True
-                shrunk = torch.where(keep_mask, shrunk, torch.zeros_like(shrunk))
-            if float(shrunk.detach().abs().max()) <= 0.0:
-                keep_mask = torch.zeros(p, dtype=torch.bool, device=Y.device)
-                keep_mask[idx_sort[:n_keep]] = True
-                cols_out.append(torch.where(keep_mask, col, torch.zeros_like(col)))
+        tol_j = eps_tie_rel * max_mag
+        vals, idx_sort = torch.sort(mag_d, descending=True)
+        thresh = vals[n_keep]
+        if use_soft:
+            if float(vals[0] - thresh) > tol_j:
+                shrunk = torch.sign(col) * torch.clamp(mag - thresh, min=0.0)
+                if float(vals[n_keep - 1] - thresh) <= tol_j:
+                    # Clean 1-ULP dust on entries tied with thresh
+                    shrunk = torch.where(mag_d > thresh + tol_j, shrunk, torch.zeros_like(shrunk))
+                cols_out[j] = shrunk
             else:
-                cols_out.append(shrunk)
+                # All top n_keep + 1 magnitudes tie with thresh (> 0); soft shrinkage
+                # would zero the entire column, so defer hard selection from the tie pool.
+                strict_mask = torch.zeros(p, dtype=torch.bool, device=Y.device)
+                tie_mask = mag_d >= thresh - tol_j
+                pending.append((int(tie_mask.sum()), j, strict_mask, tie_mask))
         else:
-            keep_mask = torch.zeros(p, dtype=torch.bool, device=Y.device)
-            keep_mask[idx_sort[:n_keep]] = True
-            cols_out.append(torch.where(keep_mask, col, torch.zeros_like(col)))
+            if float(thresh) > tol_j and float(vals[n_keep - 1] - thresh) <= tol_j:
+                strict_mask = mag_d > thresh + tol_j
+                tie_mask = (~strict_mask) & (mag_d >= thresh - tol_j)
+                pending.append((int(tie_mask.sum()), j, strict_mask, tie_mask))
+            else:
+                keep_mask = torch.zeros(p, dtype=torch.bool, device=Y.device)
+                keep_mask[idx_sort[:n_keep]] = True
+                cols_out[j] = torch.where(keep_mask, col, torch.zeros_like(col))
+
+    if not pending:
+        return torch.stack(cols_out, dim=1)
+
+    # Pass 2 (only reached when at least one column has a positive boundary tie):
+    # select tied support entries to minimise squared overlap with committed columns.
+    tiny = torch.finfo(Y.dtype).tiny
+    row_load = torch.zeros(p, dtype=torch.int64, device=Y.device)
+    committed = []
+    for j in range(k):
+        if cols_out[j] is not None:
+            cj = cols_out[j].detach()
+            nz = cj != 0
+            if bool(nz.any()):
+                row_load = row_load + nz.to(torch.int64)
+                committed.append(cj / torch.linalg.vector_norm(cj).clamp_min(tiny))
+    for _, _, strict_mask, _ in pending:
+        if bool(strict_mask.any()):
+            row_load = row_load + strict_mask.to(torch.int64)
+
+    pending.sort(key=lambda item: (item[0], item[1]))
+    q_step = 64.0 * eps_dtype
+    for _, j, strict_mask, tie_mask in pending:
+        col = Y[:, j]
+        col_d = col.detach()
+        need = n_keep - int(strict_mask.sum())
+        tie_idx = torch.nonzero(tie_mask, as_tuple=False).flatten()
+        chosen_mask = strict_mask.clone()
+        cur_vec = torch.where(chosen_mask, col_d, torch.zeros_like(col_d))
+        cur_norm_sq = float(cur_vec.pow(2).sum())
+        U = torch.stack(committed, dim=1) if committed else None
+        g = (U.transpose(0, 1) @ cur_vec) if U is not None else None
+        avail = torch.ones(tie_idx.numel(), dtype=torch.bool, device=Y.device)
+
+        for _ in range(min(need, int(tie_idx.numel()))):
+            pos_avail = torch.nonzero(avail, as_tuple=False).flatten()
+            cand_idx = tie_idx[pos_avail]
+            y_c = col_d[cand_idx]
+            if U is not None:
+                denom = (cur_norm_sq + y_c.pow(2)).clamp_min(tiny)
+                dots = g.unsqueeze(0) + y_c.unsqueeze(1) * U[cand_idx]
+                overlap = dots.pow(2).sum(dim=1) / denom
+                ov_bucket = torch.round(overlap.double() / q_step)
+                m1 = ov_bucket == ov_bucket.min()
+            else:
+                m1 = torch.ones(cand_idx.numel(), dtype=torch.bool, device=Y.device)
+            sub_pos = pos_avail[m1]
+            rl_sub = row_load[tie_idx[sub_pos]]
+            pick_slot = int(sub_pos[rl_sub == rl_sub.min()][0])
+            pick_row = int(tie_idx[pick_slot])
+            avail[pick_slot] = False
+            chosen_mask[pick_row] = True
+            val_pick = col_d[pick_row]
+            cur_vec[pick_row] = val_pick
+            cur_norm_sq += float(val_pick * val_pick)
+            row_load[pick_row] += 1
+            if U is not None:
+                g = g + val_pick * U[pick_row]
+
+        out_j = torch.where(chosen_mask, col, torch.zeros_like(col))
+        cols_out[j] = out_j
+        out_d = out_j.detach()
+        if float(out_d.abs().max()) > 0.0:
+            committed.append(out_d / torch.linalg.vector_norm(out_d).clamp_min(tiny))
+
     return torch.stack(cols_out, dim=1)
 
 

@@ -444,7 +444,7 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="auto", orth="Cg", lobe=1.0,
         from .project import simlr_sparseness
         Vp_c, Vm_c = _split(W)
         V_c = Vp_c - Vm_c
-        Vs = simlr_sparseness(V_c, float(sparseness), nonneg=False, alg="soft",
+        Vs = simlr_sparseness(V_c, float(sparseness), nonneg=False, alg="hard",
                               only_if_denser=True)
         if not torch.equal(Vs, V_c):
             W_sp = torch.cat([Vs.clamp_min(0.0), (-Vs).clamp_min(0.0)], dim=-1)

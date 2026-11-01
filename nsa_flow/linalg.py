@@ -49,6 +49,8 @@ calls return the same basis on any device in either precision, and the two Gram
 routes agree exactly.  Without the convention they would differ by arbitrary
 sign flips and the result would depend on a shape heuristic.
 """
+import math
+
 import torch
 
 __all__ = ["jacobi_eigh", "safe_eigh", "top_k_eigenvectors",
@@ -313,6 +315,41 @@ def _polar_orthogonal(B):
     return Q @ (1.5 * eye - 0.5 * (Q.transpose(-2, -1) @ Q))
 
 
+def _kaiser_saddle_escape(X, R):
+    """One exact 2-column Kaiser (1958) Givens sweep to escape uniform-magnitude saddles.
+
+    First-order GPA has ``X'(Z^3 - Z mean(Z^2)) = 0`` at Hadamard / uniform-magnitude
+    minima where the Varimax criterion is minimised rather than maximised.  Kaiser's
+    closed-form pairwise angle ``0.25 * atan2(D, A)`` includes the second derivative
+    ``A < 0`` and jumps directly to the 45-degree maximum in one step.
+    """
+    p, k = X.shape[-2], X.shape[-1]
+    Z = (X @ R).clone()
+    R_out = R.clone()
+    tol = 16.0 * torch.finfo(X.dtype).eps * float(p)
+    moved = False
+    for a in range(k - 1):
+        for b in range(a + 1, k):
+            za, zb = Z[..., :, a], Z[..., :, b]
+            u = za * za - zb * zb
+            v = 2.0 * za * zb
+            su, sv = u.sum(dim=-1), v.sum(dim=-1)
+            A = float(p * (u * u - v * v).sum(dim=-1) - (su * su - sv * sv))
+            D = float(2.0 * (p * (u * v).sum(dim=-1) - su * sv))
+            if abs(D) > tol or A < -tol:
+                phi = 0.25 * math.atan2(D, A)
+                if abs(phi) > 1e-12:
+                    c, s = math.cos(phi), math.sin(phi)
+                    za_new = c * za + s * zb
+                    zb_new = -s * za + c * zb
+                    Z[..., :, a], Z[..., :, b] = za_new, zb_new
+                    ra, rb = R_out[..., :, a].clone(), R_out[..., :, b].clone()
+                    R_out[..., :, a] = c * ra + s * rb
+                    R_out[..., :, b] = -s * ra + c * rb
+                    moved = True
+    return R_out, moved
+
+
 def varimax_rotation(E, normalize=True, eps=1e-6, max_iter=100):
     r"""Orthogonal Varimax rotation matrix ``R in O(k)`` for basis ``E`` (``[p, k]``).
 
@@ -345,12 +382,20 @@ def varimax_rotation(E, normalize=True, eps=1e-6, max_iter=100):
 
     R = eye.clone()
     d_prev = 0.0
+    saddle_tol = 1e-11 * float(p)
     for _ in range(max_iter):
         Z = X @ R
         col_mean_sq = Z.pow(2).sum(dim=-2, keepdim=True) / float(p)
         B = X.transpose(-2, -1) @ (Z.pow(3) - Z * col_mean_sq)
         R_new = _polar_orthogonal(B)
         d = float((B * R_new).sum())
+        if d <= saddle_tol and d <= 1e-11 * float(X.pow(2).sum()):
+            R_esc, moved = _kaiser_saddle_escape(X, R)
+            if moved:
+                R = R_esc
+                d_prev = 0.0
+                continue
+            break
         R = R_new
         if d <= d_prev * (1.0 + eps):
             break

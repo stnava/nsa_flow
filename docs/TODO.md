@@ -1,6 +1,12 @@
-# What next — decision memo (updated 2026-10-19, v3.5.0)
+# What next — decision memo (updated 2026-11-01, v3.5.1)
 
 ## Done since the 2026-09-19 memo
+- **Quantile-sparseness tie-breaking & Hadamard saddle escape (2026-11-01, v3.5.1):** fixed
+  rank-1 collapse on tied/Hadamard bases in `simlr_sparseness` and `_resolve_column_sign_gauge`
+  (`nsa_flow/project.py`), added Kaiser 2-column Givens saddle escape in `varimax_rotation`
+  (`nsa_flow/linalg.py`), switched post-solve support selection in `solve.py`, `reconstruct.py`,
+  and `signed.py` to `alg="hard"` (preventing `float32` soft-shrunk false stationarity), and
+  added 5 regression tests in `tests/test_solver.py`.
 - **A. Native kernel (CPU):** fused C++ L-BFGS-B iteration shipped v3.2.0–3.3.2 (6–11×,
   energy parity < 1e-12, `NSA_FLOW_DISABLE_NATIVE=1` falls back). Plan: `docs/NATIVE_KERNEL_PLAN.md`.
   Not done: a fused MPS/CUDA path (dispatch-bound, ~3 ms/gradient on MPS).
