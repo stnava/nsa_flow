@@ -1,6 +1,13 @@
-# What next — decision memo (updated 2026-11-01, v3.5.1)
+# What next — decision memo (updated 2026-11-01, v3.5.2)
 
 ## Done since the 2026-09-19 memo
+- **Manuscript audit, sync & Rmd deprecation (2026-11-01, v3.5.2):** reconciled `paper/nsaflow.tex`
+  with `v3.5.1` code and `nsa_flow.bench` findings (removed Tecator Conclusion contradiction,
+  replaced ADNI RF explanation with PCA-rotated axis-alignment control, aligned Eq. 4 with
+  monotone Armijo `_spg`, updated matched-multistart module-recovery and oblique FA rotation
+  metrics, qualified un-nested fixed-$k$ Prostate and 9-outcome cognitive battery claims, synced
+  461-test count plus Orthogonal Varimax / Kaiser escape / `simlr_sparseness` documentation),
+  deprecated legacy `paper/nsa_flow.Rmd` (`rmd-paper` in `Makefile`), and rebuilt `paper/nsaflow.pdf`.
 - **Quantile-sparseness tie-breaking & Hadamard saddle escape (2026-11-01, v3.5.1):** fixed
   rank-1 collapse on tied/Hadamard bases in `simlr_sparseness` and `_resolve_column_sign_gauge`
   (`nsa_flow/project.py`), added Kaiser 2-column Givens saddle escape in `varimax_rotation`
@@ -29,9 +36,10 @@
    hallmark) instead of hand-typed lists; (d) port rapid_primary_benchmarks, benchmark_new_public_data,
    speed_vs_pca, adni_cdrsb_repeated, then shim them (PPMI is excluded: not public, not reproducible); (e) Golub point estimate differs
    from the earlier standalone script (+0.016 vs +0.032, both CIs include 0): cause not identified.
-1. **Claims not yet nested-CV'd:** Prostate (0.824 vs 0.805), Tecator (README shows NSA *worse*
-   than PCA: forest R² 0.699 vs 0.913, which contradicts the paper's "spectroscopy win"), the 9-outcome
-   cognitive battery, trinary-diagnosis AUC. Each needs the same harness or the claim should be cut.
+1. **Claims not yet nested-CV'd:** Prostate (0.824 vs 0.805), the 9-outcome cognitive battery,
+   and trinary-diagnosis AUC (now explicitly qualified as fixed-$k$ single-setting benchmarks in
+   `paper/nsaflow.tex`; Tecator's nested-CV linear parity and forest loss are now reconciled
+   throughout `paper/nsaflow.tex`). Each remaining claim needs the nested-CV harness or should be cut.
 2. **Replication:** ADNI is one restricted-access cohort. Replicate on public data only (PPMI is excluded: not public, not
    reproducible); NHANES and the public benchmarks in `nsa_flow.bench` are the replication tier.
 3. **True orthogonal NMF** baseline (multiplicative updates) — current NMF baseline is plain NMF;

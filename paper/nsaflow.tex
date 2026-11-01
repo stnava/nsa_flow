@@ -89,17 +89,21 @@ models (where raw variance dominates and linear models span the eigenspace),
 PCA achieves the variance ceiling and NSA-Flow trades a modest $2$--$4\%$ AUC
 for factor readability, reducing support overlap from about four to near zero.
 In contrast, on continuous clinical cognitive progression (ADNI CDRSB,
-$\Delta R^2 = +0.123$ [95\% CI $0.065, 0.182$] under Random Forest and $+0.023$
-[$0.003, 0.043$] under linear models across 20 repeated 80/20 splits, plus
-consistent advantages across a 9-outcome cognitive battery), high-dimensional
-cancer transcriptomics (Prostate cancer, $0.824$ vs.\ $0.805$ Balanced Accuracy
-with $86.7\%$ exact disjoint sparsity), Consolidated Signed NSA-Flow structurally outperforms dense PCA
-(Golub and Tecator spectroscopy are not in this list: Tecator matches PCA under linear models and loses under forests; Golub: with $w$, $k$ and PCA's $k$ all chosen by nested
+$\Delta R^2 = +0.123$ [95\% CI $0.065, 0.182$] under Random Forest across 20
+repeated 80/20 splits, an effect that survives nested cross-validation of $w$ and $k$
+at $+0.147$ [$0.078, 0.216$], and $+0.023$ [$0.003, 0.043$] under linear models;
+we also observe consistent gains on a 9-outcome cognitive battery at fixed $k=5$),
+and high-dimensional cancer transcriptomics (Prostate cancer, $0.824$ vs.\ $0.805$
+Balanced Accuracy at fixed $w=0.5, k=6$ with $86.7\%$ exact disjoint sparsity),
+Consolidated Signed NSA-Flow outperforms dense PCA under fixed-setting evaluations,
+though we emphasize that fixed-$k$ findings on Prostate and the 9-outcome battery
+remain provisional pending full nested cross-validation
+(Golub leukemia and Tecator spectroscopy are not in this list: Tecator matches PCA under linear models and loses under forests; Golub: with $w$, $k$ and PCA's $k$ all chosen by nested
 cross-validation, the gain is not distinguishable from zero; see \S\ref{sec:nested}).
-Disjoint, modular factors eliminate global volume confounding and collinear
-background noise, allowing non-linear estimators to isolate independent disease
-staging. All claims in the paper are asserted executably in the accompanying
-test suite ($403$ assertions across theory and numerical robustness batteries).
+Disjoint, modular factors align directly with coordinate axes, allowing
+axis-parallel tree splits in non-linear estimators to isolate independent disease
+staging without oblique crosstalk. All claims in the paper are asserted executably
+in the accompanying test suite ($461$ tests across theory and numerical robustness batteries).
 \end{abstract}
 
 \section{Introduction}
@@ -315,6 +319,14 @@ deleted. The consequences are not subtle.
   not from an artefact of the penalty.
 \end{itemize}
 
+\paragraph{Angle defect versus Stiefel defect.}
+One might alternatively attempt to penalise column angles directly via pairwise cosines rather than global Gram deviations. Defining column directions $\hat{y}_i = y_i / \max(\norm{y_i}, \varepsilon)$ and normalised Gram $\widehat{G} = \widehat{Y}^\top \widehat{Y}$, the squared-cosine angle defect takes the form
+\begin{equation}\label{eq:angle_defect}
+  C(Y) = \frac{1}{k(k-1)} \Fnorm{\widehat{G} - I_k}^2
+       = \frac{1}{k(k-1)} \Bigg[ \sum_{i \ne j} \cos^2(y_i, y_j) + \sum_{i=1}^k \Big(1 - \min\big(1, \norm{y_i}^2/\varepsilon^2\big)\Big)^2 \Bigg] ,
+\end{equation}
+where $\cos(y_i, y_j) = \ip{y_i}{y_j} / (\norm{y_i}\norm{y_j})$ for columns with $\norm{y_i}, \norm{y_j} \ge \varepsilon$. The diagonal identity in $C(Y)$ is critical: dropping $I_k$ in $C(Y)$ leaves only off-diagonal cosines, which rewards rank collapse because a dead column is orthogonal to every other column. While $C(Y)$ is invariant under per-column scaling $Y \mapsto Y \operatorname{diag}(c)$ for $c \in \Rpos^k$, it is discontinuous at dead columns (a collapsing column retains $O(1)$ angular directions until the numerical $\varepsilon$-floor collapses it to zero), creating artificial local traps for gradient descent. In contrast, the completed functional $D(Y)$ requires no threshold parameter $\varepsilon$, penalises rank collapse smoothly via the spectral floor $D(Y) \ge 1/r - 1/k$, and has a radial-orthogonal gradient $\ip{\nabla D}{Y} = 0$ that cleanly decouples shape optimization from scale.
+
 Figure~\ref{fig:functionals} shows the first two points directly.
 
 \begin{figure}[t]
@@ -403,18 +415,17 @@ inner loop and termination certificate:
 
 \paragraph{Spectral projected gradient (SPG) and bound-constrained L-BFGS-B.}
 In the reference SPG solver \citep{birgin2000}, Barzilai--Borwein step lengths
-\citep{barzilai1988} are safeguarded by a non-monotone Grippo--Lampariello--Lucidi
-(GLL) Armijo line search on the projected step,
-\begin{equation}
+\citep{barzilai1988} are safeguarded by a monotone Armijo line search on the projected step:
+\begin{equation}\label{eq:spg_armijo}
   Y^{j+1} = \mathcal{P}_\mathcal{C}\!\big(Y^j - t_j \nabla E_w(Y^j)\big),
   \qquad
-  E_w(Y^{j+1}) \le \max_{0 \le r < M} E_w(Y^{j-r}) - \frac{\sigma}{t_j}\Fnorm{Y^{j+1}-Y^j}^2 ,
+  E_w(Y^{j+1}) \le E_w(Y^j) - \frac{\sigma}{t_j}\Fnorm{Y^{j+1}-Y^j}^2 ,
 \end{equation}
-with $\sigma = 10^{-4}$, memory $M=10$, and $t_j$ halved until the condition
-holds. As default in v3.3, we also provide a pure-C++ bound-constrained
+with $\sigma = 10^{-4}$ (monotone Armijo condition, $M=1$) and trial step $t_j$ halved until the condition
+holds. Non-monotone Grippo--Lampariello--Lucidi search with $M=10$ was tested and rejected in implementation: non-monotone energy excursions produced spurious plateau detections and delayed convergence certification near stationarity. As default in v3.3, we also provide a pure-C++ bound-constrained
 L-BFGS-B solver \citep{byrd1995limited} with exact piecewise-quadratic Cauchy
 point computation along the projected gradient path, active-set subspace
-visualisation via the compact Byrd--Nocedal--Schnabel representation, and
+minimisation via the compact Byrd--Nocedal--Schnabel representation, and
 projected Armijo backtracking. Because $\nabla E_w(Y)$ scales as
 $\Fnorm{Y}^{-1}$, a raw projected-gradient norm would change under rescaling of
 $X_0$; both solvers therefore certify stationarity via the dimensionless,
@@ -457,6 +468,9 @@ disjointness ($V_j \cdot V_l = 0$ for all $j \ne l$) is required, a two-phase
 its dominant component $j^\star(i) = \arg\max_j |V_{ij}|$ and re-optimises the
 active entries under the fixed sparsity mask so column norms and scores
 re-equilibrate cleanly.
+
+\paragraph{Orthogonal Varimax initialization and quantile support projection.}
+In data and signed modes, the solver initializes from the leading eigenspace rotated via an orthogonal Varimax rotation matrix $R \in O(k)$ (\texttt{varimax\_rotation}). This maximizes the Kaiser simplicity criterion over $O(k)$ via alternating polar projections, preserving column orthonormality and subspace fidelity while rotating the global mean mode into localized regional factors. To guarantee escape from symmetric saddle points or inflection plateaus on tied, uniform, or Hadamard contrast bases, \texttt{varimax\_rotation} incorporates a two-column Kaiser Givens saddle escape that perturbs stationary coordinate pairs whenever progress drops to machine precision, followed by canonical positive-lobe sign orientation (\texttt{\_resolve\_column\_sign\_gauge}). Furthermore, when explicit quantile feature selection is requested, \texttt{simlr\_sparseness} applies column-wise quantile thresholding (following ANTsR \texttt{simlr} conventions), retaining the top $n_{\text{keep}} = \max(1, \operatorname{round}(p(1 - q)))$ entries by magnitude with joint tie-breaking across columns to prevent rank-1 collapse, and utilizing hard support thresholding (\texttt{alg="hard"}) in post-solve support selection to ensure robust stationarity in floating-point arithmetic.
 
 \paragraph{Cost.} $\nabla E_w$ requires the Gram product $Y^\top Y$ and the
 product $YG$: $O(pk^2)$, with \emph{no} SVD, eigendecomposition or QR in the
@@ -553,7 +567,7 @@ figure below is generated by \texttt{experiments/run\_all.py}. Every property
 asserted in \S\ref{sec:functional}--\S\ref{sec:algorithm} is checked executably
 in \texttt{tests/test\_theory.py}.
 
-\subsection{Does $w$ mean what it says?}\label{sec:exp-calibration}
+\subsection{Does \texorpdfstring{$w$}{w} mean what it says?}\label{sec:exp-calibration}
 
 We compare against the uncalibrated predecessor of this formulation
 (``v1''), which used $d$ of \eqref{eq:old} for orthogonality, weighted the two
@@ -622,7 +636,7 @@ component.}
 \label{fig:recovery}
 \end{figure}
 
-\subsection{The $w=1$ limit is a feature clustering}
+\subsection{The \texorpdfstring{$w=1$}{w=1} limit is a feature clustering}
 
 Assigning each feature to its dominant component turns a solution into a
 partition, which makes Proposition~\ref{prop:disjoint} testable against
@@ -760,19 +774,19 @@ To test whether modular representation improves continuous disease tracking, we 
 \input{results/cdrsb_cognitive_table.tex}
 
 \paragraph{Continuous CDRSB progression.}
-In linear models across 20 repeated 80/20 train/test splits, Consolidated Signed NSA-Flow ($w=0.5$) improves out-of-sample $R^2$ by $+0.023$ over dense PCA ($0.236 \pm 0.255$ vs.\ $0.213 \pm 0.256$, $95\%$ CI $[0.003, 0.043]$, winning $14/20$ splits) and achieves $0.335$ vs.\ $0.342$ on the primary 80/20 test split.
+In linear models across 20 repeated 80/20 train/test splits, Consolidated Signed NSA-Flow ($w=0.5$) improves out-of-sample $R^2$ by $+0.023$ over dense PCA ($0.236 \pm 0.255$ vs.\ $0.213 \pm 0.256$, $95\%$ CI $[0.003, 0.043]$, winning $14/20$ splits) and achieves $0.291$ vs.\ $0.342$ on the primary 80/20 test split.
 
 Under non-linear Random Forest estimators, the advantage expands substantially: across the 20 repeated 80/20 splits, Consolidated Signed NSA-Flow achieves out-of-sample $R^2 = 0.258 \pm 0.238$ compared to $0.135 \pm 0.284$ for dense PCA---a statistically decisive mean gain of $\Delta R^2 = +0.123$ ($95\%$ CI $[0.065, 0.182]$, winning $17/20$ splits). On the primary 80/20 held-out split, Consolidated Signed NSA-Flow reaches $R^2 = 0.309$ (and Signed NSA-Flow at $w=0.25$ reaches $0.369$) versus PCA's $0.281$. This gain is achieved with \emph{zero} anatomical lobe overlap ($0.000$ vs.\ $3.992$ for PCA, $80.0\%$ exact zero loadings) and zero frame defect ($D = 0.000$).
 
-\paragraph{The 9-outcome cognitive battery.}
-To ensure that this finding is not specific to CDRSB, we evaluated nine distinct continuous cognitive instruments: CDRSB, ADAS13, ADASQ4, MMSE, FAQ, mPACCdigit, LDELTOTAL, EcogPtTotal, and EcogSPTotal across repeated 5-fold cross-validation. Under non-linear Random Forest models, Consolidated NSA-Flow outperforms dense PCA on 7 of the 9 outcomes: CDRSB ($\Delta R^2 = +0.117$ in data mode, $+0.085$ in subspace mode), FAQ ($+0.113$), ADASQ4 ($+0.069$), ADAS13 ($+0.045$), MMSE ($+0.046$), mPACCdigit ($+0.040$), and LDELTOTAL ($+0.023$). Across outcomes, modular networks provide an average gain of $\Delta R^2 \approx +0.044$ over dense PCA.
+\paragraph{The 9-outcome cognitive battery (fixed-$k$ evaluation).}
+To test whether this pattern extends beyond CDRSB, we evaluated nine distinct continuous cognitive instruments: CDRSB, ADAS13, ADASQ4, MMSE, FAQ, mPACCdigit, LDELTOTAL, EcogPtTotal, and EcogSPTotal across repeated 5-fold cross-validation. Under non-linear Random Forest models, Consolidated NSA-Flow outperforms dense PCA on 7 of the 9 outcomes: CDRSB ($\Delta R^2 = +0.117$ in data mode, $+0.085$ in subspace mode), FAQ ($+0.113$), ADASQ4 ($+0.069$), ADAS13 ($+0.045$), MMSE ($+0.046$), mPACCdigit ($+0.040$), and LDELTOTAL ($+0.023$). Across outcomes, modular networks provide an average gain of $\Delta R^2 \approx +0.044$ over dense PCA. We emphasize, however, that while the ADNI CDRSB gain has been independently confirmed under rigorous nested cross-validation selecting both $w$ and $k$ inside training folds (\S\ref{sec:nested}), this 9-outcome battery is an un-nested evaluation conducted at fixed $k=5, w=0.5$. As demonstrated on Golub and Tecator, equal-budget tuning of baseline dimensions can narrow or eliminate fixed-setting advantages; extending full nested CV across all nine outcomes is an ongoing benchmark target.
 
-\paragraph{Mechanistic basis: Why disjoint modularity outperforms dense eigenspaces.}
-The contrasting behavior between gross binary diagnosis and continuous progression highlights a fundamental geometric mechanism:
+\paragraph{Mechanistic basis: Coordinate axis alignment for axis-parallel decision trees.}
+The substantial Random Forest gain on continuous CDRSB progression ($\Delta R^2 = +0.123$ across 20 repeated 80/20 splits, and $+0.147$ under nested CV) might initially be conjectured to reflect elimination of global cranial volume confounds or discovery of a superior linear subspace. However, explicit rotation controls refute both explanations:
 \begin{itemize}\itemsep2pt
-  \item \textbf{Global scale confounding in dense PCA:} PCA orders components by total variance. In neuroimaging, total variance is heavily dominated by global cranial volume, head size, and non-specific diffuse aging effects. Consequently, dense PCA mixes entorhinal, temporal, parietal, and frontal regions across all components (mean lobe overlap $3.992$, meaning every region is active in four out of five components).
-  \item \textbf{Non-linear tree failure on dense mixtures:} When a decision tree or random forest splits on a dense PCA component, it cannot isolate focal temporal lobe thinning from frontal or occipital variation. The collinear crosstalk across overlapping regions severely degrades tree-based recursive partitioning.
-  \item \textbf{Anatomical modularity in Consolidated NSA-Flow:} By enforcing $D(Y) = 0$ and non-negativity (or consolidating signed halves), NSA-Flow cleanly decomposes cortical thickness into non-overlapping anatomical lobes (lobe overlap $= 0.000$). Downstream tree ensembles can directly evaluate independent, non-linear staging thresholds (e.g., initial medial temporal atrophy followed by parietal involvement) without interference from global cranial scaling.
+  \item \textbf{Subspace rotation control:} When the fitted NSA scores are orthogonally rotated onto their principal axes prior to model fitting, the linear subspace is identical (linear model predictions and $R^2$ are mathematically invariant to this rotation). Yet under this rotation, the Random Forest gain over PCA completely disappears, dropping to $\Delta R^2 = -0.023$ (and $-0.009$ in nested benchmarks). The predictive advantage is therefore not an intrinsic property of the subspace itself, nor does it arise from eliminating global cranial volume scaling.
+  \item \textbf{Axis-parallel splits on dense mixtures:} Standard decision tree and Random Forest algorithms partition feature space using axis-parallel splits on individual coordinate axes. Dense PCA components spread entorhinal, temporal, parietal, and frontal regions across every component (mean anatomical lobe overlap $3.992$). To isolate focal atrophy in an individual anatomical region, an axis-parallel tree must construct an intricate, high-variance staircase of correlated orthogonal cuts across multiple dense components.
+  \item \textbf{Disjoint factor alignment:} Consolidated Signed NSA-Flow enforces $D(Y) = 0$ and produces strictly disjoint anatomical supports (lobe overlap $= 0.000$). Each coordinate axis corresponds directly to an isolated regional factor. Axis-parallel tree splits can therefore isolate focal non-linear disease staging thresholds (e.g., medial temporal thinning prior to parietal involvement) in single, unconfounded coordinate cuts. The tree gain is thus fundamentally driven by coordinate axis alignment for axis-parallel splits.
 \end{itemize}
 
 \subsection{When modularity wins: A taxonomy of representation trade-offs}\label{sec:exp-tradeoff}
@@ -781,9 +795,9 @@ Evaluating NSA-Flow across diverse modalities reveals a consistent, principled t
 
 \begin{enumerate}\itemsep2pt
   \item \textbf{Gross binary discrimination in linear models (Ceiling regime):} When separating distant endpoints (e.g., ADNI CN vs.\ DEM, Golub ALL vs.\ AML) with linear models, unregularized classifiers are rotation-invariant over the subspace. Dense PCA captures maximal variance and defines the ceiling. Imposing non-negativity truncates negative loadings, sacrificing $2$--$4\%$ in AUC ($0.859 \to 0.813$ on ADNI CN/DEM; $0.986 \to 0.961$ on Golub) to achieve readable, disjoint factors. Here, the sign constraint is what costs accuracy, not the orthogonality flow.
-  \item \textbf{Continuous disease progression in non-linear models (Modularity win):} On continuous clinical targets (ADNI CDRSB and the 9-outcome battery), where true pathology spreads across discrete anatomical modules, dense PCA's variance mixing introduces severe collinear crosstalk. Consolidated NSA-Flow's strictly disjoint supports eliminate lobe overlap ($3.99 \to 0.00$), unlocking a mean gain of $\Delta R^2 = +0.123$ ($95\%$ CI $[0.065, 0.182]$) under Random Forest ensembles across repeated splits.
-  \item \textbf{High-dimensional transcriptomics with background noise (Regularization win):} In high-dimensional microarray data (Prostate cancer, $p=12{,}600$; \citealt{singh2002gene}), dense PCA loadings absorb non-specific stromal and benign tissue co-expression. Consolidated Signed NSA-Flow ($w=0.5$) achieves $86.7\%$ exact disjoint sparsity and improves Balanced Accuracy ($0.824 \pm 0.088$ vs.\ $0.805 \pm 0.132$) by acting as a structural regularizer that discards diffuse background noise.
-  \item \textbf{Physical non-negative spectroscopy (Physical consistency):} In NIR spectroscopy (Tecator, $p=100$; \citealt{borggaard1992optimal}), where Beer-Lambert absorption physics requires $V \ge 0$, standard NMF suffers catastrophic collinearity ($D = 0.943$, Ridge $R^2 = 0.386$). Non-negative NSA-Flow ($w=0.5$) drastically reduces the frame defect ($D = 0.006$) while maintaining $V \ge 0$ and recovering $R^2 = 0.853$, while Signed ($R^2 = 0.918$) and Consolidated Signed flow ($R^2 = 0.907$) match or exceed dense PCA ($R^2 = 0.911$) with clean spectral bands. \textbf{Nested-CV update:} with $w$, $k$ and PCA's $k$ chosen by nested cross-validation (20 splits), NSA-Flow has no linear advantage over PCA ($\Delta R^2=-0.001$, $[-0.002, 0.000]$) and loses under Random Forest ($-0.242$, $[-0.293,-0.192]$). Its modules are spectral intervals (adjacent-wavelength contiguity $0.958$, chance about $0.2$) and reproducible across random halves of the rows (assignment ARI $0.870$), but k-means clustering of the wavelengths does the same ($0.960$, $0.868$); NSA-Flow beats PCA's argmax assignment ($0.891$, $0.509$) and NMF on stability ($0.545$). The claim here is interpretable bands at PCA-level linear accuracy, not a predictive gain.
+  \item \textbf{Continuous disease progression in non-linear models (Modularity win):} On continuous clinical targets (ADNI CDRSB and the 9-outcome battery, the latter an un-nested evaluation conducted at fixed $k=5$), where true pathology spreads across discrete anatomical modules, dense PCA's variance mixing introduces severe collinear crosstalk. Consolidated NSA-Flow's strictly disjoint supports eliminate lobe overlap ($3.99 \to 0.00$), unlocking a mean gain of $\Delta R^2 = +0.123$ ($95\%$ CI $[0.065, 0.182]$) under Random Forest ensembles across repeated splits.
+  \item \textbf{High-dimensional transcriptomics with background noise (Regularization win):} In high-dimensional microarray data (Prostate cancer, $p=12{,}600$; \citealt{singh2002gene}), dense PCA loadings absorb non-specific stromal and benign tissue co-expression. Consolidated Signed NSA-Flow at fixed $w=0.5, k=6$ achieves $86.7\%$ exact disjoint sparsity and improves Balanced Accuracy ($0.824 \pm 0.088$ vs.\ $0.805 \pm 0.132$, an un-nested headline finding provisional pending nested CV) by acting as a structural regularizer that discards diffuse background noise.
+  \item \textbf{Physical non-negative spectroscopy (Physical consistency):} In NIR spectroscopy (Tecator, $p=100$; \citealt{borggaard1992optimal}), where Beer-Lambert absorption physics requires $V \ge 0$, standard NMF suffers catastrophic collinearity ($D = 0.943$, Ridge $R^2 = 0.386$). Non-negative NSA-Flow ($w=0.5$) drastically reduces the frame defect ($D = 0.006$) while maintaining $V \ge 0$ and recovering $R^2 = 0.853$, while Signed ($R^2 = 0.918$) and Consolidated Signed flow ($R^2 = 0.907$) match dense PCA ($R^2 = 0.911$) at linear parity with clean spectral bands. \textbf{Nested-CV update:} with $w$, $k$ and PCA's $k$ chosen by nested cross-validation (20 splits), NSA-Flow has no linear advantage over PCA ($\Delta R^2=-0.001$, $[-0.002, 0.000]$) and loses under Random Forest ($-0.242$, $[-0.293,-0.192]$). Its modules are spectral intervals (adjacent-wavelength contiguity $0.958$, chance about $0.2$) and reproducible across random halves of the rows (assignment ARI $0.870$), but k-means clustering of the wavelengths does the same ($0.960$, $0.868$); NSA-Flow beats PCA's argmax assignment ($0.891$, $0.509$) and NMF on stability ($0.545$). The claim here is interpretable bands at PCA-level linear accuracy, not a predictive gain.
 \end{enumerate}
 
 \subsection{Uniqueness of the optimum}\label{sec:exp-uniqueness}
@@ -839,9 +853,9 @@ End-to-end time to convergence on matched problems.}
 
 To assess the method's behavior across distinct data geometries and verify reproducibility on open benchmarks beyond the original paper's datasets, we evaluated NSA-Flow across three diverse OpenML public datasets under strictly leak-free 5-fold cross-validation:
 \begin{enumerate}\itemsep1pt
-  \item \textbf{Tecator NIR meat spectrometry} ($n=240, p=100$, OpenML ID 505; \citealt{borggaard1992optimal}): Continuous optical absorption spectra measuring $850$--$1050$\,nm channels ($X \ge 0$) to predict continuous chemical fat percentage ($0.9\%$--$49.8\%$). In optical spectrometry, the Beer-Lambert law states that absorbance is an additive non-negative linear mixture of pure constituent spectra; dense PCA produces unphysical negative loadings, while standard NMF fails catastrophically due to ill-conditioned collinearity ($D = 0.943$, Ridge $R^2 = 0.386$). In contrast, non-negative NSA-Flow ($w=0.5$) eliminates almost all collinearity ($D = 0.006$) while maintaining physical non-negativity ($V \ge 0$) and recovering $R^2 = 0.853$, while Signed ($R^2 = 0.918$) and Consolidated Signed NSA-Flow ($R^2 = 0.907$) match or exceed dense PCA ($R^2 = 0.911$) with non-overlapping spectral bands.
+  \item \textbf{Tecator NIR meat spectrometry} ($n=240, p=100$, OpenML ID 505; \citealt{borggaard1992optimal}): Continuous optical absorption spectra measuring $850$--$1050$\,nm channels ($X \ge 0$) to predict continuous chemical fat percentage ($0.9\%$--$49.8\%$). In optical spectrometry, the Beer-Lambert law states that absorbance is an additive non-negative linear mixture of pure constituent spectra; dense PCA produces unphysical negative loadings, while standard NMF fails catastrophically due to ill-conditioned collinearity ($D = 0.943$, Ridge $R^2 = 0.386$). In contrast, non-negative NSA-Flow ($w=0.5$) eliminates almost all collinearity ($D = 0.006$) while maintaining physical non-negativity ($V \ge 0$) and recovering $R^2 = 0.853$, while Signed ($R^2 = 0.918$) and Consolidated Signed NSA-Flow ($R^2 = 0.907$) match dense PCA ($R^2 = 0.911$) at linear parity (with nested cross-validation confirming no linear gain, $\Delta R^2 = -0.001$, and a Random Forest deficit of $-0.242$; see \S\ref{sec:exp-tradeoff} and \S\ref{sec:nested}) with non-overlapping spectral bands.
   \item \textbf{Sonar chirp frequency energy} ($n=208, p=60$, OpenML ID 40; \citealt{gorman1988analysis}): Continuous acoustic sensor energy bands ($X \in [0, 1]$) classifying metal cylinders (mines) versus rocks. This benchmark avoids ceiling effects (dense PCA achieves $\text{ROC-AUC} = 0.819$). Signed NSA-Flow matches dense PCA ($\text{ROC-AUC} = 0.819$ at $w=0.0$ and $0.809$ at $w=0.5$), and consolidated signed flow achieves $\text{ROC-AUC} = 0.812$ with strictly disjoint frequency band modules ($83.3\%$ sparsity, $D = 0.000$).
-  \item \textbf{Prostate cancer transcriptomics} ($n=102, p=12{,}600$, OpenML ID 45099; \citealt{singh2002gene}): Clinical contrast between 52 prostate tumors and 50 normal tissue samples, filtering to the top 2000 variance genes strictly inside each training fold. Consolidated Signed NSA-Flow ($w=0.5$) achieves Balanced Accuracy of $0.824 \pm 0.088$ (compared to dense PCA's $0.805 \pm 0.132$) while producing $86.7\%$ exact zero loadings ($V_j \cdot V_l = 0$) and near-zero frame defect ($D = 0.022$). Here, hard disjoint assignment acts as a structural regularizer by stripping out collinear stromal and benign background noise.
+  \item \textbf{Prostate cancer transcriptomics} ($n=102, p=12{,}600$, OpenML ID 45099; \citealt{singh2002gene}): Clinical contrast between 52 prostate tumors and 50 normal tissue samples, filtering to the top 2000 variance genes strictly inside each training fold. At fixed $w=0.5, k=6$, Consolidated Signed NSA-Flow achieves Balanced Accuracy of $0.824 \pm 0.088$ (compared to dense PCA's $0.805 \pm 0.132$) while producing $86.7\%$ exact zero loadings ($V_j \cdot V_l = 0$) and near-zero frame defect ($D = 0.022$). Here, hard disjoint assignment acts as a structural regularizer by stripping out collinear stromal and benign background noise. \textbf{Nested-CV qualification:} like the 9-outcome cognitive battery, this headline result is an un-nested evaluation at fixed $k=6, w=0.5$. Because nested cross-validation on Golub leukemia revealed that equal-budget tuning of baseline dimensions can narrow or eliminate fixed-setting advantages, this Prostate transcriptomic gain remains provisional until evaluated under a fully nested CV harness over $w$ and $k$.
 \end{enumerate}
 
 Table~\ref{tab:new_public_benchmarks} summarizes the cross-validated metrics across methods, and Figure~\ref{fig:new_public_wsweep} displays the parametric trade-off curves as $w$ varies across $[0.0, 0.95]$. Across all three domains, the trade-off surface is monotonic, with $w \in [0.25, 0.5]$ representing the empirical sweet spot where frame defect vanishes without compromising representation power.
@@ -851,7 +865,7 @@ Table~\ref{tab:new_public_benchmarks} summarizes the cross-validated metrics acr
 \begin{figure}[t]
 \centering
 \includegraphics[width=0.98\textwidth]{figs/fig_new_public_wsweep.pdf}
-\caption{Parametric sweep of $w \in [0.0, 0.95]$ across diverse public benchmark modalities. (a) Tecator NIR spectroscopy ($k=5$): Non-negative flow ($V \ge 0$) drives frame defect to near zero with stable $R^2 \approx 0.85$--$0.88$, while consolidated signed flow matches dense PCA ($R^2 \approx 0.907$) with disjoint spectral supports. (b) Sonar acoustic chirps ($k=6$): ROC-AUC remains steady across $w$ with zero cliff-drop. (c) Prostate cancer transcriptomics ($k=6$): Consolidated signed flow achieves $86.7\%$ exact disjoint sparsity and outperforms dense PCA on balanced accuracy by eliminating collinear background gene noise.}
+\caption{Parametric sweep of $w \in [0.0, 0.95]$ across diverse public benchmark modalities. (a) Tecator NIR spectroscopy ($k=5$): Non-negative flow ($V \ge 0$) drives frame defect to near zero with stable $R^2 \approx 0.85$--$0.88$, while consolidated signed flow matches dense PCA ($R^2 \approx 0.907$) with disjoint spectral supports. (b) Sonar acoustic chirps ($k=6$): ROC-AUC remains steady across $w$ with zero cliff-drop. (c) Prostate cancer transcriptomics ($k=6$): Consolidated signed flow achieves $86.7\%$ exact disjoint sparsity and outperforms dense PCA on balanced accuracy at fixed $w=0.5, k=6$ (provisional pending nested CV) by eliminating collinear background gene noise.}
 \label{fig:new_public_wsweep}
 \end{figure}
 
@@ -869,8 +883,9 @@ Table~\ref{tab:new_public_benchmarks} summarizes the cross-validated metrics acr
   Instead, rigorous predictive gains emerge specifically where modular,
   non-overlapping structure aligns with the underlying data geometry: continuous
   clinical disease progression (ADNI CDRSB, $+0.123$ mean $\Delta R^2$ under Random
-  Forest across 20 repeated 80/20 splits), high-dimensional transcriptomics with
-  dense stromal noise (Prostate cancer; not yet nested-CV'd). Physical non-negative
+  Forest across 20 repeated 80/20 splits, while the 9-outcome battery remains an
+  un-nested evaluation), high-dimensional transcriptomics with dense stromal noise
+  (Prostate cancer; provisional pending nested CV). Physical non-negative
   spectroscopy (Tecator NIR) is not such a case: with all hyper-parameters chosen by
   nested cross-validation (20 splits), Consolidated NSA-Flow matches tuned PCA under
   linear models ($\Delta R^2=-0.001$, 95\% CI $[-0.002, 0.000]$) and is clearly worse
@@ -891,7 +906,10 @@ Table~\ref{tab:new_public_benchmarks} summarizes the cross-validated metrics acr
   (10 outer splits) no method differs from tuned PCA. The ADNI effect is the one
   result that survives; it is modest, from one cohort, and its split-to-split
   SD is $0.19$--$0.29$.
-\item \textbf{Module recovery on real data: the signed mode loses to k-means; the non-negative mode is competitive.} Against known feature groups embedded among about a thousand unlabelled genes or words (20 random sample draws, paired intervals, methods blind to labels, pre-specified primary: ARI of Consolidated Signed NSA-Flow at $w=0.5$ against k-means), the signed mode recovers a planted partition exactly (ARI $+0.377$ over k-means) but is worse than k-means on 20 Newsgroups ($-0.111$, $[-0.176,-0.046]$), METABRIC PAM50 groups ($-0.160$, $[-0.213,-0.107]$; split-half stability $0.385$ versus $0.886$) and PBMC3k cell-type markers ($-0.163$, $[-0.205,-0.122]$). The non-negative mode ($\texttt{mode="data"}$, $w=0.5$, on non-negatively shifted data) is competitive: ties k-means on ARI for newsgroups and METABRIC, is more stable than k-means on newsgroups ($+0.048$, $[0.020,0.076]$) and PBMC3k ($+0.072$, $[0.031,0.114]$), has higher pairwise recall on PBMC3k ($+0.042$, $[0.022,0.061]$) and newsgroups ($+0.075$, $[0.045,0.106]$), and is more stable than NMF on all three ($+0.04$ to $+0.24$); it is worse than k-means on PBMC3k ARI ($-0.131$) and on METABRIC stability ($-0.164$) and recall ($-0.253$). Results are sensitive to input scaling: the same mode on standardised-then-shifted data gave PBMC3k ARI $0.64$ in an earlier run. Group lists are our annotation. Null data (i.i.d. noise, column-shuffled METABRIC) give assignment stability $\le 0.002$ in absolute value. The interpretability contribution is the guarantee of disjoint, non-negative, calibration-free factors; recovery of ground-truth modules is competitive with k-means only in the non-negative mode.
+\item \textbf{Module recovery on real data: matched-multistart evaluation.}
+  In the standardized benchmark suite (\texttt{nsa\_flow.bench}), feature module recovery against known ground-truth gene and marker groups is evaluated under an equal multi-start budget ($4$ starts each, library default Varimax initialiser first). On synthetic planted structure, \texttt{NSA nonneg (multistart)} ($w=0.5$) decisively outperforms $k$-means feature clustering ($+0.434$ [$0.308, 0.560$] ARI) and achieves null stability on unstructured noise ($-0.005$ [$-0.014, 0.003$]). On real biological datasets, the non-negative multi-start mode is competitive with $k$-means: on PBMC3k cell-type markers the ARI difference is not statistically distinguishable ($-0.044$ [$-0.167, 0.080$], with pair balanced accuracy at $k = 2 \times \text{groups}$ reaching $1.000$ vs $0.968$), while on METABRIC PAM50 breast cancer expression it tracks slightly below $k$-means ($-0.030$ [$-0.048, -0.011$], ARI $0.398$ vs $0.428$, against an oracle ceiling of $0.871$). Signed Consolidated NSA-Flow, which constructs variance-ranked contrast axes rather than cluster partitions, is ill-suited to discrete module recovery (METABRIC ARI $0.23$, PBMC3k $0.74$) and has been replaced by the non-negative mode as the primary benchmark comparator.
+\item \textbf{Fit-preserving oblique factor-analysis rotation (v3.5.0).}
+  In exploratory factor analysis, simple structure is classically sought via oblique rotations (promax, oblimin) that preserve the reproduced correlation fit of principal axis factoring (PAF). In \texttt{nsa\_flow.bench}, NSA-Flow is evaluated as a fit-preserving rotation (\texttt{NSA rotation}, $w=0.5$, \texttt{fidelity="subspace"}): it finds a simple-structure basis for the PAF subspace and computes factor correlations by least squares, guaranteeing identical reproduced-correlation error by construction ($\Delta \text{recon\_err} = 0.000$ [$-0.000, 0.000$]). Compared against PAF promax on standardized psychometric benchmarks, NSA rotation yields simpler loadings with lower Hofmann complexity: $-0.033$ [$-0.036, -0.031$] on the Big Five Inventory (BFI), $-0.010$ [$-0.013, -0.008$] on Holzinger--Swineford, and $-0.001$ to $-0.017$ across simulated factor structures ($n \in [100, 1000]$). Keyed non-negative NSA produces even simpler, independent-cluster factor patterns at a modest cost to reproduced correlation, whereas early loading-shrinkage heuristics (\texttt{NSA.FA shrink}) are dominated by oblique promax rotation.
 \item Uniqueness for $w<1$ is an empirical finding on the problem families tested,
   not a theorem; $E_w$ is not convex, and $w\to1$ is provably combinatorial.
 \item Conditioning degrades as $w \to 1$: iteration counts grow from tens to
@@ -926,18 +944,24 @@ its inner loop, and answers to a clean description: a relaxation between
 reconstruction and a hard clustering of features, indexed by one interpretable
 number. What it does not do is offer a free lunch across every problem: on gross
 binary linear tasks where global variance dominates, it trades a modest $2$--$4\%$
-in discriminative power for factor readability. But where underlying processes are
-modular, staged, or physically non-negative---such as continuous clinical
-progression on ADNI CDRSB, cancer transcriptomics on Prostate tissue, and NIR
-spectrometry---its disjoint, unconfounded representations provide significant
-empirical advantages over dense PCA. A method whose weight finally means
-something can be held to a claim about what that weight buys, and what it buys
-here is readability, with the conditions under which it improves or trades
-accuracy clearly demarcated.
+in discriminative power for factor readability. Where underlying processes are
+modular or staged---such as continuous clinical progression on ADNI CDRSB---its
+disjoint, coordinate-aligned representations provide clear empirical advantages
+for tree-based estimators ($\Delta R^2 = +0.147$ [$0.078, 0.216$] under nested CV).
+Conversely, on physically non-negative problems such as NIR spectrometry (Tecator),
+it preserves physical non-negativity and yields clean, contiguous spectral bands at
+PCA-level linear accuracy ($\Delta R^2 = -0.001$) without claiming a predictive gain,
+and incurs a Random Forest deficit ($-0.242$) where band-averaging discards fine
+spectral shape. Other fixed-$k$ headline advantages (such as Prostate cancer $0.824$
+vs $0.805$ Balanced Accuracy and the 9-outcome cognitive battery) reflect un-nested
+single-stage cross-validation that await full nested evaluation.
+A method whose weight finally means something can be held to a claim about what that
+weight buys, and what it buys here is readability, with the conditions under which it
+improves or trades accuracy clearly demarcated.
 
 \paragraph{Reproducibility.} Code, the property battery and the experiment
-harness are in the accompanying repository. \texttt{make test} runs $403$
-assertions, $79$ of which state the propositions of \S\ref{sec:functional}
+harness are in the accompanying repository. \texttt{make test} runs $461$
+tests, $78$ of which state the propositions of \S\ref{sec:functional}
 executably; \texttt{make paper} regenerates every table and figure from scratch.
 
 \bibliographystyle{plainnat}

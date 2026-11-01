@@ -1,3 +1,17 @@
+<!--
+================================================================================
+DEPRECATION NOTICE:
+This R Markdown manuscript (paper/nsa_flow.Rmd) is DEPRECATED and RETIRED as an
+active manuscript target.
+
+The authoritative and active manuscript source is paper/nsaflow.tex, compiled
+to paper/nsaflow.pdf via 'make paper'.
+
+Non-redundant contextual discussions from this document (including the angle defect
+C(Y) vs Stiefel defect D(Y)) have been consolidated into paper/nsaflow.tex.
+================================================================================
+-->
+
 ---
 title: "Non-Negative Stiefel Approximating Flow: Orthogonalish Matrix Optimization for Interpretable Embeddings"
 author: |

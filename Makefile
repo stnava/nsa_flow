@@ -15,8 +15,8 @@ help:
 	@echo "new-benchmarks - run Tecator, Sonar & Prostate benchmarks + sweeps + tables"
 	@echo "docs         - build Sphinx HTML documentation -> docs/_build/html"
 	@echo "docs-clean   - remove Sphinx build artefacts"
-	@echo "paper        - build paper/nsaflow.pdf from existing results"
-	@echo "rmd-paper    - build paper/nsa_flow.pdf from Rmd"
+	@echo "paper        - build paper/nsaflow.pdf from paper/nsaflow.tex (primary manuscript)"
+	@echo "rmd-paper    - [DEPRECATED] legacy Rmd manuscript target (use 'make paper')"
 	@echo "dist         - build and check distribution wheels & sdist"
 	@echo "release      - upload dist/* to PyPI"
 	@echo "all          - experiments + paper, from scratch"
@@ -74,7 +74,8 @@ paper:
 	cd paper && latexmk -pdf -quiet nsaflow.tex
 
 rmd-paper:
-	Rscript -e 'rmarkdown::render("paper/nsa_flow.Rmd")'
+	@echo "DEPRECATED: paper/nsa_flow.Rmd is retired in favor of paper/nsaflow.tex."
+	@echo "Use 'make paper' to compile paper/nsaflow.pdf."
 
 dist:
 	rm -rf dist/ build/ *.egg-info
