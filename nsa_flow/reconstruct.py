@@ -36,7 +36,7 @@ a global minimum, and the relaxation path matters (see ``relax_into_nonneg``).
 """
 import torch
 
-from .diagnostics import default_tol, make_result, orth_terms
+from .diagnostics import default_tol, make_result, orth_terms, coerce_tensor
 from .linalg import leading_eigenvectors, varimax
 from .optim import minimise
 from .project import project_nonneg, _resolve_column_sign_gauge
@@ -150,35 +150,58 @@ def grad_reconstruction_fidelity(V, S, c):
 
 def _smooth_descent(V, obj, grad, max_iter, tol, sigma):
     """BB + Armijo on an unconstrained smooth objective; returns the iterate."""
-    E = float(obj(V))
+    on_device = V.device.type != "cpu"
+    tiny = float(torch.finfo(V.dtype).tiny)
+    E = obj(V)
     g = grad(V)
-    t = 1.0 / max(float(g.norm()), 1e-12)
+    gnorm = g.norm()
+    if on_device:
+        t = 1.0 / gnorm.clamp_min(tiny)
+    else:
+        t = 1.0 / max(float(gnorm), 1e-12)
     V_prev = g_prev = None
     for _ in range(max_iter):
         if V_prev is not None:
             s_ = V - V_prev
             r_ = g - g_prev
-            sr = float((s_ * r_).sum())
-            t = float((s_ * s_).sum()) / sr if sr > 0 else 1e12
-            t = min(max(t, 1e-12), 1e12)
+            sr = (s_ * r_).sum()
+            ss = (s_ * s_).sum()
+            if on_device:
+                t = torch.where(sr > 0, ss / sr.clamp_min(tiny),
+                                torch.as_tensor(1e12, device=V.device, dtype=V.dtype)).clamp(1e-12, 1e12)
+            else:
+                sr_f = float(sr)
+                t = float(ss) / sr_f if sr_f > 0 else 1e12
+                t = min(max(t, 1e-12), 1e12)
         ok = False
         for _ in range(60):
             V_new = V - t * g
-            d2 = float((V_new - V).pow(2).sum())
-            if float(obj(V_new)) <= E - sigma * d2 / t:
-                ok = True
-                break
-            t *= 0.5
+            d2 = (V_new - V).pow(2).sum()
+            E_new = obj(V_new)
+            if on_device:
+                if bool((E_new <= E - sigma * d2 / t).item()):
+                    ok = True
+                    break
+            else:
+                if float(E_new) <= float(E) - sigma * float(d2) / t:
+                    ok = True
+                    break
+            t = t * 0.5
         if not ok:
             break
-        if (d2 ** 0.5) / t <= tol:
+        if on_device:
+            stop_check = bool(((d2.sqrt() / t) <= tol).item())
+        else:
+            stop_check = (float(d2) ** 0.5) / t <= tol
+        if stop_check:
             V = V_new
             break
         V_prev, g_prev = V, g
         V = V_new
-        E = float(obj(V))
+        E = E_new
         g = grad(V)
     return V
+
 
 
 def relax_into_nonneg(S, c, k, w, mus=None, max_iter=600, tol=1e-10, sigma=1e-4,
@@ -302,15 +325,14 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="D", max_iter=None,
         (``p > n``), which is both the cost crossover -- ``n p k`` against
         ``p^2 k`` per iteration -- and the point past which ``S`` stops fitting
         in memory (0.4 GB at ``p = 7129``, 3.2 GB at ``p = 20000``).
+    dtype : torch.dtype, optional
+        Working precision (default ``None`` infers from X).
+    device : torch.device, str, or None, optional
+        Target computing device. If None, computation stays on the device of
+        the input tensor. If explicitly specified, moves inputs and executes
+        all downstream solver routines on that device.
     """
-    Xt = torch.as_tensor(X)
-    if not torch.is_floating_point(Xt):
-        Xt = Xt.double()
-    if dtype is not None:
-        Xt = Xt.to(dtype)
-    if device is not None:
-        Xt = Xt.to(device)
-    Xt = Xt.detach()
+    Xt = coerce_tensor(X, dtype=dtype, device=device, stacklevel=3)
     if Xt.ndim != 2:
         raise ValueError(f"X must be 2-D [n, p]; got shape {tuple(Xt.shape)}")
     if not torch.isfinite(Xt).all():

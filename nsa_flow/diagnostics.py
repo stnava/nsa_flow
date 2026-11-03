@@ -65,7 +65,7 @@ __all__ = [
     "ORTH", "orth_terms", "orth_names",
     "gradient_mapping", "basis_report", "support_stats",
     "make_result", "CERTIFICATES", "CONVERGED_STOPS", "STOP_REASONS",
-    "default_tol",
+    "default_tol", "coerce_tensor",
 ]
 
 #: Stop reasons any loop may return.  ``grad_map`` is the only positive claim of
@@ -168,23 +168,31 @@ def orth_terms(orth):
 # --------------------------------------------------------------------------
 # the stationarity certificate, defined once
 # --------------------------------------------------------------------------
-def gradient_mapping(Y, grad, proj=project_nonneg):
+def gradient_mapping(Y, grad, proj=project_nonneg, as_tensor=False):
     r"""``|| P(Y - ||Y||_F^2 grad) - Y ||_F / ||Y||_F`` -- see the module docstring.
 
     Dimensionless, invariant under ``Y -> cY``, and zero exactly at a stationary
     point of ``min E(Y) s.t. Y in dom(proj)``.  Pass ``proj=None`` for an
     unconstrained problem, where this reduces to ``||Y||_F ||grad||_F``.
 
-    Returns a Python float so it is directly comparable across optimisers,
-    modes, devices and dtypes.
+    Returns a Python float (or 0-D tensor on device when ``as_tensor=True``)
+    so it is directly comparable across optimisers, modes, devices and dtypes.
     """
-    nY = float(Y.norm())
-    if not math.isfinite(nY) or nY <= 0.0:
+    nY = Y.norm()
+    if as_tensor:
+        step = Y - (nY * nY) * grad
+        if proj is not None:
+            step = proj(step)
+        tiny = float(torch.finfo(Y.dtype).tiny)
+        return (step - Y).norm() / nY.clamp_min(tiny)
+
+    nY_f = float(nY)
+    if not math.isfinite(nY_f) or nY_f <= 0.0:
         return float("inf")
     step = Y - (nY * nY) * grad
     if proj is not None:
         step = proj(step)
-    return float((step - Y).norm()) / nY
+    return float((step - Y).norm()) / nY_f
 
 
 # --------------------------------------------------------------------------
@@ -200,7 +208,34 @@ def support_stats(Y, rel_tol=1e-8):
     small nonzero defect rather than at zero.
     """
     A = Y.abs()
-    peak = float(A.max()) if A.numel() else 0.0
+    if not A.numel():
+        return dict(sparsity=0.0, max_support=0, mean_support=0.0, n_dead_columns=0, support_overlap=0.0)
+    if Y.device.type != "cpu":
+        peak = A.max()
+        thr = rel_tol * peak
+        used = A > thr
+        per_feature = used.sum(-1)
+        live = per_feature > 0
+        nnz = used.sum(-2)
+        sparsity = (~used).to(torch.float32).mean()
+        max_sup = nnz.max().to(torch.float32)
+        mean_sup = nnz.to(torch.float32).mean()
+        n_dead = (nnz == 0).sum().to(torch.float32)
+        live_f = live.to(torch.float32)
+        live_count = live_f.sum()
+        live_sum = per_feature.to(torch.float32).sum()
+        vals = torch.stack([sparsity, max_sup, mean_sup, n_dead, live_count, live_sum]).tolist()
+        cnt = vals[4]
+        overlap = (vals[5] / cnt - 1.0) if cnt > 0 else 0.0
+        return dict(
+            sparsity=vals[0],
+            max_support=int(vals[1]),
+            mean_support=vals[2],
+            n_dead_columns=int(vals[3]),
+            support_overlap=overlap,
+        )
+
+    peak = float(A.max())
     thr = rel_tol * peak
     used = A > thr
     per_feature = used.sum(-1)
@@ -239,6 +274,24 @@ def basis_report(Y, rel_tol=1e-8):
         - ``sparsity``, ``max_support``, ``mean_support``, ``n_dead_columns``,
           ``support_overlap``: From :func:`support_stats`.
     """
+    if Y.device.type != "cpu":
+        names = list(ORTH.keys())
+        def_tensors = [fn(Y).reshape(()).to(torch.float32) for name, (fn, _, _) in ORTH.items()]
+        raw_def = stiefel_defect(Y).reshape(()).to(torch.float32)
+        eff_rank = effective_rank(Y).reshape(()).to(torch.float32)
+        cn = Y.norm(dim=-2)
+        cn_min = cn.min().reshape(()).to(torch.float32)
+        cn_max = cn.max().reshape(()).to(torch.float32)
+        all_vals = torch.stack(def_tensors + [raw_def, eff_rank, cn_min, cn_max]).tolist()
+        out = {f"defect_{names[i]}": all_vals[i] for i in range(len(names))}
+        out["raw_defect"] = all_vals[len(names)]
+        out["effective_rank"] = all_vals[len(names) + 1]
+        lo = all_vals[len(names) + 2]
+        hi = all_vals[len(names) + 3]
+        out["column_norm_ratio"] = (hi / lo) if lo > 0 else float("inf")
+        out.update(support_stats(Y, rel_tol=rel_tol))
+        return out
+
     out = {f"defect_{name}": float(fn(Y)) for name, (fn, _, _) in ORTH.items()}
     out["raw_defect"] = float(stiefel_defect(Y))
     out["effective_rank"] = float(effective_rank(Y))
@@ -295,3 +348,40 @@ def make_result(cls, *, Y, w, orth, energy, fidelity, defect, iters, stop,
     res.update(basis_report(Y))
     res.update(extra)
     return res
+
+
+def coerce_tensor(data, dtype=None, device=None, stacklevel=2):
+    """Convert input to tensor on target device and dtype, with graceful MPS float64 handling."""
+    import warnings
+    t = torch.as_tensor(data)
+    if not torch.is_floating_point(t):
+        t = t.double()
+    if dtype is not None and not isinstance(dtype, torch.dtype):
+        if isinstance(dtype, str):
+            dtype = getattr(torch, dtype)
+        else:
+            try:
+                import numpy as _np
+                dtype = torch.from_numpy(_np.empty(0, dtype=dtype)).dtype
+            except Exception:
+                pass
+    target_dev = torch.device(device) if device is not None else t.device
+    if target_dev.type == "mps":
+        if dtype in (torch.float64, torch.double):
+            raise ValueError(
+                "Apple Silicon MPS does not support float64 precision; "
+                "specify dtype=torch.float32 or keep device='cpu'."
+            )
+        if dtype is None and t.dtype == torch.float64:
+            warnings.warn(
+                "Apple Silicon MPS does not support float64 precision; "
+                "automatically converting input to float32. Use device='cpu' to preserve float64 precision.",
+                UserWarning,
+                stacklevel=stacklevel,
+            )
+            t = t.to(torch.float32)
+    if dtype is not None:
+        t = t.to(dtype)
+    if device is not None:
+        t = t.to(device)
+    return t.detach()

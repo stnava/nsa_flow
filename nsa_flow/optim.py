@@ -91,7 +91,8 @@ import torch
 from .diagnostics import gradient_mapping
 from .project import project_nonneg
 
-__all__ = ["Report", "minimise", "OPTIMIZERS", "optimizer_names"]
+__all__ = ["Report", "minimise", "OPTIMIZERS", "optimizer_names",
+           "inner_optimization_step", "inner_optimization_loop"]
 
 _T_MIN, _T_MAX = 1e-12, 1e12
 
@@ -153,12 +154,12 @@ class _Counter:
 
     def E(self, Y):
         self.n_energy += 1
-        return float(self.energy_fn(Y))
+        return self.energy_fn(Y)
 
     def G(self, Y):
         self.n_grad += 1
         E, g = self.grad_fn(Y)
-        return float(E), g
+        return E, g
 
 
 def _plateau(E_window, g_window, patience, rtol, gmap_rtol=0.1):
@@ -253,18 +254,22 @@ def _gmap_stalled(g_window, min_samples=5, gmap_rtol=0.1):
 # spectral projected gradient
 # --------------------------------------------------------------------------
 def _spg(Y, energy_fn, grad_fn, proj, *, max_iter=2000, tol=1e-9, sigma=1e-4,
-         patience=50, rtol=1e-12, alternating=True, trace=None, w=None,
+         patience=50, rtol=1e-12, alternating=True, cert_every=None, trace=None, w=None,
          verbose=False, **_):
     t0 = time.time()
     cnt = _Counter(energy_fn, grad_fn)
     Y = proj(Y)
     E, g = cnt.G(Y)
-    t = 1.0 / max(float(g.norm()), 1e-12)
+    g_norm = g.norm()
+    t = 1.0 / max(float(g_norm), 1e-12)
     Y_prev = g_prev = None
     gmap = gradient_mapping(Y, g, proj)
     E0, gmap0 = E, gmap
     stop, it, window, gwin = "max_iter", 0, [], []
     _trace_start(trace, E, gmap, t0, w)
+    on_device = Y.device.type != "cpu"
+    if cert_every is None:
+        cert_every = 5 if on_device else 1
 
     while cnt.n_grad < max_iter:
         it += 1
@@ -274,65 +279,101 @@ def _spg(Y, energy_fn, grad_fn, proj, *, max_iter=2000, tol=1e-9, sigma=1e-4,
         if Y_prev is not None:                       # (alternating) Barzilai-Borwein
             s_ = Y - Y_prev
             r_ = g - g_prev
-            # one host transfer for all three inner products rather than three;
-            # on an accelerator each is a full pipeline stall
-            sr, ss, rr = torch.stack([(s_ * r_).sum(), (s_ * s_).sum(),
-                                      (r_ * r_).sum()]).tolist()
-            if sr > 0:
+            sr = (s_ * r_).sum()
+            ss = (s_ * s_).sum()
+            rr = (r_ * r_).sum()
+            tiny = float(torch.finfo(Y.dtype).tiny)
+            if on_device:
                 if alternating and it % 2 == 0:
-                    t = sr / max(rr, 1e-300)                         # BB2
+                    t_bb = sr / rr.clamp_min(tiny)
                 else:
-                    t = ss / sr                                      # BB1
+                    t_bb = ss / sr.clamp_min(tiny)
+                t = torch.where(sr > 0, t_bb, torch.as_tensor(t, device=Y.device, dtype=Y.dtype)).clamp(_T_MIN, _T_MAX)
             else:
-                # negative curvature along the secant: BB is meaningless here.
-                # Keep the previous step rather than jumping to the clamp.
+                sr_f, ss_f, rr_f = sr.item(), ss.item(), rr.item()
+                if sr_f > 0:
+                    if alternating and it % 2 == 0:
+                        t = sr_f / max(rr_f, tiny)                           # BB2
+                    else:
+                        t = ss_f / max(sr_f, tiny)                           # BB1
+                else:
+                    t = min(max(t, _T_MIN), _T_MAX)
                 t = min(max(t, _T_MIN), _T_MAX)
-            t = min(max(t, _T_MIN), _T_MAX)
 
         accepted, E_try = False, None
         for _ in range(60):                          # Armijo on the projected step
             Y_new = proj(Y - t * g)
             d_ = Y_new - Y
-            dn2 = float((d_ * d_).sum())
+            dn2 = (d_ * d_).sum()
             E_new = cnt.E(Y_new)
             E_try = E_new if E_try is None else min(E_try, E_new)
-            if E_new <= E - sigma * dn2 / t:
+            if bool((E_new <= E - sigma * dn2 / t).item()):
                 accepted = True
                 break
-            t *= 0.5
+            t = t * 0.5
             if cnt.n_energy >= 4 * max_iter:         # pathological line search
                 break
         if not accepted:
-            stop = _classify_stall(E, E_try, gwin, gmap, tol, Y.dtype)
+            stop = _classify_stall(float(E), float(E_try) if E_try is not None else None,
+                                   gwin, float(gmap), tol, Y.dtype)
             break
 
         Y_prev, g_prev = Y, g
         Y = Y_new
         E, g = cnt.G(Y)
-        gmap = gradient_mapping(Y, g, proj)
 
-        if trace is not None:
-            row = dict(iter=it, energy=E, grad_map=gmap, step=t,
-                       seconds=time.time() - t0, n_grad=cnt.n_grad,
-                       n_energy=cnt.n_energy)
-            if w is not None:
-                row["w"] = float(w)
-            trace.append(row)
-        if verbose and (it % 50 == 0 or it == 1):
-            print(f"    [spg it={it:5d}] E={E:.8e} |Gmap|={gmap:.3e} t={t:.3e}")
+        if on_device:
+            if it % cert_every == 0:
+                gmap_t = gradient_mapping(Y, g, proj, as_tensor=True)
+                E_f, gmap_f = torch.stack([E.reshape(()), gmap_t]).tolist()
+                gmap = gmap_f
+                window.append(E_f)
+                gwin.append(gmap_f)
+                if len(window) > patience:
+                    window.pop(0)
+                    gwin.pop(0)
+                if gmap <= tol:
+                    stop = "grad_map"
+                    break
+                if _plateau(window, gwin, patience, rtol):
+                    stop = "plateau"
+                    break
+            if trace is not None:
+                row = dict(iter=it, energy=float(E), grad_map=float(gmap), step=float(t),
+                           seconds=time.time() - t0, n_grad=cnt.n_grad,
+                           n_energy=cnt.n_energy)
+                if w is not None:
+                    row["w"] = float(w)
+                trace.append(row)
+        else:
+            if it % cert_every == 0:
+                gmap = gradient_mapping(Y, g, proj)
+            if trace is not None:
+                row = dict(iter=it, energy=float(E), grad_map=float(gmap), step=float(t),
+                           seconds=time.time() - t0, n_grad=cnt.n_grad,
+                           n_energy=cnt.n_energy)
+                if w is not None:
+                    row["w"] = float(w)
+                trace.append(row)
+            if verbose and (it % 50 == 0 or it == 1):
+                print(f"    [spg it={it:5d}] E={float(E):.8e} |Gmap|={float(gmap):.3e} t={float(t):.3e}")
 
-        window.append(E)
-        gwin.append(gmap)
-        if len(window) > patience:
-            window.pop(0)
-            gwin.pop(0)
-        if gmap <= tol:
-            stop = "grad_map"
-            break
-        if _plateau(window, gwin, patience, rtol):
-            stop = "plateau"
-            break
+            window.append(float(E))
+            gwin.append(float(gmap))
+            if len(window) > patience:
+                window.pop(0)
+                gwin.pop(0)
+            if gmap <= tol:
+                stop = "grad_map"
+                break
+            if _plateau(window, gwin, patience, rtol):
+                stop = "plateau"
+                break
 
+    # Final certification on iterate actually returned
+    gmap = float(gradient_mapping(Y, g, proj))
+    if stop == "grad_map" and gmap > tol:
+        stop = "plateau"
     return _report(Y, E, it, stop, gmap, cnt.n_grad, cnt.n_energy, t0,
                    E0=E0, gmap0=gmap0)
 
@@ -355,12 +396,13 @@ def _fista(Y, energy_fn, grad_fn, proj, *, max_iter=2000, tol=1e-9,
     cnt = _Counter(energy_fn, grad_fn)
     Y = proj(Y)
     E, g = cnt.G(Y)
-    gmap = gradient_mapping(Y, g, proj)
+    gmap = float(gradient_mapping(Y, g, proj))
     L = max(float(g.norm()), 1e-12)
     Z, theta = Y, 1.0
-    E0, gmap0 = E, gmap
+    E0, gmap0 = float(E), gmap
     stop, it, window, gwin = "max_iter", 0, [], []
-    _trace_start(trace, E, gmap, t0, w)
+    _trace_start(trace, float(E), gmap, t0, w)
+    on_device = Y.device.type != "cpu"
 
     while cnt.n_grad < max_iter:
         it += 1
@@ -373,22 +415,25 @@ def _fista(Y, energy_fn, grad_fn, proj, *, max_iter=2000, tol=1e-9,
         for _ in range(60):                    # backtrack the Lipschitz estimate
             Y_new = proj(Z - g_Z / L)
             d_ = Y_new - Z
-            dn2 = float((d_ * d_).sum())
+            dn2 = (d_ * d_).sum()
             E_new = cnt.E(Y_new)
             E_try = E_new if E_try is None else min(E_try, E_new)
-            if E_new <= E_Z + float((g_Z * d_).sum()) + 0.5 * L * dn2 + 1e-15:
+            rhs = E_Z + (g_Z * d_).sum() + (0.5 * L) * dn2 + 1e-15
+            if bool((E_new <= rhs).item()):
                 accepted = True
                 break
             L *= 2.0
         if not accepted:
-            stop = _classify_stall(E, E_try, gwin, gmap, tol, Y.dtype)
+            stop = _classify_stall(float(E), float(E_try) if E_try is not None else None,
+                                   gwin, float(gmap), tol, Y.dtype)
             break
 
-        if E_new > E:                          # adaptive restart: drop the momentum
+        if bool((E_new > E).item()):           # adaptive restart: drop the momentum
             if theta == 1.0:
                 # already un-accelerated and still not descending: the quadratic
                 # model is satisfied but the step does not help.
-                stop = _classify_stall(E, E_try, gwin, gmap, tol, Y.dtype)
+                stop = _classify_stall(float(E), float(E_try) if E_try is not None else None,
+                                       gwin, float(gmap), tol, Y.dtype)
                 break
             Z, theta = Y, 1.0
             continue
@@ -399,34 +444,59 @@ def _fista(Y, energy_fn, grad_fn, proj, *, max_iter=2000, tol=1e-9,
         Y, E = Y_new, E_new
         L = max(L * 0.8, 1e-12)                # let the estimate relax back down
 
-        if it % cert_every == 0:
-            _, g = cnt.G(Y)
-            gmap = gradient_mapping(Y, g, proj)
+        if on_device:
+            if it % cert_every == 0:
+                _, g = cnt.G(Y)
+                gmap_t = gradient_mapping(Y, g, proj, as_tensor=True)
+                E_f, gmap_f = torch.stack([E.reshape(()), gmap_t]).tolist()
+                gmap = gmap_f
+                window.append(E_f)
+                gwin.append(gmap_f)
+                if len(window) > patience:
+                    window.pop(0)
+                    gwin.pop(0)
+                if gmap <= tol:
+                    stop = "grad_map"
+                    break
+                if _plateau(window, gwin, patience, rtol):
+                    stop = "plateau"
+                    break
+            if trace is not None:
+                row = dict(iter=it, energy=float(E), grad_map=float(gmap), step=1.0 / L,
+                           seconds=time.time() - t0, n_grad=cnt.n_grad,
+                           n_energy=cnt.n_energy)
+                if w is not None:
+                    row["w"] = float(w)
+                trace.append(row)
+        else:
+            if it % cert_every == 0:
+                _, g = cnt.G(Y)
+                gmap = float(gradient_mapping(Y, g, proj))
 
-        if trace is not None:
-            row = dict(iter=it, energy=E, grad_map=gmap, step=1.0 / L,
-                       seconds=time.time() - t0, n_grad=cnt.n_grad,
-                       n_energy=cnt.n_energy)
-            if w is not None:
-                row["w"] = float(w)
-            trace.append(row)
-        if verbose and (it % 50 == 0 or it == 1):
-            print(f"    [fista it={it:5d}] E={E:.8e} |Gmap|={gmap:.3e} L={L:.3e}")
+            if trace is not None:
+                row = dict(iter=it, energy=float(E), grad_map=float(gmap), step=1.0 / L,
+                           seconds=time.time() - t0, n_grad=cnt.n_grad,
+                           n_energy=cnt.n_energy)
+                if w is not None:
+                    row["w"] = float(w)
+                trace.append(row)
+            if verbose and (it % 50 == 0 or it == 1):
+                print(f"    [fista it={it:5d}] E={float(E):.8e} |Gmap|={float(gmap):.3e} L={L:.3e}")
 
-        window.append(E)
-        gwin.append(gmap)
-        if len(window) > patience:
-            window.pop(0)
-            gwin.pop(0)
-        if gmap <= tol:
-            stop = "grad_map"
-            break
-        if _plateau(window, gwin, patience, rtol):
-            stop = "plateau"
-            break
+            window.append(float(E))
+            gwin.append(float(gmap))
+            if len(window) > patience:
+                window.pop(0)
+                gwin.pop(0)
+            if gmap <= tol:
+                stop = "grad_map"
+                break
+            if _plateau(window, gwin, patience, rtol):
+                stop = "plateau"
+                break
 
     _, g = cnt.G(Y)                            # certify the point actually returned
-    gmap = gradient_mapping(Y, g, proj)
+    gmap = float(gradient_mapping(Y, g, proj))
     if stop == "grad_map" and gmap > tol:
         stop = "plateau"
     return _report(Y, E, it, stop, gmap, cnt.n_grad, cnt.n_energy, t0,
@@ -604,7 +674,7 @@ def _pqn(Y, energy_fn, grad_fn, proj, *, max_iter=2000, tol=1e-9, sigma=1e-4,
 # --------------------------------------------------------------------------
 def _tlbfgsb(Y, energy_fn, grad_fn, proj, *, max_iter=2000, tol=1e-9, sigma=1e-4,
              history_size=10, mask=None, bounded=True, trace=None, w=None,
-             verbose=False, problem_spec=None, **_):
+             verbose=False, problem_spec=None, cert_every=None, **_):
     """Adapter onto :func:`nsa_flow.lbfgsb.lbfgsb_minimize` or native :func:`lbfgsb_solve`.
 
     The bounds are the feasible set this package uses -- ``Y >= 0``, plus an
@@ -615,7 +685,8 @@ def _tlbfgsb(Y, energy_fn, grad_fn, proj, *, max_iter=2000, tol=1e-9, sigma=1e-4
     from .lbfgsb import _native, lbfgsb_minimize
     t0 = time.time()
 
-    if _native is not None and hasattr(_native, "lbfgsb_solve") and Y.is_cpu and problem_spec is not None:
+    if (_native is not None and hasattr(_native, "lbfgsb_solve") and Y.is_cpu
+            and Y.dtype in (torch.float32, torch.float64) and problem_spec is not None):
         mode = problem_spec.get("mode")
         orth = problem_spec.get("orth", "D")
         align = problem_spec.get("align", False)
@@ -680,13 +751,13 @@ def _tlbfgsb(Y, energy_fn, grad_fn, proj, *, max_iter=2000, tol=1e-9, sigma=1e-4
     else:
         cproj = proj
 
-    def cert(Yv, gv):
-        return gradient_mapping(Yv, gv, cproj)
+    def cert(Yv, gv, as_tensor=False):
+        return gradient_mapping(Yv, gv, cproj, as_tensor=as_tensor)
 
     Y0 = cproj(Y)
     E0, g0 = cnt.G(Y0)
-    gmap0 = cert(Y0, g0)
-    _trace_start(trace, E0, gmap0, t0, w)
+    gmap0 = float(cert(Y0, g0))
+    _trace_start(trace, float(E0), gmap0, t0, w)
 
     def cb(it, f, gmap, n_grad, n_fun):
         if trace is not None:
@@ -703,7 +774,8 @@ def _tlbfgsb(Y, energy_fn, grad_fn, proj, *, max_iter=2000, tol=1e-9, sigma=1e-4
         Y0, lambda Yv: cnt.G(Yv), fun=cnt.E, lower=(0.0 if bounded else None), upper=None,
         mask=mask,
         max_grad=max(max_iter - cnt.n_grad, 1), tol=tol, memory=history_size,
-        sigma=sigma, certificate=cert, callback=cb, stall_slack=STALL_SLACK)
+        sigma=sigma, certificate=cert, callback=cb, stall_slack=STALL_SLACK,
+        cert_every=cert_every)
 
     stop = out["stop"]          # classified inside lbfgsb_minimize by the shared rule
     return _report(out["x"], out["f"], out["iters"], stop, out["grad_map"],
@@ -732,7 +804,7 @@ def _lbfgsb(Y, energy_fn, grad_fn, proj, *, max_iter=2000, tol=1e-9,
     def f_and_g(y_flat):
         Yt = torch.as_tensor(y_flat.reshape(shape), dtype=dtype, device=device)
         E, g = cnt.G(Yt)
-        return E, g.detach().cpu().numpy().astype(np.float64).ravel()
+        return float(E), g.detach().cpu().numpy().astype(np.float64).ravel()
 
     if mask is None:
         bounds = [(0.0, None)] * Y.numel()
@@ -952,3 +1024,56 @@ def _minimise(Y0, energy_fn, grad_fn, proj, *, optimizer, max_iter, tol, mask,
             "max_iter, loosen tol, or inspect stop_reason and grad_map.",
             RuntimeWarning, stacklevel=3)
     return rep
+
+
+def inner_optimization_step(Y, grad_fn, proj=None, lr=0.01, velocity=None, momentum=0.0):
+    r"""Execute a single inner optimization step completely on-device without host synchronizations.
+
+    Performs a projected gradient (or momentum) update purely with tensor
+    operations on the device of ``Y``, ensuring zero host transfers (no
+    ``.item()``, ``float()``, ``int()``, ``bool()``, or ``.cpu()``).
+
+    Parameters
+    ----------
+    Y : Tensor
+        Current iterate on target device.
+    grad_fn : callable
+        Callable returning ``(energy, grad)`` on target device.
+    proj : callable, optional
+        Projection operator on target device (e.g. ``project_nonneg``).
+    lr : float or Tensor
+        Step size.
+    velocity : Tensor, optional
+        Momentum velocity buffer on target device.
+    momentum : float
+        Momentum factor (default 0.0).
+
+    Returns
+    -------
+    (Y_next, energy, grad, velocity)
+        Updated tensors all resident on the target device.
+    """
+    E, g = grad_fn(Y)
+    if momentum > 0.0:
+        if velocity is None:
+            velocity = torch.zeros_like(g)
+        velocity = momentum * velocity + g
+        step_dir = velocity
+    else:
+        step_dir = g
+    Y_step = Y - lr * step_dir
+    Y_next = proj(Y_step) if proj is not None else Y_step
+    return Y_next, E, g, velocity
+
+
+def inner_optimization_loop(Y, grad_fn, proj=None, n_steps=10, lr=0.01):
+    r"""Execute multiple inner optimization steps in a pipelined command stream on-device.
+
+    Guarantees zero D2H synchronizations across all ``n_steps`` in the interval.
+    """
+    E, g = None, None
+    for _ in range(n_steps):
+        E, g = grad_fn(Y)
+        Y_step = Y - lr * g
+        Y = proj(Y_step) if proj is not None else Y_step
+    return Y, E, g

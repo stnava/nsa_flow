@@ -34,7 +34,7 @@ import warnings
 
 import torch
 
-from .diagnostics import default_tol, make_result, orth_terms
+from .diagnostics import default_tol, make_result, orth_terms, coerce_tensor
 from .energy import (energy, stiefel_defect_normalised, grad_stiefel_defect,
                      value_and_grad, aligned_target)
 from .linalg import varimax
@@ -257,6 +257,10 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
         Column-wise quantile sparseness target (default ``None``). When given,
         selects the top ``(1 - sparseness)`` support per column after the main
         solve and re-optimises ``E_w(Y)`` restricted to that fixed support.
+    dtype : torch.dtype, optional
+        Working precision (default ``None`` infers from target).
+    device : torch.device, str, or None, optional
+        Target computing device (default ``None`` keeps computation on target's device).
 
     Notes
     -----
@@ -270,14 +274,7 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
     -------
     NSAResult
     """
-    X0 = torch.as_tensor(target)
-    if not torch.is_floating_point(X0):
-        X0 = X0.double()
-    if dtype is not None:
-        X0 = X0.to(dtype)
-    if device is not None:
-        X0 = X0.to(device)
-    X0 = X0.detach()
+    X0 = coerce_tensor(target, dtype=dtype, device=device, stacklevel=3)
     if X0.ndim != 2:
         raise ValueError(f"target must be 2-D [p, k]; got shape {tuple(X0.shape)}")
     if not (0.0 <= float(w) <= 1.0):
@@ -307,12 +304,15 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
     optimizer = DEFAULT_OPTIMIZER if optimizer is None else optimizer
     max_iter = DEFAULT_MAX_GRAD_EVALS if max_iter is None else int(max_iter)
 
+    if fidelity == "entrywise":
+        fidelity = "anchor"
     if fidelity not in ("auto", "anchor", "subspace"):
         raise ValueError("fidelity must be 'auto', 'anchor' or 'subspace'; "
                          f"got {fidelity!r}")
-    neg_mass = float(negative_mass(X0))
     requested = fidelity
+    neg_mass = None
     if fidelity == "auto":
+        neg_mass = float(negative_mass(X0))
         # Only switch when there is an orthogonality term to work with.  The
         # subspace fidelity is scale-free and indifferent to rank, so on its own
         # at w = 0 it is minimised by any non-negative matrix inside range(X0),
@@ -399,11 +399,11 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
             print(f"  continuation step w={wi:.4f}")
 
         def _anc_energy(Yc, _w=wi):
-            return float(vg(Yc, X0, _w, denom, inv_k, eye_k, align)[0])
+            return vg(Yc, X0, _w, denom, inv_k, eye_k, align)[0]
 
         def _anc_grad_and_energy(Yc, _w=wi):
             E_v, _, _, g_v = vg(Yc, X0, _w, denom, inv_k, eye_k, align)
-            return float(E_v), g_v
+            return E_v, g_v
 
         problem_spec = {
             "mode": "anchored",
@@ -434,11 +434,11 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
             wi_last = ws[-1]
 
             def _anc_energy_sp(Yc, _w=wi_last):
-                return float(vg(Yc, X0, _w, denom, inv_k, eye_k, align)[0])
+                return vg(Yc, X0, _w, denom, inv_k, eye_k, align)[0]
 
             def _anc_grad_and_energy_sp(Yc, _w=wi_last):
                 E_v, _, _, g_v = vg(Yc, X0, _w, denom, inv_k, eye_k, align)
-                return float(E_v), g_v
+                return E_v, g_v
 
             problem_spec_sp = {
                 "mode": "anchored",
@@ -467,15 +467,14 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
     if fidelity == "subspace":
         # both terms are degree-0 homogeneous, so the scale is a free gauge;
         # fix it at the target's scale rather than leaving it arbitrary
-        nY = float(Y.norm())
-        if nY > 0:
-            Y = Y * (float(X0.norm()) / nY)
+        nY = Y.norm()
+        Y = torch.where(nY > 0, Y * (X0.norm() / nY.clamp_min(torch.finfo(Y.dtype).tiny)), Y)
         tot, f, dd = vg(Y, X0, float(w), denom, inv_k, eye_k, False)[:3]
     else:
         tot, f, dd = energy(Y, X0, w=float(w), denom=denom, return_parts=True,
                             align=align)
     clamp_ref = X0.clamp_min(0.0)
-    clamp_dist = float((Y - clamp_ref).norm() / clamp_ref.norm().clamp_min(1e-300))
+    clamp_dist = float((Y - clamp_ref).norm() / clamp_ref.norm().clamp_min(torch.finfo(Y.dtype).tiny))
 
     return make_result(
         NSAResult, Y=Y, w=w, orth=orth, mode="anchored",
@@ -486,7 +485,7 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
         grad_map_start=rep["grad_map_start"],
         target=X0, align=bool(align), nonneg=bool(nonneg),
         fidelity_mode=fidelity, fidelity_requested=requested,
-        target_negative_mass=neg_mass, clamp_distance=clamp_dist,
+        target_negative_mass=(neg_mass if neg_mass is not None else float(negative_mass(X0))), clamp_distance=clamp_dist,
         scale_ratio=float(Y.norm() / X0.norm()),
         n_grad=n_grad, n_energy=n_energy, w_schedule=ws, trace=trace,
     )
@@ -494,7 +493,8 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
 
 def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=None,
              consolidate=False, optimizer=None, init=None, max_iter=None,
-             tol=None, fidelity="auto", sparseness=None, **kwargs):
+             tol=None, fidelity="auto", sparseness=None, dtype=None,
+             device=None, **kwargs):
     """Unified high-level entry point for NSA-Flow representation learning.
 
     Automatically inspects input structure, data sign distribution, and task
@@ -546,6 +546,12 @@ def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=None,
         because downstream code detects the capability by signature.
     sparseness : float in (0, 1), optional
         Column-wise quantile sparseness target (default ``None``).
+    dtype : torch.dtype, optional
+        Working precision (default ``None`` infers from input).
+    device : torch.device, str, or None, optional
+        Target computing device. If None, computation stays on the device of
+        the input tensor. If explicitly specified, moves inputs and executes
+        all downstream solver routines on that device.
     **kwargs :
         Additional arguments forwarded to the selected solver.
 
@@ -555,11 +561,14 @@ def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=None,
         Result dictionary-like object with `.Y`, `.energy`, `.fidelity`, `.defect`,
         `.iters`, `.stop_reason`, `.converged`, and metadata.
     """
-    X = torch.as_tensor(data_or_target)
+    X = coerce_tensor(data_or_target, dtype=dtype, device=device, stacklevel=3)
     if X.ndim != 2:
         raise ValueError(f"Input must be 2-D [n, p] or [p, k]; got shape {tuple(X.shape)}")
 
     optimizer = DEFAULT_OPTIMIZER if optimizer is None else optimizer
+
+    if fidelity == "entrywise":
+        fidelity = "anchor"
 
     # ``signed=`` and ``nonneg=`` are mode selectors.  An explicit
     # ``nonneg=True`` with ``k`` means "I want a non-negative basis for this
@@ -591,20 +600,20 @@ def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=None,
         init_strat = "clamp" if init in (None, "auto") else init
         return nsa_flow_data(X, k=k, w=w, init=init_strat, max_iter=iter_cap,
                              tol=tol, optimizer=optimizer, sparseness=sparseness,
-                             **kwargs)
+                             dtype=dtype, device=device, **kwargs)
 
     if mode in ("signed", "contrast"):
         from .signed import nsa_flow_signed
         init_strat = init if init is not None else "auto"
         return nsa_flow_signed(X, k=k, w=w, init=init_strat, consolidate=consolidate,
                                max_iter=iter_cap, tol=tol, optimizer=optimizer,
-                               sparseness=sparseness, **kwargs)
+                               sparseness=sparseness, dtype=dtype, device=device, **kwargs)
 
     if mode in ("anchored", "target"):
         return _nsa_flow_anchored(X, w=w, nonneg=(True if nonneg is None else nonneg),
                                   init=init, fidelity=fidelity,
                                   max_iter=iter_cap, tol=tol, optimizer=optimizer,
-                                  sparseness=sparseness, **kwargs)
+                                  sparseness=sparseness, dtype=dtype, device=device, **kwargs)
 
     raise ValueError(
         f"Unknown mode {mode!r}; choose 'auto', 'data', 'signed' or 'anchored'")

@@ -111,6 +111,9 @@ def _tiny(t):
 
 def _safe_div(num, den, tiny):
     """``num / den`` with ``den`` floored away from zero, sign preserved."""
+    if torch.is_tensor(den):
+        den_clamped = torch.where(den >= 0.0, den.clamp_min(tiny), den.clamp_max(-tiny))
+        return num / den_clamped
     if den >= 0.0:
         return num / max(den, tiny)
     return num / min(den, -tiny)
@@ -138,7 +141,7 @@ class _CompactLBFGS:
     def m(self):
         return len(self.S)
 
-    def push(self, s, y):
+    def push(self, s, y, sy=None, yy=None):
         """Add a correction pair, skipping it if the curvature is not positive.
 
         The standard safeguard: ``s'y > eps ||y||^2`` keeps ``B`` positive
@@ -146,8 +149,10 @@ class _CompactLBFGS:
         sometimes, and accepting the pair anyway is how a quasi-Newton method
         starts producing ascent directions.
         """
-        sy = float((s * y).sum())
-        yy = float((y * y).sum())
+        if sy is None or yy is None:
+            sy_t = (s * y).sum()
+            yy_t = (y * y).sum()
+            sy, yy = torch.stack([sy_t, yy_t]).tolist()
         if not (yy > 0 and sy > 2.2e-16 * yy):
             return False
         self.S.append(s)
@@ -172,7 +177,7 @@ class _CompactLBFGS:
         th = self.theta
         self.W = torch.cat([Y, th * S], dim=1)       # [n, 2m]
 
-        if _native is not None and S.is_cpu:
+        if _native is not None and S.is_cpu and S.dtype in (torch.float32, torch.float64):
             fn = _native.lbfgsb_build_M
         else:
             fn = _COMPILED.get("K", _build_K)
@@ -236,35 +241,32 @@ def _cauchy_point(x, g, lo, hi, H, max_breakpoints=512):
     p = H.W.transpose(0, 1) @ d if two_m else torch.zeros(0, dtype=x.dtype,
                                                           device=x.device)
     c = torch.zeros_like(p)
-    fp = -float((d * d).sum())                        # f'(0)
+    fp = -(d * d).sum()                        # f'(0)
     fpp = -H.theta * fp
     if two_m:
-        fpp = fpp - float(p @ (H.M @ p))
-    fpp = max(fpp, tiny)
+        fpp = fpp - (p @ (H.M @ p))
+    fpp = fpp.clamp_min(tiny)
     dt_min = _safe_div(-fp, fpp, tiny)
-    t_old = 0.0
+    t_old = torch.zeros((), dtype=x.dtype, device=x.device)
 
     # Only finite breakpoints of currently-moving coordinates matter, and only
     # the smallest few are ever reached; sorting them once is cheaper than
     # repeatedly scanning for the minimum.
-    cand = torch.nonzero(torch.isfinite(t) & (t > 0), as_tuple=False).flatten()
-    if cand.numel():
-        # The walk's state (p, c, f', f'') evolves by recurrences that are all
-        # cumulative sums over the breakpoints in order, so the entire walk is
-        # computed at once and the first segment containing its own minimiser
-        # is found by a single vectorised comparison.  The sequential Python
-        # version visited ~44 breakpoints per iteration with a device sync at
-        # each: 55% of a fit's wall time against 10% for the objective itself.
-        order = cand[torch.argsort(t[cand])][:max_breakpoints]
-        tb = t[order]                                          # [B]
+    valid = torch.isfinite(t) & (t > 0)
+    k_bp = min(t.numel(), max_breakpoints)
+    if (lo is not None or hi is not None) and k_bp > 0:
+        t_valid = torch.where(valid, t, torch.as_tensor(float("inf"), dtype=t.dtype, device=t.device))
+        tb, order = torch.topk(t_valid, k=k_bp, largest=False)
         gb = g[order]
         xb = x[order]
         if lo is not None and hi is not None:
             xcp_b = torch.where(gb > 0, lo[order], hi[order])
         elif lo is not None:
             xcp_b = lo[order]
-        else:
+        elif hi is not None:
             xcp_b = hi[order]
+        else:
+            xcp_b = xb
         zb = xcp_b - xb
         t_prev = torch.cat([tb.new_zeros(1), tb[:-1]])
         dtb = tb - t_prev                                      # [B]
@@ -289,26 +291,33 @@ def _cauchy_point(x, g, lo, hi, H, max_breakpoints=512):
         dfp = dtb * fpp_prev + gb * gb + H.theta * gb * zb - gb * wMc
         fp_j = fp + torch.cumsum(dfp, 0)                       # f' after j
         dt_min_j = -fp_j / fpp_j                               # minimiser on segment j+1
-        # stop before breakpoint j if dt_min_{j-1} < dt_j (segment j holds the min)
+        # stop before breakpoint j if dt_min_{j-1} < dt_j (segment j holds the min) or if breakpoint is not finite
         dt_min_prev = torch.cat([dt_min_j.new_full((1,), dt_min), dt_min_j[:-1]])
-        stop_mask = (dt_min_prev < dtb) | (dtb <= 0.0)
-        hit = torch.nonzero(stop_mask, as_tuple=False)
-        n_fix = int(hit[0]) if hit.numel() else int(order.numel())
+        stop_mask = (dt_min_prev < dtb) | (dtb <= 0.0) | (~torch.isfinite(tb))
+        B = k_bp
+        has_stop = stop_mask.any()
+        first_stop = torch.argmax(stop_mask.to(torch.int64))
+        n_fix = torch.where(has_stop, first_stop, torch.tensor(B, device=x.device))
 
-        if n_fix > 0:
-            fixed_idx = order[:n_fix]
-            d[fixed_idx] = 0.0
-            x_cp[fixed_idx] = xcp_b[:n_fix]
-            fixed[fixed_idx] = True
-            t_old = float(tb[n_fix - 1])
-            fp = float(fp_j[n_fix - 1])
-            fpp = max(float(fpp_j[n_fix - 1]), tiny)
-            dt_min = _safe_div(-fp, fpp, tiny)
-            if two_m:
-                p = p_prev[n_fix - 1] + gb[n_fix - 1] * Wb[n_fix - 1]
-                c = c_j[n_fix - 1]
+        is_fix = torch.arange(B, device=x.device) < n_fix
+        fixed_mask = torch.zeros_like(fixed, dtype=torch.bool)
+        fixed_mask.scatter_(0, order, is_fix)
+        d = torch.where(fixed_mask, torch.zeros_like(d), d)
+        xcp_scatter = torch.zeros_like(x_cp)
+        xcp_scatter.scatter_(0, order, torch.where(is_fix, xcp_b, x_cp[order]))
+        x_cp = torch.where(fixed_mask, xcp_scatter, x_cp)
+        fixed = fixed | fixed_mask
 
-    dt_min = max(dt_min, 0.0)
+        last_fix = (n_fix - 1).clamp_min(0)
+        t_old = torch.where(n_fix > 0, tb[last_fix], t_old)
+        fp = torch.where(n_fix > 0, fp_j[last_fix], fp)
+        fpp = torch.where(n_fix > 0, fpp_j[last_fix].clamp_min(tiny), fpp)
+        dt_min = _safe_div(-fp, fpp, tiny)
+        if two_m:
+            p = torch.where(n_fix > 0, p_prev[last_fix] + gb[last_fix] * Wb[last_fix], p)
+            c = torch.where(n_fix > 0, c_j[last_fix], c)
+
+    dt_min = dt_min.clamp_min(0.0)
     t_old = t_old + dt_min
     moving = (t > t_old) & (~fixed)
     x_cp = torch.where(moving, x + t_old * d, x_cp)
@@ -356,8 +365,6 @@ def _subspace_min(x, g, x_cp, c, fixed, lo, hi, H):
     size of the iterate.  Tensor core in :func:`_subspace_min_tensor`.
     """
     free = ~fixed
-    if not bool(free.any()):
-        return x_cp
     fn = _COMPILED.get("sub", _subspace_min_tensor)
     try:
         return fn(x, g, x_cp, c, free.to(x.dtype), lo, hi, H.W, H.M, H.theta, H.m)
@@ -463,7 +470,8 @@ def _strong_wolfe(phi, a_max, f0, g0, c1=1e-4, c2=0.9, max_eval=20):
 def lbfgsb_minimize(x0, fun_grad, fun=None, *, lower=0.0, upper=None, mask=None,
                     max_grad=2000, tol=1e-9, memory=10, sigma=1e-4,
                     certificate=None, callback=None, max_ls=30,
-                    patience=50, rtol=1e-12, stall_slack=1e3):
+                    patience=50, rtol=1e-12, stall_slack=1e3,
+                    cert_every=None):
     r"""Minimise ``f`` over a box, in pure PyTorch.
 
     Parameters
@@ -515,25 +523,26 @@ def lbfgsb_minimize(x0, fun_grad, fun=None, *, lower=0.0, upper=None, mask=None,
 
     n_grad = n_fun = 0
 
-    def fg(flat):
+    def fg_raw(flat):
         nonlocal n_grad
         n_grad += 1
-        f, gr = fun_grad(flat.reshape(shape))
-        return float(f), gr.reshape(-1)
+        return fun_grad(flat.reshape(shape))
 
-    def f_only(flat):
+    def f_only_raw(flat):
         nonlocal n_fun, n_grad
         n_fun += 1
         if fun is not None:
-            return float(fun(flat.reshape(shape)))
+            return fun(flat.reshape(shape))
         n_grad += 1                                  # honest: it IS a gradient
         f, _ = fun_grad(flat.reshape(shape))
-        return float(f)
+        return f
 
     xf = clip(x.reshape(-1))
-    f, g = fg(xf)
+    f_init, g_init = fg_raw(xf)
+    f = float(f_init)
+    g = g_init.reshape(-1)
     H = _CompactLBFGS(xf.numel(), memory, dtype, device)
-    gmap = (certificate(xf.reshape(shape), g.reshape(shape))
+    gmap = (float(certificate(xf.reshape(shape), g.reshape(shape)))
             if certificate else float(g.norm()))
     stop, it = "max_iter", 0
     E_win, g_win = [], []
@@ -565,50 +574,61 @@ def lbfgsb_minimize(x0, fun_grad, fun=None, *, lower=0.0, upper=None, mask=None,
             return "plateau"
         return "line_search"
 
+    if cert_every is None:
+        cert_every = 5 if device.type != "cpu" else 1
+
     while n_grad < max_grad:
         it += 1
         if gmap <= tol:
             stop = "grad_map"
             break
 
-        if _native is not None and xf.is_cpu:
+        if _native is not None and xf.is_cpu and xf.dtype in (torch.float32, torch.float64):
             S_stack = torch.stack(H.S, dim=1) if H.m > 0 else torch.empty(xf.numel(), 0, dtype=dtype, device=device)
             Y_stack = torch.stack(H.Yv, dim=1) if H.m > 0 else torch.empty(xf.numel(), 0, dtype=dtype, device=device)
             d, a_max, fixed = _native.lbfgsb_direction(xf, g, lo, hi, S_stack, Y_stack, H.theta, H.M, 512)
+            dg = (d * g).sum()
+            a_max_t = torch.as_tensor(a_max, device=device, dtype=dtype)
         else:
             x_cp, c, fixed = _cauchy_point(xf, g, lo, hi, H)
             x_bar = _subspace_min(xf, g, x_cp, c, fixed, lo, hi, H)
             d = x_bar - xf
-            a_max = None
+            dg = (d * g).sum()
+            if lo is not None:
+                neg = d < 0
+                inf = float("inf")
+                lim = torch.where(neg, (lo - xf) / d.clamp_max(-_tiny(xf)), torch.full_like(d, inf))
+                min_lim = lim.clamp_min(0.0).min()
+                a_max_t = torch.where(torch.isfinite(min_lim), torch.maximum(torch.tensor(1.0, device=d.device, dtype=d.dtype), min_lim), torch.tensor(1.0, device=d.device, dtype=d.dtype))
+            else:
+                a_max_t = torch.tensor(1.0, device=d.device, dtype=d.dtype)
 
-        if float((d * g).sum()) >= 0.0:
+        dg_val, a_max = torch.stack([dg, a_max_t]).tolist()
+
+        if dg_val >= 0.0:
             # The model produced an ascent direction: the memory is stale, which
             # happens after an active-set change on a non-convex objective.
             H.reset()
             x_cp, c, fixed = _cauchy_point(xf, g, lo, hi, H)
             d = clip(x_cp) - xf
-            if float((d * g).sum()) >= 0.0:
-                d = -g / max(float(g.norm()), _tiny(g))
-            a_max = None
+            dg = (d * g).sum()
+            d = torch.where(dg >= 0.0, -g / g.norm().clamp_min(_tiny(g)), d)
+            dg_val = float((d * g).sum())
+            a_max = 1.0
 
         # Both xf and x_bar are feasible and the box is convex, so the whole
         # segment is feasible and phi is smooth: no projection inside the search.
-        g0_dir = float((d * g).sum())
+        g0_dir = dg_val
         state = {}
 
         def phi(a):
             xa = clip(xf + a * d)
-            fa, ga = fg(xa)
-            state["x"], state["g"] = xa, ga
-            return fa, float((ga * d).sum())
+            fa_t, ga = fg_raw(xa)
+            ga_flat = ga.reshape(-1)
+            state["x"], state["g"] = xa, ga_flat
+            fa_val, gad_val = torch.stack([torch.as_tensor(fa_t, device=device).reshape(()), (ga_flat * d).sum()]).tolist()
+            return fa_val, gad_val
 
-        if a_max is None:
-            a_max = 1.0
-            if lo is not None:
-                neg = d < 0
-                if bool(neg.any()):
-                    a_max = max(a_max, float(((lo - xf) / d.clamp_max(-_tiny(xf)))[neg]
-                                             .clamp_min(0.0).min()))
         # Leave one evaluation in hand so the fallback's gradient still lands
         # within the budget; the cap is on gradient evaluations and it binds.
         remaining = max(max_grad - n_grad - 1, 1)
@@ -624,10 +644,11 @@ def lbfgsb_minimize(x0, fun_grad, fun=None, *, lower=0.0, upper=None, mask=None,
             for _ in range(max_ls):
                 x_new = clip(xf + step * d)
                 diff = x_new - xf
-                dn2 = float((diff * diff).sum())
+                dn2_t = (diff * diff).sum()
+                fb_t = f_only_raw(x_new)
+                dn2, fb = torch.stack([dn2_t, torch.as_tensor(fb_t, device=device).reshape(())]).tolist()
                 if dn2 == 0.0:
                     break
-                fb = f_only(x_new)
                 if not math.isfinite(fb):
                     step *= 0.5
                     continue
@@ -642,36 +663,75 @@ def lbfgsb_minimize(x0, fun_grad, fun=None, *, lower=0.0, upper=None, mask=None,
             if n_grad >= max_grad:
                 stop = "max_iter"
                 break
-            f_new, g_new = fg(x_new)
+            f_new_t, g_new = fg_raw(x_new)
+            f_new = float(f_new_t)
+            g_new = g_new.reshape(-1)
         else:
             x_new, g_new = state["x"], state["g"]
 
-        if not (math.isfinite(f_new) and bool(torch.isfinite(g_new).all())):
+        s = x_new - xf
+        y = g_new - g
+        sy_t = (s * y).sum()
+        yy_t = (y * y).sum()
+        g_finite_t = torch.isfinite(g_new).all().to(dtype)
+
+        do_cert = (it % cert_every == 0) or (device.type == "cpu")
+        if do_cert:
+            gmap_t = None
+            if certificate is not None:
+                try:
+                    gmap_t = certificate(x_new.reshape(shape), g_new.reshape(shape), as_tensor=True)
+                except TypeError:
+                    pass
+            if gmap_t is None:
+                if certificate is not None:
+                    gmap_val = float(certificate(x_new.reshape(shape), g_new.reshape(shape)))
+                    sy, yy, g_fin = torch.stack([sy_t, yy_t, g_finite_t]).tolist()
+                    gmap = gmap_val
+                else:
+                    gmap_t = g_new.norm()
+                    sy, yy, g_fin, gmap = torch.stack([sy_t, yy_t, g_finite_t, gmap_t]).tolist()
+            else:
+                sy, yy, g_fin, gmap = torch.stack([sy_t, yy_t, g_finite_t, gmap_t.reshape(())]).tolist()
+        else:
+            sy, yy, g_fin = torch.stack([sy_t, yy_t, g_finite_t]).tolist()
+
+        if not (math.isfinite(f_new) and g_fin > 0.5):
             stop = "line_search"          # the accepted point is not finite: stop, do not step
             break
-        H.push(x_new - xf, g_new - g)
+
+        H.push(s, y, sy=sy, yy=yy)
         xf, f, g = x_new, f_new, g_new
-        gmap = (certificate(xf.reshape(shape), g.reshape(shape))
-                if certificate else float(g.norm()))
+
         if callback is not None:
             callback(it, f, gmap, n_grad, n_fun)
-        if gmap <= tol:
-            stop = "grad_map"
-            break
 
-        # plateau: energy at the float floor AND certificate not improving.
-        # Without this the method spins at the float32 floor -- measured at
-        # 44,979 gradient evaluations on a problem that was done after ~300.
-        E_win.append(f)
-        g_win.append(gmap)
-        if len(E_win) > patience:
-            E_win.pop(0)
-            g_win.pop(0)
-        if len(E_win) == patience:
-            lo_, hi_ = min(E_win), max(E_win)
-            if (hi_ - lo_) / (1.0 + abs(lo_)) < rtol and _stalled():
-                stop = "plateau"
+        if do_cert:
+            if gmap <= tol:
+                stop = "grad_map"
                 break
+
+            # plateau: energy at the float floor AND certificate not improving.
+            # Without this the method spins at the float32 floor -- measured at
+            # 44,979 gradient evaluations on a problem that was done after ~300.
+            E_win.append(f)
+            g_win.append(gmap)
+            if len(E_win) > patience:
+                E_win.pop(0)
+                g_win.pop(0)
+            if len(E_win) == patience:
+                lo_, hi_ = min(E_win), max(E_win)
+                if (hi_ - lo_) / (1.0 + abs(lo_)) < rtol and _stalled():
+                    stop = "plateau"
+                    break
+
+    # Final certification on iterate actually returned
+    if certificate is not None:
+        gmap = float(certificate(xf.reshape(shape), g.reshape(shape)))
+    else:
+        gmap = float(g.norm())
+    if stop == "grad_map" and gmap > tol:
+        stop = "plateau"
 
     if stop == "max_iter" and math.isfinite(gmap) \
             and gmap <= max(stall_slack * max(tol, 0.0), noise_floor) and _stalled():

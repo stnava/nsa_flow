@@ -1,6 +1,16 @@
-# What next — decision memo (updated 2026-11-01, v3.5.2)
+# What next — decision memo (updated 2026-11-03, v3.6.0)
 
 ## Done since the 2026-09-19 memo
+- **On-device GPU execution & D2H scalar-sync elimination (2026-11-03, v3.6.0):** exposed
+  `device=None` and `dtype=None` across `nsa_flow`, `nsa_flow_data`, `nsa_flow_signed`, and
+  `_nsa_flow_anchored` (`coerce_tensor` in `nsa_flow/diagnostics.py`, including MPS `float64`
+  coercion and `float16`/`bfloat16` pure-PyTorch dispatch); eliminated intermediate host copies
+  and per-step D2H scalar syncs (`torch.topk` replacing `torch.nonzero` in `_cauchy_point`,
+  batched curvature/Wolfe/certificate checks in `lbfgsb.py`, branchless BB & `finfo.tiny` guards
+  in `optim.py`, de-synced `_smooth_descent` in `reconstruct.py`, fused `jacobi_eigh` sweep norms
+  and accelerator subspace iteration for `p > 512` Gram matrices in `linalg.py`); added 47 device
+  and transfer-free tests in `tests/test_device.py` (508 total assertions passing) and multi-scale
+  CPU vs MPS benchmark (`experiments/bench_device_performance.py`).
 - **Manuscript audit, sync & Rmd deprecation (2026-11-01, v3.5.2):** reconciled `paper/nsaflow.tex`
   with `v3.5.1` code and `nsa_flow.bench` findings (removed Tecator Conclusion contradiction,
   replaced ADNI RF explanation with PCA-rotated axis-alignment control, aligned Eq. 4 with

@@ -198,7 +198,7 @@ import warnings
 
 import torch
 
-from .diagnostics import basis_report, default_tol, make_result, orth_terms
+from .diagnostics import basis_report, default_tol, make_result, orth_terms, coerce_tensor
 from .linalg import leading_eigenvectors, varimax
 from .optim import minimise
 from .project import project_nonneg
@@ -291,15 +291,14 @@ def nsa_flow_signed(X, k=None, w=0.5, *, init="auto", orth="Cg", lobe=1.0,
           and optimal on centered data; warns on uncentered non-negative data.
         - "adaptive": Fast 2-stage continuation (mu in [0, 10]) taking ~0.03s.
         - "relax": Full 9-stage penalty continuation homotopy (legacy default).
+    dtype : torch.dtype, optional
+        Working precision (default ``None`` infers from X).
+    device : torch.device, str, or None, optional
+        Target computing device. If None, computation stays on the device of
+        the input tensor. If explicitly specified, moves inputs and executes
+        all downstream solver routines on that device.
     """
-    Xt = torch.as_tensor(X)
-    if not torch.is_floating_point(Xt):
-        Xt = Xt.double()
-    if dtype is not None:
-        Xt = Xt.to(dtype)
-    if device is not None:
-        Xt = Xt.to(device)
-    Xt = Xt.detach()
+    Xt = coerce_tensor(X, dtype=dtype, device=device, stacklevel=3)
     if Xt.ndim != 2:
         raise ValueError(f"X must be 2-D [n, p]; got {tuple(Xt.shape)}")
     if not torch.isfinite(Xt).all():

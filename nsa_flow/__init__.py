@@ -47,7 +47,7 @@ from .angle import (angle_defect, cosine_matrix, grad_angle_defect,
                     gram_offdiag_defect, grad_gram_offdiag_defect)
 from .project import project_nonneg, project_scaled_stiefel, polar_factor, simlr_sparseness
 from .linalg import varimax, varimax_rotation
-from .solve import nsa_flow, NSAResult
+from .solve import nsa_flow, NSAResult, _nsa_flow_anchored
 from .reconstruct import (GramOperator, nsa_flow_data, reconstruction_fidelity,
                           grad_reconstruction_fidelity, relax_into_nonneg)
 from .signed import consolidate_supports, nsa_flow_signed, part_sparsity
@@ -55,7 +55,7 @@ from .subspace import (SubspaceAnchor, negative_mass, subspace_fidelity,
                        grad_subspace_fidelity)
 from .layers import NSAFlowLinear, NSAFlowConv2d, NSAFlowLayer
 
-__version__ = "3.5.2"
+__version__ = "3.6.0"
 
 
 def __getattr__(name):
@@ -81,7 +81,7 @@ __all__ = [
     "project_nonneg", "project_scaled_stiefel", "polar_factor", "simlr_sparseness",
     "varimax", "varimax_rotation",
     # solver
-    "nsa_flow", "NSAResult",
+    "nsa_flow", "NSAResult", "_nsa_flow_anchored",
     "nsa_flow_data", "reconstruction_fidelity", "grad_reconstruction_fidelity",
     "relax_into_nonneg", "GramOperator",
     # signed lifting: V = V+ - V-, both lobes sparse

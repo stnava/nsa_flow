@@ -106,8 +106,12 @@ def jacobi_eigh(A, sweeps=12, tol=None):
 
     rounds = _round_robin(n)
     for _ in range(sweeps):
-        off = float((A - torch.diag(torch.diagonal(A))).pow(2).sum())
-        total = float(A.pow(2).sum())
+        off_t = (A - torch.diag(torch.diagonal(A))).pow(2).sum()
+        total_t = A.pow(2).sum()
+        if device.type != "cpu":
+            off, total = torch.stack([off_t, total_t]).tolist()
+        else:
+            off, total = float(off_t), float(total_t)
         if total == 0.0 or off <= (tol * tol) * total:
             break
         for pairs in rounds:
@@ -220,6 +224,12 @@ def top_k_eigenvectors(k, S=None, X=None, seed=0, max_dense=None):
         raise ValueError("give exactly one of S or X")
 
     if S is not None:
+        p = S.shape[-1]
+        k = min(k, p)
+        if max_dense is None:
+            max_dense = 4096 if _has_native_eigh(S) else 512
+        if p > max_dense:
+            return _subspace_iteration(k, S=S, seed=seed)
         _, evecs = safe_eigh(S)
         return _canonical_sign(evecs[..., -k:].flip(-1).contiguous())
 
@@ -232,7 +242,7 @@ def top_k_eigenvectors(k, S=None, X=None, seed=0, max_dense=None):
 
     side = min(n, p)
     if side > max_dense:
-        return _subspace_iteration(k, X, seed=seed)
+        return _subspace_iteration(k, X=X, seed=seed)
 
     if p <= n:                                   # primal: p x p
         G = X.transpose(-2, -1) @ X
@@ -268,27 +278,34 @@ def _has_native_eigh(ref):
 _NATIVE_EIGH = {}
 
 
-def _subspace_iteration(k, X, oversample=None, iters=8, seed=0):
+def _subspace_iteration(k, X=None, S=None, oversample=None, iters=8, seed=0):
     """Randomised subspace iteration -- only for the both-dimensions-large case.
 
     Warns, because its accuracy depends on an eigengap this data usually lacks.
     """
+    if (X is None) == (S is None):
+        raise ValueError("give exactly one of X or S")
     import warnings
-    p = X.shape[-1]
+    p = X.shape[-1] if X is not None else S.shape[-1]
+    dev = X.device if X is not None else S.device
+    dtype = X.dtype if X is not None else S.dtype
     oversample = min(max(20, 2 * k) if oversample is None else oversample, p - k)
+    shape_str = tuple(X.shape) if X is not None else tuple(S.shape)
     warnings.warn(
-        f"top_k_eigenvectors: both dimensions of X are large "
-        f"({tuple(X.shape)}) and no dense symmetric eigensolver is available on "
-        f"{X.device.type}; falling back to randomised subspace iteration, whose "
+        f"top_k_eigenvectors: dimension of {'X' if X is not None else 'S'} is large "
+        f"({shape_str}) and no dense symmetric eigensolver is available on "
+        f"{dev.type}; falling back to randomised subspace iteration, whose "
         "accuracy depends on an eigengap that centred data often lacks. "
         "Move to CPU/CUDA, or reduce k.", RuntimeWarning, stacklevel=3)
     l = k + oversample
     gen = torch.Generator(device="cpu").manual_seed(seed)
     Z = torch.randn(p, l, generator=gen, dtype=torch.float64).to(
-        dtype=X.dtype, device=X.device)
+        dtype=dtype, device=dev)
+    def matvec(M):
+        return X.transpose(-2, -1) @ (X @ M) if X is not None else S @ M
     for _ in range(iters + 1):
-        Z, _ = torch.linalg.qr(X.transpose(-2, -1) @ (X @ Z))
-    B = Z.transpose(-2, -1) @ (X.transpose(-2, -1) @ (X @ Z))
+        Z, _ = torch.linalg.qr(matvec(Z))
+    B = Z.transpose(-2, -1) @ matvec(Z)
     _, U = safe_eigh(0.5 * (B + B.transpose(-2, -1)))
     return _canonical_sign((Z @ U[..., -k:].flip(-1)).contiguous())
 
