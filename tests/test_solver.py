@@ -687,5 +687,160 @@ def test_retract_anchored_and_nsa_flow_batched_3d():
     assert res_1b.stop_reason == "skipped" and res_1b.iters == 0
 
 
+@pytest.mark.parametrize("shape,nonneg,q", [
+    ((98, 3), True, 0.5),
+    ((98, 3), True, 0.8),
+    ((98, 3), False, 0.5),
+    ((98, 3), False, 0.8),
+    ((76, 2), True, 0.8),
+    ((49, 3), True, 0.8),
+])
+def test_retract_anchored_sparseness_matches_nsa_flow(shape, nonneg, q):
+    """retract_anchored(..., sparseness=q) matches nsa_flow on all 6 target cells and obeys count/info contracts."""
+    from nsa_flow import retract_anchored
+
+    p, k = shape
+    n_keep = max(1, int(round(p * (1.0 - q))))
+    gen = torch.Generator().manual_seed(42 + p + k + int(nonneg) * 7 + int(q * 100))
+    X0 = (torch.rand(p, k, generator=gen, dtype=F64) if nonneg
+          else torch.randn(p, k, generator=gen, dtype=F64))
+
+    ref = nsa_flow(X0, w=0.5, mode="anchored", fidelity="anchor",
+                   nonneg=nonneg, sparseness=q, tol=1e-6)
+    Y, info = retract_anchored(X0, w=0.5, nonneg=nonneg, sparseness=q,
+                               tol=1e-6, return_info=True)
+
+    assert info["converged"] is True
+    assert info["n_keep"] == n_keep
+    assert info["sparse_stage"] is True
+    assert ref["sparse_stage"] is True
+    assert ref["n_keep"] == n_keep
+    assert torch.allclose(Y, ref.Y, atol=5e-5, rtol=1e-4)
+
+    # Strict column sparsity count contract
+    for j in range(k):
+        assert int((Y[:, j] != 0).sum()) <= n_keep
+    if nonneg:
+        assert float(Y.min()) >= 0.0
+    else:
+        # Signed sparse solve must retain negative entries on the free support
+        assert float(Y.min()) < 0.0 and float(Y.max()) > 0.0
+
+
+def test_retract_anchored_sparseness_noop_and_tie_break():
+    """When no column is denser than n_keep, Stage 2 is skipped; boundary ties match simlr_sparseness."""
+    from nsa_flow import retract_anchored
+
+    # Already sparse non-negative target: Stage 2 must not run
+    X_sp = torch.zeros(40, 3, dtype=F64)
+    gen = torch.Generator().manual_seed(11)
+    for j in range(3):
+        X_sp[j * 8:(j + 1) * 8, j] = torch.rand(8, generator=gen, dtype=F64) + 0.5
+
+    Y_none, info_none = retract_anchored(X_sp, w=0.5, nonneg=True, sparseness=None, return_info=True)
+    Y_q, info_q = retract_anchored(X_sp, w=0.5, nonneg=True, sparseness=0.5, return_info=True)
+    assert info_none["sparse_stage"] is False and info_none["n_keep"] is None
+    assert info_q["sparse_stage"] is False and info_q["n_keep"] == 20
+    assert info_q["n_grad"] == info_none["n_grad"]
+    assert torch.equal(Y_q, Y_none)
+
+    # Boundary tie case (symmetric constant-magnitude columns): matches nsa_flow
+    X_tie = torch.ones(20, 3, dtype=F64)
+    Y_tie, info_tie = retract_anchored(X_tie, w=0.5, nonneg=True, sparseness=0.5,
+                                       tol=1e-6, return_info=True)
+    ref_tie = nsa_flow(X_tie, w=0.5, mode="anchored", fidelity="anchor",
+                       nonneg=True, sparseness=0.5, tol=1e-6)
+    assert info_tie["sparse_stage"] is True and info_tie["n_keep"] == 10
+    assert torch.allclose(Y_tie, ref_tie.Y, atol=5e-5)
+    for j in range(3):
+        assert int((Y_tie[:, j] != 0).sum()) <= 10
+
+
+def test_retract_anchored_sparseness_support_non_expansion_and_batched_3d():
+    """Nonneg re-application satisfies monotone support non-expansion; 3-D batched matches per-item."""
+    from nsa_flow import retract_anchored
+
+    gen = torch.Generator().manual_seed(99)
+    # Non-negative monotone support non-expansion: supp(R(R(X))) <= supp(R(X))
+    for p, k, q in [(98, 3, 0.5), (98, 3, 0.8), (49, 3, 0.8)]:
+        n_keep = max(1, int(round(p * (1.0 - q))))
+        for _ in range(5):
+            X = torch.rand(p, k, generator=gen, dtype=F64)
+            Y1 = retract_anchored(X, w=0.5, nonneg=True, sparseness=q, tol=1e-6)
+            Y2 = retract_anchored(Y1, w=0.5, nonneg=True, sparseness=q, tol=1e-6)
+            supp1 = Y1 != 0
+            supp2 = Y2 != 0
+            # No zero entry in Y1 may become nonzero in Y2
+            assert not bool((supp2 & (~supp1)).any())
+            for j in range(k):
+                assert int(supp2[:, j].sum()) <= n_keep
+
+    # 3-D batched [B, p, k] with scalar sparseness
+    Xb = torch.rand(4, 50, 3, generator=gen, dtype=F64)
+    Yb, info_b = retract_anchored(Xb, w=0.5, nonneg=True, sparseness=0.7,
+                                  tol=1e-6, return_info=True)
+    Y_loop = torch.stack([
+        retract_anchored(Xb[i], w=0.5, nonneg=True, sparseness=0.7, tol=1e-6)
+        for i in range(4)
+    ])
+    assert torch.allclose(Yb, Y_loop, atol=1e-12)
+    assert info_b["sparse_stage"] is True
+    assert info_b["sparse_stages"] == [True, True, True, True]
+    assert info_b["n_keep"] == 15
+
+    # Unified nsa_flow forwards sparseness on 3-D inputs
+    res_b = nsa_flow(Xb, w=0.5, nonneg=True, sparseness=0.7, tol=1e-6)
+    assert torch.allclose(res_b.Y, Y_loop, atol=1e-12)
+    assert res_b["sparse_stage"] is True and res_b["n_keep"] == 15
+
+    # k == 1 with sparseness enforces count contract without iterative solve
+    X1 = torch.rand(20, 1, generator=gen, dtype=F64)
+    Y1, info1 = retract_anchored(X1, w=0.5, nonneg=True, sparseness=0.75, return_info=True)
+    assert int((Y1 != 0).sum()) <= 5
+    assert info1["stop_reason"] == "skipped" and info1["sparse_stage"] is False and info1["n_keep"] == 5
+
+
+@pytest.mark.parametrize("nonneg", [False, True])
+@pytest.mark.parametrize("sparseness", [None, 0.7])
+def test_retract_anchored_proximal_first_order_condition(nonneg, sparseness):
+    """Verify exact KKT / proximal FOC: 2(1-w)(Y-c)/||c||^2 + w grad Dtilde(Y) = 0 on free coords."""
+    from nsa_flow import retract_anchored, grad_stiefel_defect
+
+    gen = torch.Generator().manual_seed(7 + int(nonneg) * 3 + (0 if sparseness is None else 11))
+    p, k = 60, 3
+    w = 0.5
+    c = (torch.rand(p, k, generator=gen, dtype=F64) if nonneg
+         else torch.randn(p, k, generator=gen, dtype=F64))
+
+    tol = 1e-8
+    Y, info = retract_anchored(c, w=w, nonneg=nonneg, sparseness=sparseness,
+                               tol=tol, return_info=True)
+    assert info["converged"] is True
+
+    # Exact proximal energy gradient: 2(1-w)(Y-c)/||c||^2 + w grad Dtilde(Y)
+    denom = float(c.pow(2).sum())
+    inv_k = 1.0 / (1.0 - 1.0 / k)
+    grad_E = 2.0 * (1.0 - w) * (Y - c) / denom + w * inv_k * grad_stiefel_defect(Y)
+    scale = float(Y.norm())
+
+    if sparseness is None:
+        if not nonneg:
+            # Unconstrained: full gradient vanishes
+            assert float(grad_E.norm()) * scale <= 10.0 * tol
+        else:
+            # Non-negative: g == 0 on active set (Y > 0), g >= 0 on zeros (Y == 0)
+            active = Y > 1e-12 * float(Y.abs().max())
+            zero = ~active
+            assert float(grad_E[active].norm()) * scale <= 10.0 * tol
+            if bool(zero.any()):
+                assert float(grad_E[zero].min()) * scale >= -10.0 * tol
+    else:
+        # Sparse two-stage: FOC holds restricted to the selected support (Y != 0)
+        free = Y.abs() > 1e-12 * float(Y.abs().max())
+        assert bool(free.any())
+        assert float(grad_E[free].norm()) * scale <= 10.0 * tol
+
+
+
 
 

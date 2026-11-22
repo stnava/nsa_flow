@@ -1671,7 +1671,6 @@ lbfgsb_solve_impl(const at::Tensor& x0_in,
         const scalar_t* p_mask = mask_t.data_ptr<scalar_t>();
         std::copy(p_mask, p_mask + n, mask_vec.begin());
         if (!has_lo) {
-            std::fill(lo_vec.begin(), lo_vec.end(), static_cast<scalar_t>(0));
             has_lo = true;
         }
         for (int64_t i = 0; i < n; ++i) {
@@ -2211,7 +2210,9 @@ lbfgsb_solve(const at::Tensor& x0_in,
 
 template <typename scalar_t>
 struct AnchoredSolverWorkspace {
-    std::vector<scalar_t> lo_vec;
+    std::vector<scalar_t> zero_vec;
+    std::vector<scalar_t> lo_vec, hi_vec, mask_vec, ys_buf;
+    std::vector<std::pair<scalar_t, int64_t>> col_sort;
     std::vector<scalar_t> xf, g, d, xcp;
     std::vector<uint8_t> fixed;
     std::vector<scalar_t> x_trial, g_trial, x_prev, g_prev, x_lo, g_lo, x_new, g_new;
@@ -2224,7 +2225,11 @@ struct AnchoredSolverWorkspace {
     void ensure(int64_t p, int64_t k, int64_t mem_cap) {
         int64_t n = p * k;
         if (static_cast<int64_t>(xf.size()) < n) {
-            lo_vec.assign(n, static_cast<scalar_t>(0));
+            zero_vec.assign(n, static_cast<scalar_t>(0));
+            lo_vec.resize(n);
+            hi_vec.resize(n);
+            mask_vec.resize(n);
+            ys_buf.resize(n);
             xf.resize(n);
             g.resize(n);
             d.resize(n);
@@ -2240,6 +2245,9 @@ struct AnchoredSolverWorkspace {
             g_new.resize(n);
             s_temp.resize(n);
             y_temp.resize(n);
+        }
+        if (static_cast<int64_t>(col_sort.size()) < p) {
+            col_sort.resize(p);
         }
         int64_t mn = mem_cap * n;
         if (static_cast<int64_t>(S_hist.size()) < mn) {
@@ -2264,6 +2272,79 @@ struct AnchoredSolverWorkspace {
     }
 };
 
+// Returns: 0 = no column denser than n_keep (Stage 2 not needed),
+//          1 = at least one column denser, no boundary tie (mask_out & ys_out filled),
+//          2 = boundary tie detected (caller falls back to Python simlr_sparseness).
+template <typename scalar_t>
+int select_hard_support_raw(
+    int64_t p, int64_t k, int64_t n_keep,
+    const scalar_t* Y,
+    scalar_t* mask_out, scalar_t* ys_out,
+    std::vector<std::pair<scalar_t, int64_t>>& col_sort) {
+    if (n_keep <= 0 || n_keep >= p || p <= 1 || k <= 0) return 0;
+    const scalar_t eps_tie_rel = static_cast<scalar_t>(16.0) * std::numeric_limits<scalar_t>::epsilon();
+    const scalar_t dust_rel = static_cast<scalar_t>(1e-12);
+    bool any_dense = false;
+    for (int64_t j = 0; j < k; ++j) {
+        scalar_t max_mag = static_cast<scalar_t>(0);
+        for (int64_t r = 0; r < p; ++r) {
+            scalar_t a = std::abs(Y[r * k + j]);
+            if (a > max_mag) max_mag = a;
+        }
+        if (max_mag <= static_cast<scalar_t>(0)) {
+            for (int64_t r = 0; r < p; ++r) {
+                mask_out[r * k + j] = static_cast<scalar_t>(0);
+                ys_out[r * k + j] = static_cast<scalar_t>(0);
+            }
+            continue;
+        }
+        scalar_t dust_thr = dust_rel * max_mag;
+        int64_t nnz_j = 0;
+        for (int64_t r = 0; r < p; ++r) {
+            if (std::abs(Y[r * k + j]) > dust_thr) nnz_j += 1;
+        }
+        if (nnz_j <= n_keep) {
+            for (int64_t r = 0; r < p; ++r) {
+                scalar_t v = Y[r * k + j];
+                if (std::abs(v) > dust_thr) {
+                    mask_out[r * k + j] = static_cast<scalar_t>(1);
+                    ys_out[r * k + j] = v;
+                } else {
+                    mask_out[r * k + j] = static_cast<scalar_t>(0);
+                    ys_out[r * k + j] = static_cast<scalar_t>(0);
+                }
+            }
+            continue;
+        }
+        any_dense = true;
+        for (int64_t r = 0; r < p; ++r) {
+            col_sort[r] = {std::abs(Y[r * k + j]), r};
+        }
+        std::partial_sort(
+            col_sort.begin(), col_sort.begin() + (n_keep + 1), col_sort.begin() + p,
+            [](const std::pair<scalar_t, int64_t>& a, const std::pair<scalar_t, int64_t>& b) {
+                if (a.first != b.first) return a.first > b.first;
+                return a.second < b.second;
+            });
+        scalar_t thresh = col_sort[n_keep].first;
+        scalar_t prev_val = col_sort[n_keep - 1].first;
+        scalar_t tol_j = eps_tie_rel * max_mag;
+        if (thresh > tol_j && (prev_val - thresh) <= tol_j) {
+            return 2;
+        }
+        for (int64_t r = 0; r < p; ++r) {
+            mask_out[r * k + j] = static_cast<scalar_t>(0);
+            ys_out[r * k + j] = static_cast<scalar_t>(0);
+        }
+        for (int64_t t = 0; t < n_keep; ++t) {
+            int64_t r = col_sort[t].second;
+            mask_out[r * k + j] = static_cast<scalar_t>(1);
+            ys_out[r * k + j] = Y[r * k + j];
+        }
+    }
+    return any_dense ? 1 : 0;
+}
+
 struct RetractStats {
     double energy;
     int64_t n_grad;
@@ -2281,6 +2362,7 @@ RetractStats solve_anchored_raw(
     double w, bool nonneg, bool is_orth_cg,
     double tol, int64_t max_grad, int64_t memory,
     double sigma, int64_t patience, double rtol, double stall_slack,
+    const scalar_t* mask_ptr,
     scalar_t* Y_out_ptr) {
 
     const int64_t n = p * k;
@@ -2311,18 +2393,38 @@ RetractStats solve_anchored_raw(
     thread_local AnchoredSolverWorkspace<scalar_t> tl;
     tl.ensure(p, k, mem_cap);
 
+    const bool has_mask = (mask_ptr != nullptr);
     const bool has_lo = nonneg;
-    const scalar_t* lo_ptr = has_lo ? tl.lo_vec.data() : nullptr;
+    const bool has_lo_eff = nonneg || has_mask;
+    const bool has_hi_eff = has_mask;
+    const scalar_t* lo_ptr = nullptr;
+    const scalar_t* hi_ptr = nullptr;
+    if (has_mask) {
+        const scalar_t neg_inf = -std::numeric_limits<scalar_t>::infinity();
+        const scalar_t pos_inf = std::numeric_limits<scalar_t>::infinity();
+        const scalar_t free_lo = nonneg ? static_cast<scalar_t>(0) : neg_inf;
+        for (int64_t i = 0; i < n; ++i) {
+            bool mb = (mask_ptr[i] != static_cast<scalar_t>(0));
+            tl.lo_vec[i] = mb ? free_lo : static_cast<scalar_t>(0);
+            tl.hi_vec[i] = mb ? pos_inf : static_cast<scalar_t>(0);
+        }
+        lo_ptr = tl.lo_vec.data();
+        hi_ptr = tl.hi_vec.data();
+    } else if (nonneg) {
+        lo_ptr = tl.zero_vec.data();
+    }
     const std::string fidelity_str = "anchor";
     const std::string orth_str = is_orth_cg ? "Cg" : "D";
 
     scalar_t* xf = tl.xf.data();
     scalar_t* g = tl.g.data();
     const scalar_t* start_ptr = (init_ptr != nullptr) ? init_ptr : X0_ptr;
-    if (has_lo) {
+    if (has_lo || has_mask) {
         for (int64_t i = 0; i < n; ++i) {
             scalar_t v = start_ptr[i];
-            xf[i] = (v > static_cast<scalar_t>(0)) ? v : static_cast<scalar_t>(0);
+            if (has_lo && v < static_cast<scalar_t>(0)) v = static_cast<scalar_t>(0);
+            if (has_mask && mask_ptr[i] == static_cast<scalar_t>(0)) v = static_cast<scalar_t>(0);
+            xf[i] = v;
         }
     } else {
         std::memcpy(xf, start_ptr, n * sizeof(scalar_t));
@@ -2341,7 +2443,7 @@ RetractStats solve_anchored_raw(
     };
 
     double f = eval_fg(xf, g);
-    double gmap = compute_gmap_raw<scalar_t>(n, xf, g, has_lo, lo_ptr, false, nullptr, false, nullptr);
+    double gmap = compute_gmap_raw<scalar_t>(n, xf, g, has_lo_eff, lo_ptr, has_hi_eff, hi_ptr, has_mask, mask_ptr);
     std::string stop = "max_iter";
     int64_t it = 0;
 
@@ -2427,7 +2529,18 @@ RetractStats solve_anchored_raw(
             for (int64_t ls = 0; ls < 30; ++ls) {
                 double dn2 = 0.0;
                 scalar_t step_s = static_cast<scalar_t>(step);
-                if (has_lo) {
+                if (has_mask) {
+                    for (int64_t i = 0; i < n; ++i) {
+                        scalar_t val = static_cast<scalar_t>(0);
+                        if (mask_ptr[i] != static_cast<scalar_t>(0)) {
+                            val = xf[i] - step_s * g[i];
+                            if (has_lo && val < static_cast<scalar_t>(0)) val = static_cast<scalar_t>(0);
+                        }
+                        x_trial[i] = val;
+                        double diff = static_cast<double>(val - xf[i]);
+                        dn2 += diff * diff;
+                    }
+                } else if (has_lo) {
                     for (int64_t i = 0; i < n; ++i) {
                         scalar_t val = xf[i] - step_s * g[i];
                         if (val < static_cast<scalar_t>(0)) val = static_cast<scalar_t>(0);
@@ -2472,7 +2585,7 @@ RetractStats solve_anchored_raw(
                 f = eval_fg(xf, g);
             }
             have_prev = true;
-            gmap = compute_gmap_raw<scalar_t>(n, xf, g, has_lo, lo_ptr, false, nullptr, false, nullptr);
+            gmap = compute_gmap_raw<scalar_t>(n, xf, g, has_lo_eff, lo_ptr, has_hi_eff, hi_ptr, has_mask, mask_ptr);
             if (gmap <= tol) {
                 std::memcpy(Y_out_ptr, xf, n * sizeof(scalar_t));
                 return {f, n_grad, n_fun, it, "grad_map", gmap};
@@ -2498,7 +2611,7 @@ RetractStats solve_anchored_raw(
         }
 
         lbfgsb_direction_core<scalar_t>(
-            n, xf, g, has_lo, lo_ptr, false, nullptr,
+            n, xf, g, has_lo_eff, lo_ptr, has_hi_eff, hi_ptr,
             m_hist, theta, (m_hist > 0) ? M_buf : nullptr,
             (m_hist > 0) ? tl.ws_dir.W_buf.data() : nullptr,
             512, tl.ws_dir, d, a_max, fixed, xcp);
@@ -2510,11 +2623,12 @@ RetractStats solve_anchored_raw(
             m_hist = 0;
             theta = 1.0;
             lbfgsb_direction_core<scalar_t>(
-                n, xf, g, has_lo, lo_ptr, false, nullptr,
+                n, xf, g, has_lo_eff, lo_ptr, has_hi_eff, hi_ptr,
                 0, 1.0, nullptr, nullptr, 512, tl.ws_dir, d, a_max, fixed, xcp);
-            if (has_lo) {
+            if (has_lo || has_mask) {
                 for (int64_t i = 0; i < n; ++i) {
-                    if (xcp[i] < static_cast<scalar_t>(0)) xcp[i] = static_cast<scalar_t>(0);
+                    if (has_lo && xcp[i] < static_cast<scalar_t>(0)) xcp[i] = static_cast<scalar_t>(0);
+                    if (has_mask && mask_ptr[i] == static_cast<scalar_t>(0)) xcp[i] = static_cast<scalar_t>(0);
                 }
             }
             double dg_reset = 0.0;
@@ -2524,18 +2638,33 @@ RetractStats solve_anchored_raw(
             }
             if (dg_reset >= 0.0) {
                 double g_norm2 = 0.0;
-                for (int64_t i = 0; i < n; ++i) g_norm2 += static_cast<double>(g[i]) * static_cast<double>(g[i]);
+                for (int64_t i = 0; i < n; ++i) {
+                    if (!has_mask || mask_ptr[i] != static_cast<scalar_t>(0)) {
+                        g_norm2 += static_cast<double>(g[i]) * static_cast<double>(g[i]);
+                    }
+                }
                 scalar_t denom_g = static_cast<scalar_t>(std::max(std::sqrt(g_norm2), static_cast<double>(std::numeric_limits<scalar_t>::min())));
-                for (int64_t i = 0; i < n; ++i) d[i] = -g[i] / denom_g;
+                for (int64_t i = 0; i < n; ++i) {
+                    d[i] = (has_mask && mask_ptr[i] == static_cast<scalar_t>(0)) ? static_cast<scalar_t>(0) : (-g[i] / denom_g);
+                }
             }
-            a_max = compute_a_max_raw<scalar_t>(n, d, xf, has_lo, lo_ptr, false, nullptr);
+            a_max = compute_a_max_raw<scalar_t>(n, d, xf, has_lo_eff, lo_ptr, has_hi_eff, hi_ptr);
             g0_dir = 0.0;
             for (int64_t i = 0; i < n; ++i) g0_dir += static_cast<double>(d[i]) * static_cast<double>(g[i]);
         }
 
         auto phi = [&](double a, double& fa_out, double& ga_d_out) {
             scalar_t a_s = static_cast<scalar_t>(a);
-            if (has_lo) {
+            if (has_mask) {
+                for (int64_t i = 0; i < n; ++i) {
+                    scalar_t val = static_cast<scalar_t>(0);
+                    if (mask_ptr[i] != static_cast<scalar_t>(0)) {
+                        val = xf[i] + a_s * d[i];
+                        if (has_lo && val < static_cast<scalar_t>(0)) val = static_cast<scalar_t>(0);
+                    }
+                    x_trial[i] = val;
+                }
+            } else if (has_lo) {
                 for (int64_t i = 0; i < n; ++i) {
                     scalar_t val = xf[i] + a_s * d[i];
                     x_trial[i] = (val > static_cast<scalar_t>(0)) ? val : static_cast<scalar_t>(0);
@@ -2554,7 +2683,7 @@ RetractStats solve_anchored_raw(
         };
 
         if (std::isnan(a_max)) {
-            a_max = compute_a_max_raw<scalar_t>(n, d, xf, has_lo, lo_ptr, false, nullptr);
+            a_max = compute_a_max_raw<scalar_t>(n, d, xf, has_lo_eff, lo_ptr, has_hi_eff, hi_ptr);
         }
 
         int64_t remaining = std::max<int64_t>(max_grad - n_grad - 1, 1);
@@ -2653,8 +2782,11 @@ RetractStats solve_anchored_raw(
                 double dn2 = 0.0;
                 scalar_t step_s = static_cast<scalar_t>(step);
                 for (int64_t i = 0; i < n; ++i) {
-                    scalar_t val = xf[i] + step_s * d[i];
-                    if (has_lo && val < static_cast<scalar_t>(0)) val = static_cast<scalar_t>(0);
+                    scalar_t val = static_cast<scalar_t>(0);
+                    if (!has_mask || mask_ptr[i] != static_cast<scalar_t>(0)) {
+                        val = xf[i] + step_s * d[i];
+                        if (has_lo && val < static_cast<scalar_t>(0)) val = static_cast<scalar_t>(0);
+                    }
                     x_trial[i] = val;
                     double diff = static_cast<double>(val - xf[i]);
                     dn2 += diff * diff;
@@ -2720,7 +2852,7 @@ RetractStats solve_anchored_raw(
         std::memcpy(xf, x_new, n * sizeof(scalar_t));
         std::memcpy(g, g_new, n * sizeof(scalar_t));
         f = accepted_f;
-        gmap = compute_gmap_raw<scalar_t>(n, xf, g, has_lo, lo_ptr, false, nullptr, false, nullptr);
+        gmap = compute_gmap_raw<scalar_t>(n, xf, g, has_lo_eff, lo_ptr, has_hi_eff, hi_ptr, has_mask, mask_ptr);
 
         if (gmap <= tol) {
             stop = "grad_map";
@@ -2757,12 +2889,78 @@ RetractStats solve_anchored_raw(
     return {f, n_grad, n_fun, it, stop, gmap};
 }
 
-std::tuple<at::Tensor, double, int64_t, int64_t, int64_t, std::string, double>
+template <typename scalar_t>
+RetractStats solve_anchored_sparse_raw(
+    int64_t p, int64_t k,
+    const scalar_t* X0_ptr,
+    const scalar_t* init_ptr,
+    const scalar_t* mask_in_ptr,
+    int64_t n_keep,
+    double w, bool nonneg, bool is_orth_cg,
+    double tol, int64_t max_grad, int64_t memory,
+    double sigma, int64_t patience, double rtol, double stall_slack,
+    scalar_t* Y_out_ptr,
+    bool& sparse_stage_out,
+    bool& need_tie_break_out) {
+
+    sparse_stage_out = false;
+    need_tie_break_out = false;
+
+    if (mask_in_ptr != nullptr) {
+        return solve_anchored_raw<scalar_t>(
+            p, k, X0_ptr, init_ptr, w, nonneg, is_orth_cg,
+            tol, max_grad, memory, sigma, patience, rtol, stall_slack,
+            mask_in_ptr, Y_out_ptr);
+    }
+
+    RetractStats st1 = solve_anchored_raw<scalar_t>(
+        p, k, X0_ptr, init_ptr, w, nonneg, is_orth_cg,
+        tol, max_grad, memory, sigma, patience, rtol, stall_slack,
+        nullptr, Y_out_ptr);
+
+    if (n_keep <= 0 || n_keep >= p || k <= 1 || st1.stop == "skipped") {
+        return st1;
+    }
+
+    int64_t mem_cap = std::min<int64_t>(std::max<int64_t>(memory, 1), 32);
+    thread_local AnchoredSolverWorkspace<scalar_t> tl_sp;
+    tl_sp.ensure(p, k, mem_cap);
+
+    int sel = select_hard_support_raw<scalar_t>(
+        p, k, n_keep, Y_out_ptr,
+        tl_sp.mask_vec.data(), tl_sp.ys_buf.data(), tl_sp.col_sort);
+
+    if (sel == 0) {
+        return st1;
+    }
+    if (sel == 2) {
+        need_tie_break_out = true;
+        return st1;
+    }
+
+    RetractStats st2 = solve_anchored_raw<scalar_t>(
+        p, k, X0_ptr, tl_sp.ys_buf.data(), w, nonneg, is_orth_cg,
+        tol, max_grad, memory, sigma, patience, rtol, stall_slack,
+        tl_sp.mask_vec.data(), Y_out_ptr);
+    sparse_stage_out = true;
+    return {
+        st2.energy,
+        st1.n_grad + st2.n_grad,
+        st1.n_fun + st2.n_fun,
+        st1.iters + st2.iters,
+        st2.stop,
+        st2.grad_map
+    };
+}
+
+std::tuple<at::Tensor, double, int64_t, int64_t, int64_t, std::string, double, bool, bool>
 retract_anchored_cpu(
     const at::Tensor& target_in,
     const c10::optional<at::Tensor>& init_opt,
     double w, bool nonneg, const std::string& orth,
-    double tol, int64_t max_grad, int64_t memory) {
+    double tol, int64_t max_grad, int64_t memory,
+    const c10::optional<at::Tensor>& mask_opt,
+    int64_t n_keep) {
 
     auto target = target_in.contiguous();
     int64_t p = target.size(0);
@@ -2770,30 +2968,39 @@ retract_anchored_cpu(
     at::Tensor init_t;
     bool has_init = init_opt.has_value() && init_opt->defined() && init_opt->numel() > 0;
     if (has_init) init_t = init_opt->contiguous();
+    at::Tensor mask_t;
+    bool has_mask = mask_opt.has_value() && mask_opt->defined() && mask_opt->numel() > 0;
+    if (has_mask) mask_t = mask_opt->contiguous();
     bool is_orth_cg = (orth == "Cg");
     at::Tensor Y_out = at::empty({p, k}, target.options());
 
     RetractStats stats;
+    bool sparse_stage = false;
+    bool need_tie_break = false;
     {
         py::gil_scoped_release release;
         AT_DISPATCH_FLOATING_TYPES(target.scalar_type(), "retract_anchored_cpu", ([&] {
             const scalar_t* init_ptr = has_init ? init_t.data_ptr<scalar_t>() : nullptr;
-            stats = solve_anchored_raw<scalar_t>(
-                p, k, target.data_ptr<scalar_t>(), init_ptr,
+            const scalar_t* mask_ptr = has_mask ? mask_t.data_ptr<scalar_t>() : nullptr;
+            stats = solve_anchored_sparse_raw<scalar_t>(
+                p, k, target.data_ptr<scalar_t>(), init_ptr, mask_ptr, n_keep,
                 w, nonneg, is_orth_cg, tol, max_grad, memory,
-                1e-4, 50, 1e-12, 1e3, Y_out.data_ptr<scalar_t>());
+                1e-4, 50, 1e-12, 1e3, Y_out.data_ptr<scalar_t>(),
+                sparse_stage, need_tie_break);
         }));
     }
-    return std::make_tuple(Y_out, stats.energy, stats.n_grad, stats.n_fun, stats.iters, stats.stop, stats.grad_map);
+    return std::make_tuple(Y_out, stats.energy, stats.n_grad, stats.n_fun, stats.iters,
+                           stats.stop, stats.grad_map, sparse_stage, need_tie_break);
 }
 
-std::tuple<at::Tensor, std::vector<double>, std::vector<int64_t>, std::vector<int64_t>, std::vector<std::string>, std::vector<double>>
+std::tuple<at::Tensor, std::vector<double>, std::vector<int64_t>, std::vector<int64_t>, std::vector<std::string>, std::vector<double>, std::vector<bool>, std::vector<bool>>
 retract_anchored_batched_cpu(
     const at::Tensor& target_in,
     const c10::optional<at::Tensor>& init_opt,
     const std::vector<double>& ws,
     bool nonneg, const std::string& orth,
-    double tol, int64_t max_grad, int64_t memory) {
+    double tol, int64_t max_grad, int64_t memory,
+    int64_t n_keep) {
 
     auto target = target_in.contiguous();
     int64_t B = target.size(0);
@@ -2811,6 +3018,8 @@ retract_anchored_batched_cpu(
     std::vector<int64_t> iters_v(B, 0);
     std::vector<std::string> stops(B);
     std::vector<double> gmaps(B, 0.0);
+    std::vector<uint8_t> sparse_stages_u8(B, 0);
+    std::vector<uint8_t> need_ties_u8(B, 0);
 
     {
         py::gil_scoped_release release;
@@ -2822,15 +3031,20 @@ retract_anchored_batched_cpu(
                 for (int64_t b = begin; b < end; ++b) {
                     double wb = (ws.size() == 1) ? ws[0] : ws[b];
                     const scalar_t* init_b = has_init ? (I_base + b * stride) : nullptr;
-                    auto st = solve_anchored_raw<scalar_t>(
-                        p, k, X_base + b * stride, init_b,
+                    bool sp_b = false;
+                    bool tie_b = false;
+                    auto st = solve_anchored_sparse_raw<scalar_t>(
+                        p, k, X_base + b * stride, init_b, nullptr, n_keep,
                         wb, nonneg, is_orth_cg, tol, max_grad, memory,
-                        1e-4, 50, 1e-12, 1e3, Y_base + b * stride);
+                        1e-4, 50, 1e-12, 1e3, Y_base + b * stride,
+                        sp_b, tie_b);
                     energies[b] = st.energy;
                     n_grads[b] = st.n_grad;
                     iters_v[b] = st.iters;
                     stops[b] = std::move(st.stop);
                     gmaps[b] = st.grad_map;
+                    sparse_stages_u8[b] = sp_b ? 1 : 0;
+                    need_ties_u8[b] = tie_b ? 1 : 0;
                 }
             };
             int64_t hw = static_cast<int64_t>(std::thread::hardware_concurrency());
@@ -2854,7 +3068,13 @@ retract_anchored_batched_cpu(
             }
         }));
     }
-    return std::make_tuple(Y_out, energies, n_grads, iters_v, stops, gmaps);
+    std::vector<bool> sparse_stages(B, false);
+    std::vector<bool> need_ties(B, false);
+    for (int64_t b = 0; b < B; ++b) {
+        sparse_stages[b] = (sparse_stages_u8[b] != 0);
+        need_ties[b] = (need_ties_u8[b] != 0);
+    }
+    return std::make_tuple(Y_out, energies, n_grads, iters_v, stops, gmaps, sparse_stages, need_ties);
 }
 
 } // namespace nsa_flow
@@ -2877,13 +3097,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("sigma") = 1e-4, py::arg("patience") = 50, py::arg("rtol") = 1e-12,
           py::arg("stall_slack") = 1e3, py::arg("callback") = py::none());
     m.def("retract_anchored_cpu", &nsa_flow::retract_anchored_cpu,
-          "Zero-overhead pure-C++ anchored L-BFGS-B retraction",
+          "Zero-overhead pure-C++ anchored L-BFGS-B retraction (with optional sparse stage)",
           py::arg("target"), py::arg("init") = py::none(), py::arg("w") = 0.5,
           py::arg("nonneg") = true, py::arg("orth") = "D",
-          py::arg("tol") = 1e-6, py::arg("max_grad") = 2000, py::arg("memory") = 10);
+          py::arg("tol") = 1e-6, py::arg("max_grad") = 2000, py::arg("memory") = 10,
+          py::arg("mask") = py::none(), py::arg("n_keep") = 0);
     m.def("retract_anchored_batched_cpu", &nsa_flow::retract_anchored_batched_cpu,
-          "Parallel batched [B, p, k] pure-C++ anchored L-BFGS-B retraction",
+          "Parallel batched [B, p, k] pure-C++ anchored L-BFGS-B retraction (with optional sparse stage)",
           py::arg("target"), py::arg("init") = py::none(), py::arg("ws") = std::vector<double>{0.5},
           py::arg("nonneg") = true, py::arg("orth") = "D",
-          py::arg("tol") = 1e-6, py::arg("max_grad") = 2000, py::arg("memory") = 10);
+          py::arg("tol") = 1e-6, py::arg("max_grad") = 2000, py::arg("memory") = 10,
+          py::arg("n_keep") = 0);
 }

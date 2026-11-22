@@ -157,9 +157,36 @@ def _subspace_vg(anchor, inv_k):
     return vg
 
 
+def _sparseness_n_keep(p, sparseness):
+    """Return ``n_keep`` for quantile ``sparseness`` (or ``None`` when inactive)."""
+    if sparseness is None:
+        return None
+    q = float(sparseness)
+    if q <= 0.0:
+        return None
+    q = min(q, 0.999)
+    if p <= 1:
+        return p
+    return max(1, int(round(p * (1.0 - q))))
+
+
+def _any_column_denser(Y, n_keep):
+    """Return True iff at least one column of 2-D ``Y`` has > ``n_keep`` entries above dust."""
+    p, k = Y.shape
+    if n_keep is None or n_keep <= 0 or n_keep >= p or p <= 1 or k == 0:
+        return False
+    mag = Y.detach().abs()
+    max_mag = mag.max(dim=0).values
+    active = max_mag > 0
+    if not bool(active.any()):
+        return False
+    nnz = (mag > (1e-12 * max_mag).unsqueeze(0)).sum(dim=0)
+    return bool((active & (nnz > n_keep)).any())
+
+
 def _retract_anchored_batched_torch(X0, w_vec, *, nonneg=True, init=None,
                                     tol=None, max_iter=2000, orth="D",
-                                    sigma=1e-4):
+                                    sigma=1e-4, mask=None):
     """Batched ``[B, p, k]`` Spectral Projected Gradient in pure PyTorch (CUDA/MPS/CPU).
 
     Runs all ``B`` anchored problems simultaneously in one vectorized kernel
@@ -180,9 +207,12 @@ def _retract_anchored_batched_torch(X0, w_vec, *, nonneg=True, init=None,
     inv_k = 1.0 / (1.0 - 1.0 / k)
     eye_k = torch.eye(k, dtype=dtype, device=device)
 
+    mask_t = None if mask is None else mask.to(dtype=dtype, device=device).detach()
     Y = (X0.clone() if init is None else init.to(dtype=dtype, device=device).detach().clone())
     if nonneg:
         Y = Y.clamp_min(0.0)
+    if mask_t is not None:
+        Y = Y * mask_t
 
     is_cg = (orth == "Cg")
     if is_cg:
@@ -205,6 +235,8 @@ def _retract_anchored_batched_torch(X0, w_vec, *, nonneg=True, init=None,
         step = Yv - nY2.reshape(B, 1, 1) * gv
         if nonneg:
             step = step.clamp_min(0.0)
+        if mask_t is not None:
+            step = step * mask_t
         return (step - Yv).pow(2).sum((-2, -1)).sqrt() / nY.clamp_min(tiny)
 
     E, g = _vg(Y)
@@ -242,6 +274,8 @@ def _retract_anchored_batched_torch(X0, w_vec, *, nonneg=True, init=None,
             Y_try = Y - t_cur.reshape(B, 1, 1) * g
             if nonneg:
                 Y_try = Y_try.clamp_min(0.0)
+            if mask_t is not None:
+                Y_try = Y_try * mask_t
             d2 = (Y_try - Y).pow(2).sum((-2, -1))
             E_try, _ = _vg(Y_try)
             ok = need & torch.isfinite(E_try) & (E_try <= E - sigma * d2 / t_cur)
@@ -282,16 +316,58 @@ def _retract_anchored_batched_torch(X0, w_vec, *, nonneg=True, init=None,
 
 def retract_anchored(target, w=0.5, *, nonneg=True, init=None, tol=None,
                      max_iter=2000, orth="D", fidelity="anchor",
-                     return_info=False):
-    """Zero-overhead anchored NSA-Flow retraction for 2-D ``[p, k]`` or 3-D ``[B, p, k]``.
+                     sparseness=None, return_info=False):
+    r"""Zero-overhead anchored NSA-Flow retraction for 2-D ``[p, k]`` or 3-D ``[B, p, k]``.
 
     Designed for inner-loop proximal callers (e.g. ``pysimlr``) and batched
     neural layers.  Bypasses ``make_result`` / ``basis_report`` completely on
-    the CPU native C++ L-BFGS-B path and returns the retracted tensor ``Y``
+    the CPU native C++ fast path and returns the retracted tensor ``Y``
     directly (or ``(Y, info)`` when ``return_info=True``).
 
-    When ``k <= 1``, skips optimisation immediately and returns ``target.clone()``
-    unchanged with ``stop_reason="skipped"`` and ``iters=0``.
+    Proximal identity
+    -----------------
+    For ``fidelity="anchor"``, ``orth="D"``, ``k > 1``, ``0 <= w < 1``, and
+    ``c != 0``, both the Python and native C++ kernels minimise the exact same
+    energy without any hidden constant factor on either term::
+
+        E_w(Y) = (1 - w) ||Y - c||_F^2 / ||c||_F^2  +  w Dtilde(Y)
+
+    Multiplying by ``||c||_F^2 / (2 (1 - w))`` gives the proximal form::
+
+        (||c||_F^2 / (2 (1 - w))) E_w(Y)
+            = 1/2 ||Y - c||_F^2  +  lambda * Dtilde(Y),
+        with  lambda = w ||c||_F^2 / (2 (1 - w)).
+
+    Two caveats for outer proximal-gradient callers:
+
+    1. ``lambda`` is proportional to ``||c||_F^2`` (state-dependent across outer
+       iterations unless ``||c||_F`` is held fixed), and ``Dtilde`` is
+       non-convex so the solver certifies first-order KKT stationarity
+       (gradient mapping ``<= tol``) rather than a global ``argmin``.
+    2. When ``sparseness`` is set, the two-stage retraction selects the
+       top-``n_keep`` support per column on the Stage 1 solution (only for
+       columns strictly denser than ``n_keep``) and re-minimises ``E_w``
+       restricted to that support.  The returned ``Y`` satisfies the
+       first-order condition restricted to the selected support (not as an
+       exact prox of ``Dtilde + I_{||.||_0 <= n_keep}``).
+
+    Warm starts and support behaviour with ``sparseness``
+    -----------------------------------------------------
+    * ``init`` warm-starts Stage 1; Stage 2 (when triggered) starts from the
+      hard-thresholded Stage 1 iterate ``Y_stage1 * mask``.
+    * Every returned column has at most ``n_keep = max(1, round(p * (1 - q)))``
+      nonzeros.  When no column is denser than ``n_keep``, Stage 2 is skipped
+      (``info["sparse_stage"] == False``).
+    * Re-applying ``retract_anchored`` to its own output (``R(R(X))``) is a
+      second proximal step, not a projection: for ``nonneg=True``, support is
+      monotonically non-expanding (``supp(R(R(X))) <= supp(R(X))``) and may
+      strictly shrink when overlapping columns are pushed further toward
+      disjointness; for ``nonneg=False``, Stage 1 is unconstrained so support
+      indices may change on a second call.
+
+    When ``k <= 1`` and ``sparseness`` is ``None`` (or ``<= 0``), skips
+    optimisation immediately and returns ``target.clone()`` unchanged with
+    ``stop_reason="skipped"`` and ``iters=0``.
     """
     if fidelity == "entrywise":
         fidelity = "anchor"
@@ -304,7 +380,11 @@ def retract_anchored(target, w=0.5, *, nonneg=True, init=None, tol=None,
     if X0.ndim not in (2, 3):
         raise ValueError(f"target must be 2-D [p, k] or 3-D [B, p, k]; got shape {tuple(X0.shape)}")
 
+    p = X0.shape[-2]
     k = X0.shape[-1]
+    n_keep = _sparseness_n_keep(p, sparseness)
+    n_keep_cpp = 0 if (n_keep is None or n_keep >= p) else int(n_keep)
+
     if tol is None:
         tol = default_tol(X0.dtype)
     else:
@@ -321,10 +401,13 @@ def retract_anchored(target, w=0.5, *, nonneg=True, init=None, tol=None,
                 if k <= 1:
                     if not torch.isfinite(X0).all():
                         raise ValueError("target contains non-finite values")
-                    Y = X0.clone()
+                    Y = (X0.clone() if n_keep is None else
+                         simlr_sparseness(X0, float(sparseness), nonneg=bool(nonneg),
+                                          alg="hard", only_if_denser=True))
                     if return_info:
                         return Y, {"converged": True, "stop_reason": "skipped", "certificate": "trivial",
-                                   "grad_map": 0.0, "n_grad": 0, "iters": 0}
+                                   "grad_map": 0.0, "n_grad": 0, "iters": 0,
+                                   "sparse_stage": False, "n_keep": n_keep}
                     return Y
                 init_t = None
                 if init is not None:
@@ -332,8 +415,17 @@ def retract_anchored(target, w=0.5, *, nonneg=True, init=None, tol=None,
                               else torch.as_tensor(init)).to(dtype=X0.dtype, device=X0.device).detach()
                     if init_t.shape != X0.shape:
                         raise ValueError(f"init shape {tuple(init_t.shape)} != target shape {tuple(X0.shape)}")
-                Y, _f, n_grad, _n_fun, iters, stop, gmap = _native.retract_anchored_cpu(
-                    X0.detach(), init_t, wf, bool(nonneg), orth, tol, int(max_iter), 10)
+                Y, _f, n_grad, _n_fun, iters, stop, gmap, sparse_stage, need_tie = _native.retract_anchored_cpu(
+                    X0.detach(), init_t, wf, bool(nonneg), orth, tol, int(max_iter), 10, None, n_keep_cpp)
+                if need_tie and n_keep_cpp > 0:
+                    Ys = simlr_sparseness(Y, float(sparseness), nonneg=bool(nonneg),
+                                          alg="hard", only_if_denser=True)
+                    mask_t = (Ys != 0).to(dtype=Y.dtype, device=Y.device)
+                    Y, _f2, ng2, _nf2, it2, stop, gmap, _, _ = _native.retract_anchored_cpu(
+                        X0.detach(), Ys.detach(), wf, bool(nonneg), orth, tol, int(max_iter), 10, mask_t, 0)
+                    n_grad += ng2
+                    iters += it2
+                    sparse_stage = True
                 if not return_info:
                     return Y
                 cert = ("stationary" if (stop == "grad_map" and gmap <= tol)
@@ -341,24 +433,30 @@ def retract_anchored(target, w=0.5, *, nonneg=True, init=None, tol=None,
                               else ("trivial" if stop == "skipped" else "none")))
                 return Y, {"converged": cert != "none", "stop_reason": stop,
                            "certificate": cert, "grad_map": float(gmap),
-                           "n_grad": int(n_grad), "iters": int(iters)}
+                           "n_grad": int(n_grad), "iters": int(iters),
+                           "sparse_stage": bool(sparse_stage), "n_keep": n_keep}
 
         if not torch.isfinite(X0).all():
             raise ValueError("target contains non-finite values")
         if k <= 1:
-            Y = X0.clone()
+            Y = (X0.clone() if n_keep is None else
+                 simlr_sparseness(X0, float(sparseness), nonneg=bool(nonneg),
+                                  alg="hard", only_if_denser=True))
             if return_info:
                 return Y, {"converged": True, "stop_reason": "skipped", "certificate": "trivial",
-                           "grad_map": 0.0, "n_grad": 0, "iters": 0}
+                           "grad_map": 0.0, "n_grad": 0, "iters": 0,
+                           "sparse_stage": False, "n_keep": n_keep}
             return Y
 
         res = _nsa_flow_anchored(X0, w=wf, init=init, nonneg=nonneg, max_iter=max_iter,
-                                 tol=tol, fidelity=fidelity, orth=orth)
+                                 tol=tol, fidelity=fidelity, orth=orth, sparseness=sparseness)
         if not return_info:
             return res.Y
         return res.Y, {"converged": bool(res.converged), "stop_reason": res.stop_reason,
                        "certificate": res.certificate, "grad_map": float(res.grad_map),
-                       "n_grad": int(res.n_grad), "iters": int(res.iters)}
+                       "n_grad": int(res.n_grad), "iters": int(res.iters),
+                       "sparse_stage": bool(res.get("sparse_stage", False)),
+                       "n_keep": res.get("n_keep", n_keep)}
 
     # 3-D batched [B, p, k]
     if not torch.isfinite(X0).all():
@@ -377,10 +475,18 @@ def retract_anchored(target, w=0.5, *, nonneg=True, init=None, tol=None,
             raise ValueError(f"w must lie in [0, 1]; got {wf}")
 
     if k <= 1:
-        Y = X0.clone()
+        if n_keep is None:
+            Y = X0.clone()
+        else:
+            Y = torch.stack([
+                simlr_sparseness(X0[b], float(sparseness), nonneg=bool(nonneg),
+                                 alg="hard", only_if_denser=True)
+                for b in range(B)
+            ], dim=0)
         if return_info:
             return Y, {"converged": True, "stop_reason": "skipped", "certificate": "trivial",
-                       "grad_map": 0.0, "n_grad": 0, "iters": 0}
+                       "grad_map": 0.0, "n_grad": 0, "iters": 0,
+                       "sparse_stage": False, "sparse_stages": [False] * B, "n_keep": n_keep}
         return Y
 
     init_t = None
@@ -394,8 +500,24 @@ def retract_anchored(target, w=0.5, *, nonneg=True, init=None, tol=None,
             and X0.is_cpu and X0.dtype in (torch.float32, torch.float64)):
         from .lbfgsb import _native
         if _native is not None and hasattr(_native, "retract_anchored_batched_cpu"):
-            Y, _es, n_grads, iters_v, stops, gmaps = _native.retract_anchored_batched_cpu(
-                X0.detach(), init_t, ws_list, bool(nonneg), orth, tol, int(max_iter), 10)
+            Y, _es, n_grads, iters_v, stops, gmaps, sparse_stages, need_ties = _native.retract_anchored_batched_cpu(
+                X0.detach(), init_t, ws_list, bool(nonneg), orth, tol, int(max_iter), 10, n_keep_cpp)
+            if n_keep_cpp > 0 and any(need_ties):
+                for b in range(B):
+                    if not need_ties[b]:
+                        continue
+                    wb = ws_list[0] if len(ws_list) == 1 else ws_list[b]
+                    Ys = simlr_sparseness(Y[b], float(sparseness), nonneg=bool(nonneg),
+                                          alg="hard", only_if_denser=True)
+                    mask_t = (Ys != 0).to(dtype=Y.dtype, device=Y.device)
+                    Yb, _f2, ng2, _nf2, it2, st2, gm2, _, _ = _native.retract_anchored_cpu(
+                        X0[b].detach(), Ys.detach(), wb, bool(nonneg), orth, tol, int(max_iter), 10, mask_t, 0)
+                    Y[b] = Yb
+                    n_grads[b] += ng2
+                    iters_v[b] += it2
+                    stops[b] = st2
+                    gmaps[b] = gm2
+                    sparse_stages[b] = True
             if not return_info:
                 return Y
             all_conv = all(s in ("grad_map", "plateau", "skipped") for s in stops)
@@ -403,33 +525,62 @@ def retract_anchored(target, w=0.5, *, nonneg=True, init=None, tol=None,
             return Y, {"converged": all_conv, "stop_reasons": stops,
                        "stop_reason": stops[0] if len(set(stops)) == 1 else "mixed",
                        "grad_map": float(worst_gm), "grad_maps": gmaps,
-                       "n_grad": int(sum(n_grads)), "iters": int(max(iters_v) if iters_v else 0)}
+                       "n_grad": int(sum(n_grads)), "iters": int(max(iters_v) if iters_v else 0),
+                       "sparse_stage": any(sparse_stages), "sparse_stages": list(sparse_stages),
+                       "n_keep": n_keep}
 
     if fidelity == "anchor" and orth in ("D", "Cg"):
         ws_full = ws_list * B if len(ws_list) == 1 else ws_list
         Y, _es, n_grads, iters_v, stops, gmaps = _retract_anchored_batched_torch(
             X0.detach(), ws_full, nonneg=nonneg, init=init_t, tol=tol,
             max_iter=int(max_iter), orth=orth)
+        sparse_stages = [False] * B
+        if n_keep is not None and n_keep < p:
+            dense_idx = [b for b in range(B) if _any_column_denser(Y[b], n_keep)]
+            if dense_idx:
+                ys_sub, mask_sub = [], []
+                for b in dense_idx:
+                    Ys = simlr_sparseness(Y[b], float(sparseness), nonneg=bool(nonneg),
+                                          alg="hard", only_if_denser=True)
+                    ys_sub.append(Ys)
+                    mask_sub.append((Ys != 0).to(dtype=Y.dtype, device=Y.device))
+                X_sub = X0[dense_idx].detach()
+                ws_sub = [ws_full[b] for b in dense_idx]
+                Ys_batch = torch.stack(ys_sub, dim=0)
+                M_batch = torch.stack(mask_sub, dim=0)
+                Y2, _e2, ng2, it2, st2, gm2 = _retract_anchored_batched_torch(
+                    X_sub, ws_sub, nonneg=nonneg, init=Ys_batch, tol=tol,
+                    max_iter=int(max_iter), orth=orth, mask=M_batch)
+                for idx_i, b in enumerate(dense_idx):
+                    Y[b] = Y2[idx_i] * M_batch[idx_i]
+                    n_grads[b] += ng2[idx_i]
+                    iters_v[b] += it2[idx_i]
+                    stops[b] = st2[idx_i]
+                    gmaps[b] = gm2[idx_i]
+                    sparse_stages[b] = True
         if not return_info:
             return Y
         all_conv = all(s in ("grad_map", "plateau", "skipped") for s in stops)
         return Y, {"converged": all_conv, "stop_reasons": stops,
                    "stop_reason": stops[0] if len(set(stops)) == 1 else "mixed",
                    "grad_map": float(max(gmaps) if gmaps else 0.0), "grad_maps": gmaps,
-                   "n_grad": int(sum(n_grads)), "iters": int(max(iters_v) if iters_v else 0)}
+                   "n_grad": int(sum(n_grads)), "iters": int(max(iters_v) if iters_v else 0),
+                   "sparse_stage": any(sparse_stages), "sparse_stages": sparse_stages,
+                   "n_keep": n_keep}
 
     # Generic fallback (subspace / C / Coff): per-item loop
-    ys, stops, gmaps, n_grads, iters_v = [], [], [], [], []
+    ys, stops, gmaps, n_grads, iters_v, sparse_stages = [], [], [], [], [], []
     for b in range(B):
         wb = ws_list[0] if len(ws_list) == 1 else ws_list[b]
         ib = None if init_t is None else init_t[b]
         rb = _nsa_flow_anchored(X0[b], w=wb, init=ib, nonneg=nonneg, max_iter=max_iter,
-                                tol=tol, fidelity=fidelity, orth=orth)
+                                tol=tol, fidelity=fidelity, orth=orth, sparseness=sparseness)
         ys.append(rb.Y)
         stops.append(rb.stop_reason)
         gmaps.append(float(rb.grad_map))
         n_grads.append(int(rb.n_grad))
         iters_v.append(int(rb.iters))
+        sparse_stages.append(bool(rb.get("sparse_stage", False)))
     Y = torch.stack(ys, dim=0)
     if not return_info:
         return Y
@@ -437,7 +588,9 @@ def retract_anchored(target, w=0.5, *, nonneg=True, init=None, tol=None,
     return Y, {"converged": all_conv, "stop_reasons": stops,
                "stop_reason": stops[0] if len(set(stops)) == 1 else "mixed",
                "grad_map": float(max(gmaps) if gmaps else 0.0), "grad_maps": gmaps,
-               "n_grad": int(sum(n_grads)), "iters": int(max(iters_v) if iters_v else 0)}
+               "n_grad": int(sum(n_grads)), "iters": int(max(iters_v) if iters_v else 0),
+               "sparse_stage": any(sparse_stages), "sparse_stages": sparse_stages,
+               "n_keep": n_keep}
 
 
 def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, tol=None,
@@ -572,7 +725,8 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
         tol_v = default_tol(X0.dtype) if tol is None else float(tol)
         Y_b, info = retract_anchored(
             X0, w=w, nonneg=bool(nonneg), init=init, tol=tol_v,
-            max_iter=max_it, orth=orth, fidelity=fmode, return_info=True)
+            max_iter=max_it, orth=orth, fidelity=fmode,
+            sparseness=sparseness, return_info=True)
         stop_b = info.get("stop_reason", "grad_map")
         if stop_b == "mixed":
             stop_b = "grad_map" if info.get("converged") else "max_iter"
@@ -591,10 +745,14 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
             fidelity_mode=fmode, fidelity_requested=fidelity,
             nonneg=bool(nonneg), align=bool(align), target=X0,
             batched=True,
+            sparse_stage=bool(info.get("sparse_stage", False)),
+            n_keep=info.get("n_keep", None),
         )
         if "stop_reasons" in info:
             res["stop_reasons"] = info["stop_reasons"]
             res["grad_maps"] = info["grad_maps"]
+        if "sparse_stages" in info:
+            res["sparse_stages"] = info["sparse_stages"]
         return res
     if X0.ndim != 2:
         raise ValueError(f"target must be 2-D [p, k] or 3-D [B, p, k]; got shape {tuple(X0.shape)}")
@@ -774,44 +932,46 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
         n_grad += rep.n_grad
         n_energy += rep.n_energy
 
-    if sparseness is not None and float(sparseness) > 0.0:
+    n_keep = _sparseness_n_keep(p, sparseness)
+    sparse_stage = False
+    if n_keep is not None and _any_column_denser(Y, n_keep):
         q_val = float(sparseness)
         Ys = simlr_sparseness(Y, q_val, nonneg=bool(nonneg), alg="hard",
                               only_if_denser=True)
-        if not torch.equal(Ys, Y):
-            mask = (Ys != 0).to(Y.dtype)
-            wi_last = ws[-1]
+        mask = (Ys != 0).to(Y.dtype)
+        wi_last = ws[-1]
 
-            def _anc_energy_sp(Yc, _w=wi_last):
-                return vg(Yc, X0, _w, denom, inv_k, eye_k, align)[0]
+        def _anc_energy_sp(Yc, _w=wi_last):
+            return vg(Yc, X0, _w, denom, inv_k, eye_k, align)[0]
 
-            def _anc_grad_and_energy_sp(Yc, _w=wi_last):
-                E_v, _, _, g_v = vg(Yc, X0, _w, denom, inv_k, eye_k, align)
-                return E_v, g_v
+        def _anc_grad_and_energy_sp(Yc, _w=wi_last):
+            E_v, _, _, g_v = vg(Yc, X0, _w, denom, inv_k, eye_k, align)
+            return E_v, g_v
 
-            problem_spec_sp = {
-                "mode": "anchored",
-                "target": X0,
-                "denom": float(denom),
-                "w": float(wi_last),
-                "orth": orth,
-                "fidelity": fidelity,
-                "chol": (anchor.chol if fidelity == "subspace" else None),
-                "align": align,
-            }
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", RuntimeWarning)
-                rep_sp = minimise(
-                    Ys, _anc_energy_sp, _anc_grad_and_energy_sp, proj,
-                    optimizer=optimizer, max_iter=max_iter, tol=tol,
-                    sigma=sigma, mask=mask, verbose=False, trace=None,
-                    caller="nsa_flow (anchored, sparse-support)", w=wi_last,
-                    problem_spec=problem_spec_sp)
-            Y = rep_sp.Y * mask
-            stop, gmap = rep_sp.stop, rep_sp.grad_map
-            total_iters += rep_sp.iters
-            n_grad += rep_sp.n_grad
-            n_energy += rep_sp.n_energy
+        problem_spec_sp = {
+            "mode": "anchored",
+            "target": X0,
+            "denom": float(denom),
+            "w": float(wi_last),
+            "orth": orth,
+            "fidelity": fidelity,
+            "chol": (anchor.chol if fidelity == "subspace" else None),
+            "align": align,
+        }
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            rep_sp = minimise(
+                Ys, _anc_energy_sp, _anc_grad_and_energy_sp, proj,
+                optimizer=optimizer, max_iter=max_iter, tol=tol,
+                sigma=sigma, mask=mask, verbose=False, trace=None,
+                caller="nsa_flow (anchored, sparse-support)", w=wi_last,
+                problem_spec=problem_spec_sp)
+        Y = rep_sp.Y * mask
+        stop, gmap = rep_sp.stop, rep_sp.grad_map
+        total_iters += rep_sp.iters
+        n_grad += rep_sp.n_grad
+        n_energy += rep_sp.n_energy
+        sparse_stage = True
 
     if fidelity == "subspace":
         # both terms are degree-0 homogeneous, so the scale is a free gauge;
@@ -825,7 +985,7 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
     clamp_ref = X0.clamp_min(0.0)
     clamp_dist = float((Y - clamp_ref).norm() / clamp_ref.norm().clamp_min(torch.finfo(Y.dtype).tiny))
 
-    return make_result(
+    res = make_result(
         NSAResult, Y=Y, w=w, orth=orth, mode="anchored",
         optimizer=rep["optimizer"], energy=float(tot), fidelity=float(f),
         defect=float(dd), iters=total_iters, stop=stop, grad_map=gmap, tol=tol,
@@ -838,6 +998,9 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
         scale_ratio=float(Y.norm() / X0.norm()),
         n_grad=n_grad, n_energy=n_energy, w_schedule=ws, trace=trace,
     )
+    res["sparse_stage"] = sparse_stage
+    res["n_keep"] = n_keep
+    return res
 
 
 def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=None,
