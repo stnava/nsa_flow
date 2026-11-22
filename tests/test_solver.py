@@ -225,7 +225,9 @@ def test_zero_target_is_rejected():
 
 def test_wrong_rank_input_is_rejected():
     with pytest.raises(ValueError, match="2-D"):
-        nsa_flow(torch.rand(3, 10, 3, dtype=F64), w=0.5)
+        nsa_flow(torch.rand(10, dtype=F64), w=0.5)
+    with pytest.raises(ValueError, match="2-D"):
+        nsa_flow(torch.rand(2, 3, 10, 3, dtype=F64), w=0.5)
 
 
 def test_mismatched_init_is_rejected():
@@ -571,5 +573,119 @@ def test_simlr_sparseness_untied_unchanged_and_zero_tail_safe():
     Z[2, 1], Z[3, 1] = 3.0, 1.5
     out_z = simlr_sparseness(Z, sparseness=0.5, nonneg=True, alg="hard", only_if_denser=False)
     assert torch.equal(out_z, Z)
+
+
+# --------------------------------------------------------------- k == 1 skip
+@pytest.mark.parametrize("w", [0.0, 0.5, 1.0])
+@pytest.mark.parametrize("nonneg", [True, False])
+@pytest.mark.parametrize("fidelity", ["auto", "anchor", "subspace"])
+def test_anchored_k1_skips_and_preserves_input_unchanged(w, nonneg, fidelity):
+    """When k=1 there is nothing to orthogonalise: skip immediately, return input unchanged, zero work."""
+    import warnings
+    from nsa_flow.energy import grad_stiefel_defect, value_and_grad
+    from nsa_flow.project import project_scaled_stiefel
+
+    torch.manual_seed(0)
+    # Signed target ensures we verify negative entries are NOT altered when k=1 is skipped
+    target = torch.randn(25, 1, dtype=F64)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        res = nsa_flow(target, w=w, nonneg=nonneg, fidelity=fidelity, sparseness=0.5)
+    assert len(caught) == 0, f"Unexpected warnings for k=1 skip: {[str(c.message) for c in caught]}"
+    assert torch.equal(res.Y, target)
+    assert res.Y is not target
+    assert res.iters == 0
+    assert res.n_grad == 0
+    assert res.n_energy == 0
+    assert res.stop_reason == "skipped"
+    assert res.certificate == "trivial"
+    assert res.converged is True
+    assert res.defect == 0.0
+    assert res.fidelity == 0.0
+    assert res.energy == 0.0
+    assert res.scale_ratio == 1.0
+
+    # Primitives also fast-path cleanly at k=1
+    Y_req = target.clone().requires_grad_(True)
+    P = project_scaled_stiefel(Y_req)
+    assert torch.equal(P, Y_req)
+    P.sum().backward()
+    assert torch.equal(Y_req.grad, torch.ones_like(target))
+    assert torch.equal(grad_stiefel_defect(target), torch.zeros_like(target))
+    Etot, F_val, Dn, grad = value_and_grad(target, target, w=w)
+    assert float(Dn) == 0.0 and float(F_val) == 0.0 and float(Etot) == 0.0
+    assert torch.equal(grad, torch.zeros_like(target))
+
+
+# ------------------------------------------------ retract_anchored & batched 3-D
+@pytest.mark.parametrize("orth", ["D", "Cg"])
+@pytest.mark.parametrize("nonneg", [True, False])
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+def test_retract_anchored_matches_nsa_flow(orth, nonneg, dtype):
+    """retract_anchored matches _nsa_flow_anchored on 2-D CPU tensors and honours init/return_info/k=1."""
+    from nsa_flow import retract_anchored
+    torch.manual_seed(0)
+    X0 = torch.rand(40, 4, dtype=dtype)
+    tol = 1e-6 if dtype == torch.float64 else 1e-4
+    ref = nsa_flow(X0, w=0.5, mode="anchored", fidelity="anchor", nonneg=nonneg, orth=orth, tol=tol)
+    Y = retract_anchored(X0, w=0.5, nonneg=nonneg, orth=orth, tol=tol)
+    Y2, info = retract_anchored(X0, w=0.5, nonneg=nonneg, orth=orth, tol=tol, return_info=True)
+    assert torch.equal(Y, Y2)
+    assert torch.allclose(Y, ref.Y, atol=5e-5 if dtype == torch.float64 else 5e-3)
+    assert info["converged"] is True
+    assert info["stop_reason"] in ("grad_map", "plateau")
+    assert info["n_grad"] > 0
+
+    # Warm-starting from a stationary solution converges immediately (n_grad == 1)
+    Yw, info_w = retract_anchored(X0, w=0.5, nonneg=nonneg, orth=orth, init=Y, tol=tol, return_info=True)
+    assert torch.allclose(Yw, Y, atol=1e-12 if dtype == torch.float64 else 1e-5)
+    if info["stop_reason"] == "grad_map":
+        assert info_w["n_grad"] <= 2
+
+    # k == 1 skips without modifying input
+    X1 = torch.randn(20, 1, dtype=dtype)
+    Y1, info1 = retract_anchored(X1, w=0.5, nonneg=nonneg, orth=orth, return_info=True)
+    assert torch.equal(Y1, X1)
+    assert info1["stop_reason"] == "skipped" and info1["iters"] == 0 and info1["converged"] is True
+
+
+def test_retract_anchored_and_nsa_flow_batched_3d():
+    """3-D [B, p, k] batched anchored retraction works in C++ parallel, pure-torch batched, and nsa_flow."""
+    from nsa_flow import retract_anchored
+    from nsa_flow.solve import _retract_anchored_batched_torch
+
+    torch.manual_seed(1)
+    Xb = torch.rand(5, 30, 3, dtype=F64)
+    ws = [0.1, 0.3, 0.5, 0.7, 0.85]
+
+    # Scalar w
+    Yb_s, info_s = retract_anchored(Xb, w=0.5, nonneg=True, tol=1e-6, return_info=True)
+    Y_loop_s = torch.stack([retract_anchored(Xb[i], w=0.5, nonneg=True, tol=1e-6) for i in range(5)])
+    assert torch.allclose(Yb_s, Y_loop_s, atol=1e-12)
+    assert info_s["converged"] is True
+
+    # Per-batch vector w
+    Yb_v = retract_anchored(Xb, w=ws, nonneg=True, tol=1e-6)
+    Y_loop_v = torch.stack([retract_anchored(Xb[i], w=ws[i], nonneg=True, tol=1e-6) for i in range(5)])
+    assert torch.allclose(Yb_v, Y_loop_v, atol=1e-12)
+
+    # Pure-PyTorch batched SPG path (used on CUDA/MPS)
+    Yb_pt, _, _, _, stops_pt, _ = _retract_anchored_batched_torch(Xb, ws, nonneg=True, tol=1e-6)
+    assert all(s in ("grad_map", "plateau") for s in stops_pt)
+    assert torch.allclose(Yb_pt, Y_loop_v, atol=1e-4)
+
+    # Unified nsa_flow accepts 3-D [B, p, k] in anchored mode
+    res_b = nsa_flow(Xb, w=0.5, nonneg=True, tol=1e-6)
+    assert res_b.Y.shape == (5, 30, 3)
+    assert torch.allclose(res_b.Y, Y_loop_s, atol=1e-12)
+    assert res_b.converged is True
+
+    # Batched k=1 skips
+    X1b = torch.randn(4, 15, 1, dtype=F64)
+    res_1b = nsa_flow(X1b, w=0.5)
+    assert torch.equal(res_1b.Y, X1b)
+    assert res_1b.stop_reason == "skipped" and res_1b.iters == 0
+
+
 
 

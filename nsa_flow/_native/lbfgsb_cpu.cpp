@@ -1,5 +1,7 @@
 #include <torch/extension.h>
+#include <ATen/Parallel.h>
 #include <c10/util/Optional.h>
+#include <thread>
 #include <vector>
 #include <cmath>
 #include <limits>
@@ -1312,6 +1314,91 @@ inline double eval_anchored_objective_raw(
     bool is_orth_cg = (orth == "Cg");
     const scalar_t tiny = std::numeric_limits<scalar_t>::min();
 
+    if (fidelity == "anchor" && k <= 8) {
+        scalar_t* B = ws.B.data();
+        scalar_t* G = ws.G.data();
+        for (int64_t i = 0; i < k * k; ++i) B[i] = static_cast<scalar_t>(0);
+        scalar_t R2 = 0;
+        for (int64_t r = 0; r < p; ++r) {
+            const scalar_t* Yr = Y + r * k;
+            const scalar_t* Xr = X0 + r * k;
+            for (int64_t i = 0; i < k; ++i) {
+                scalar_t yri = Yr[i];
+                scalar_t diff = yri - Xr[i];
+                R2 += diff * diff;
+                scalar_t* Bi = B + i * k;
+                for (int64_t j = i; j < k; ++j) {
+                    Bi[j] += yri * Yr[j];
+                }
+            }
+        }
+        for (int64_t i = 0; i < k; ++i) {
+            for (int64_t j = i + 1; j < k; ++j) {
+                B[j * k + i] = B[i * k + j];
+            }
+        }
+        scalar_t F_val = R2 / denom;
+        scalar_t D = 0, t = 0, a2 = 0, N2 = 0;
+        for (int64_t i = 0; i < k; ++i) t += B[i * k + i];
+        scalar_t scale_k = (k > 1) ? (static_cast<scalar_t>(1) - static_cast<scalar_t>(1) / static_cast<scalar_t>(k)) : static_cast<scalar_t>(1);
+        if (k > 1) {
+            if (t < tiny) t = tiny;
+            if (is_orth_cg) {
+                for (int64_t i = 0; i < k; ++i) {
+                    for (int64_t j = 0; j < k; ++j) {
+                        if (i != j) a2 += B[i * k + j] * B[i * k + j];
+                    }
+                }
+                D = a2 / (t * t * scale_k);
+            } else {
+                scalar_t inv_k = static_cast<scalar_t>(1) / static_cast<scalar_t>(k);
+                scalar_t inv_t = static_cast<scalar_t>(1) / t;
+                for (int64_t i = 0; i < k; ++i) {
+                    for (int64_t j = 0; j < k; ++j) {
+                        scalar_t g_val = B[i * k + j] * inv_t;
+                        G[i * k + j] = g_val;
+                        N2 += g_val * g_val;
+                        scalar_t gc = g_val - (i == j ? inv_k : static_cast<scalar_t>(0));
+                        D += gc * gc;
+                    }
+                }
+                D /= scale_k;
+            }
+        }
+        double E = static_cast<double>((static_cast<scalar_t>(1) - w) * F_val + (k > 1 ? w * D : static_cast<scalar_t>(0)));
+        if (eval_grad && grad_out != nullptr) {
+            scalar_t cF = (static_cast<scalar_t>(1) - w) * (static_cast<scalar_t>(2) / denom);
+            scalar_t cD_D = (k > 1 && w > 0) ? (w * static_cast<scalar_t>(4) / (scale_k * t)) : static_cast<scalar_t>(0);
+            scalar_t cD_cg = (k > 1 && w > 0) ? (w * static_cast<scalar_t>(4) / (t * t * scale_k)) : static_cast<scalar_t>(0);
+            scalar_t scale_cg = (t > 0) ? (a2 / t) : static_cast<scalar_t>(0);
+            for (int64_t r = 0; r < p; ++r) {
+                const scalar_t* Yr = Y + r * k;
+                const scalar_t* Xr = X0 + r * k;
+                scalar_t* gr = grad_out + r * k;
+                for (int64_t j = 0; j < k; ++j) {
+                    scalar_t g_tot = cF * (Yr[j] - Xr[j]);
+                    if (k > 1 && w > 0) {
+                        if (is_orth_cg) {
+                            scalar_t v_off = 0;
+                            for (int64_t m = 0; m < k; ++m) {
+                                if (m != j) v_off += Yr[m] * B[m * k + j];
+                            }
+                            g_tot += cD_cg * (v_off - scale_cg * Yr[j]);
+                        } else {
+                            scalar_t vg = 0;
+                            for (int64_t m = 0; m < k; ++m) {
+                                vg += Yr[m] * G[m * k + j];
+                            }
+                            g_tot += cD_D * (vg - N2 * Yr[j]);
+                        }
+                    }
+                    gr[j] = g_tot;
+                }
+            }
+        }
+        return E;
+    }
+
     scalar_t* gF = ws.gF.data();
     scalar_t F = 0.0;
 
@@ -1376,9 +1463,28 @@ inline double eval_anchored_objective_raw(
     scalar_t* B = ws.B.data();
     scalar_t* G = ws.G.data();
 
-    cblas_gemm(CblasTrans, CblasNoTrans, static_cast<int>(k), static_cast<int>(k), static_cast<int>(p),
-               static_cast<scalar_t>(1), Y, static_cast<int>(k), Y, static_cast<int>(k),
-               static_cast<scalar_t>(0), B, static_cast<int>(k));
+    if (k <= 8) {
+        for (int64_t i = 0; i < k * k; ++i) B[i] = static_cast<scalar_t>(0);
+        for (int64_t r = 0; r < p; ++r) {
+            const scalar_t* Yr = Y + r * k;
+            for (int64_t i = 0; i < k; ++i) {
+                scalar_t yri = Yr[i];
+                scalar_t* Bi = B + i * k;
+                for (int64_t j = i; j < k; ++j) {
+                    Bi[j] += yri * Yr[j];
+                }
+            }
+        }
+        for (int64_t i = 0; i < k; ++i) {
+            for (int64_t j = i + 1; j < k; ++j) {
+                B[j * k + i] = B[i * k + j];
+            }
+        }
+    } else {
+        cblas_gemm(CblasTrans, CblasNoTrans, static_cast<int>(k), static_cast<int>(k), static_cast<int>(p),
+                   static_cast<scalar_t>(1), Y, static_cast<int>(k), Y, static_cast<int>(k),
+                   static_cast<scalar_t>(0), B, static_cast<int>(k));
+    }
 
     scalar_t D = 0;
     scalar_t t = 0;
@@ -2099,6 +2205,658 @@ lbfgsb_solve(const at::Tensor& x0_in,
     }));
 }
 
+// --------------------------------------------------------------------------
+// Zero-Allocation Pure-C++ Fast Path for Anchored Retraction (2-D & Batched)
+// --------------------------------------------------------------------------
+
+template <typename scalar_t>
+struct AnchoredSolverWorkspace {
+    std::vector<scalar_t> lo_vec;
+    std::vector<scalar_t> xf, g, d, xcp;
+    std::vector<uint8_t> fixed;
+    std::vector<scalar_t> x_trial, g_trial, x_prev, g_prev, x_lo, g_lo, x_new, g_new;
+    std::vector<scalar_t> s_temp, y_temp;
+    std::vector<scalar_t> S_hist, Y_hist, M_buf;
+    std::vector<double> E_win, g_win;
+    DirectionWorkspace<scalar_t> ws_dir;
+    ObjectiveWorkspace<scalar_t> ws_obj;
+
+    void ensure(int64_t p, int64_t k, int64_t mem_cap) {
+        int64_t n = p * k;
+        if (static_cast<int64_t>(xf.size()) < n) {
+            lo_vec.assign(n, static_cast<scalar_t>(0));
+            xf.resize(n);
+            g.resize(n);
+            d.resize(n);
+            xcp.resize(n);
+            fixed.resize(n);
+            x_trial.resize(n);
+            g_trial.resize(n);
+            x_prev.resize(n);
+            g_prev.resize(n);
+            x_lo.resize(n);
+            g_lo.resize(n);
+            x_new.resize(n);
+            g_new.resize(n);
+            s_temp.resize(n);
+            y_temp.resize(n);
+        }
+        int64_t mn = mem_cap * n;
+        if (static_cast<int64_t>(S_hist.size()) < mn) {
+            S_hist.resize(mn);
+            Y_hist.resize(mn);
+        }
+        int64_t mm = (2 * mem_cap) * (2 * mem_cap);
+        if (static_cast<int64_t>(M_buf.size()) < mm) {
+            M_buf.resize(mm);
+        }
+        ws_dir.resize(n, mem_cap);
+        if (static_cast<int64_t>(ws_obj.B.size()) < k * k) {
+            ws_obj.A.resize(k * k);
+            ws_obj.B.resize(k * k);
+            ws_obj.G.resize(k * k);
+        }
+        if (static_cast<int64_t>(ws_obj.gF.size()) < n) {
+            ws_obj.gF.resize(n);
+        }
+        E_win.clear();
+        g_win.clear();
+    }
+};
+
+struct RetractStats {
+    double energy;
+    int64_t n_grad;
+    int64_t n_fun;
+    int64_t iters;
+    std::string stop;
+    double grad_map;
+};
+
+template <typename scalar_t>
+RetractStats solve_anchored_raw(
+    int64_t p, int64_t k,
+    const scalar_t* X0_ptr,
+    const scalar_t* init_ptr,
+    double w, bool nonneg, bool is_orth_cg,
+    double tol, int64_t max_grad, int64_t memory,
+    double sigma, int64_t patience, double rtol, double stall_slack,
+    scalar_t* Y_out_ptr) {
+
+    const int64_t n = p * k;
+    if (k <= 1) {
+        for (int64_t i = 0; i < n; ++i) {
+            if (!std::isfinite(X0_ptr[i])) {
+                throw std::invalid_argument("target contains non-finite values");
+            }
+        }
+        std::memcpy(Y_out_ptr, X0_ptr, n * sizeof(scalar_t));
+        return {0.0, 0, 0, 0, "skipped", 0.0};
+    }
+
+    double denom = 0.0;
+    for (int64_t i = 0; i < n; ++i) {
+        double v = static_cast<double>(X0_ptr[i]);
+        if (!std::isfinite(v)) {
+            throw std::invalid_argument("target contains non-finite values");
+        }
+        denom += v * v;
+    }
+    if (denom <= 0.0) {
+        std::memcpy(Y_out_ptr, X0_ptr, n * sizeof(scalar_t));
+        return {0.0, 0, 0, 0, "skipped", 0.0};
+    }
+
+    int64_t mem_cap = std::min<int64_t>(std::max<int64_t>(memory, 1), 32);
+    thread_local AnchoredSolverWorkspace<scalar_t> tl;
+    tl.ensure(p, k, mem_cap);
+
+    const bool has_lo = nonneg;
+    const scalar_t* lo_ptr = has_lo ? tl.lo_vec.data() : nullptr;
+    const std::string fidelity_str = "anchor";
+    const std::string orth_str = is_orth_cg ? "Cg" : "D";
+
+    scalar_t* xf = tl.xf.data();
+    scalar_t* g = tl.g.data();
+    const scalar_t* start_ptr = (init_ptr != nullptr) ? init_ptr : X0_ptr;
+    if (has_lo) {
+        for (int64_t i = 0; i < n; ++i) {
+            scalar_t v = start_ptr[i];
+            xf[i] = (v > static_cast<scalar_t>(0)) ? v : static_cast<scalar_t>(0);
+        }
+    } else {
+        std::memcpy(xf, start_ptr, n * sizeof(scalar_t));
+    }
+
+    int64_t n_grad = 0, n_fun = 0;
+    auto eval_fg = [&](const scalar_t* x_buf, scalar_t* g_buf) -> double {
+        n_grad += 1;
+        return eval_anchored_objective_raw<scalar_t>(
+            p, k, x_buf, X0_ptr, denom, fidelity_str, nullptr, w, orth_str, true, g_buf, tl.ws_obj);
+    };
+    auto eval_f = [&](const scalar_t* x_buf) -> double {
+        n_fun += 1;
+        return eval_anchored_objective_raw<scalar_t>(
+            p, k, x_buf, X0_ptr, denom, fidelity_str, nullptr, w, orth_str, false, nullptr, tl.ws_obj);
+    };
+
+    double f = eval_fg(xf, g);
+    double gmap = compute_gmap_raw<scalar_t>(n, xf, g, has_lo, lo_ptr, false, nullptr, false, nullptr);
+    std::string stop = "max_iter";
+    int64_t it = 0;
+
+    const double eps = (sizeof(scalar_t) == sizeof(double))
+        ? std::numeric_limits<double>::epsilon()
+        : std::numeric_limits<float>::epsilon();
+    const double noise_floor = std::sqrt(eps);
+
+    auto stalled = [&]() -> bool {
+        if (tl.g_win.size() < 5) return false;
+        double first = tl.g_win[0];
+        double best = *std::min_element(tl.g_win.begin(), tl.g_win.end());
+        return std::isfinite(first) && first > 0.0 && best >= 0.9 * first;
+    };
+
+    auto classify_stall = [&](double f_try) -> std::string {
+        if (!std::isfinite(gmap) || gmap > std::max(stall_slack * std::max(tol, 0.0), noise_floor)) {
+            return "line_search";
+        }
+        if (stalled()) return "plateau";
+        if (std::isfinite(f_try) && (f_try - f) <= 64.0 * eps * (1.0 + std::abs(f))) {
+            return "plateau";
+        }
+        return "line_search";
+    };
+
+    scalar_t* d = tl.d.data();
+    scalar_t* xcp = tl.xcp.data();
+    uint8_t* fixed = tl.fixed.data();
+    scalar_t* x_trial = tl.x_trial.data();
+    scalar_t* g_trial = tl.g_trial.data();
+    scalar_t* x_prev = tl.x_prev.data();
+    scalar_t* g_prev = tl.g_prev.data();
+    scalar_t* x_lo = tl.x_lo.data();
+    scalar_t* g_lo = tl.g_lo.data();
+    scalar_t* x_new = tl.x_new.data();
+    scalar_t* g_new = tl.g_new.data();
+    scalar_t* s_temp = tl.s_temp.data();
+    scalar_t* y_temp = tl.y_temp.data();
+    scalar_t* S_hist = tl.S_hist.data();
+    scalar_t* Y_hist = tl.Y_hist.data();
+    scalar_t* M_buf = tl.M_buf.data();
+
+    int64_t m_hist = 0;
+    double theta = 1.0;
+
+    // Fast-path C++ Spectral Projected Gradient (alternating Barzilai-Borwein + Armijo)
+    // for small/moderate problems where L-BFGS-B's 2m x 2m compact algebra dominates
+    // the cheap O(p k^2) anchored objective.  If SPG does not certify within spg_budget
+    // evaluations (e.g., ill-conditioned w -> 1), it hands off warm-started xf to L-BFGS-B.
+    if (gmap <= tol) {
+        std::memcpy(Y_out_ptr, xf, n * sizeof(scalar_t));
+        return {f, n_grad, n_fun, 0, "grad_map", gmap};
+    }
+    int64_t spg_budget = (w <= 0.88 && n <= 4096) ? std::min<int64_t>(max_grad, 80) : 0;
+    if (spg_budget > 0) {
+        double gn2 = 0.0;
+        for (int64_t i = 0; i < n; ++i) gn2 += static_cast<double>(g[i]) * static_cast<double>(g[i]);
+        double t_bb = std::min(std::max(1.0 / std::max(std::sqrt(gn2), 1e-12), 1e-12), 1e12);
+        bool have_prev = false;
+        while (n_grad < spg_budget) {
+            it += 1;
+            if (have_prev) {
+                double sr = 0.0, ss = 0.0, rr = 0.0;
+                for (int64_t i = 0; i < n; ++i) {
+                    double si = static_cast<double>(xf[i] - x_prev[i]);
+                    double ri = static_cast<double>(g[i] - g_prev[i]);
+                    sr += si * ri;
+                    ss += si * si;
+                    rr += ri * ri;
+                }
+                if (sr > 0.0) {
+                    double t_cand = (it % 2 == 1) ? (ss / sr) : (rr > 0.0 ? sr / rr : 1.0);
+                    t_bb = std::min(std::max(t_cand, 1e-12), 1e12);
+                } else {
+                    t_bb = 1.0;
+                }
+            }
+            double step = t_bb;
+            bool accepted = false;
+            bool have_grad_trial = false;
+            double f_new = f;
+            for (int64_t ls = 0; ls < 30; ++ls) {
+                double dn2 = 0.0;
+                scalar_t step_s = static_cast<scalar_t>(step);
+                if (has_lo) {
+                    for (int64_t i = 0; i < n; ++i) {
+                        scalar_t val = xf[i] - step_s * g[i];
+                        if (val < static_cast<scalar_t>(0)) val = static_cast<scalar_t>(0);
+                        x_trial[i] = val;
+                        double diff = static_cast<double>(val - xf[i]);
+                        dn2 += diff * diff;
+                    }
+                } else {
+                    for (int64_t i = 0; i < n; ++i) {
+                        scalar_t val = xf[i] - step_s * g[i];
+                        x_trial[i] = val;
+                        double diff = static_cast<double>(val - xf[i]);
+                        dn2 += diff * diff;
+                    }
+                }
+                if (dn2 == 0.0) break;
+                double f_try;
+                if (ls == 0) {
+                    // First trial succeeds almost always: compute value + gradient together
+                    // to avoid a second pass over Y/X0 upon acceptance.
+                    f_try = eval_fg(x_trial, g_trial);
+                    have_grad_trial = true;
+                } else {
+                    f_try = eval_f(x_trial);
+                    have_grad_trial = false;
+                }
+                if (std::isfinite(f_try) && f_try <= f - sigma * dn2 / step) {
+                    accepted = true;
+                    f_new = f_try;
+                    break;
+                }
+                step *= 0.5;
+            }
+            if (!accepted) break;
+            std::memcpy(x_prev, xf, n * sizeof(scalar_t));
+            std::memcpy(g_prev, g, n * sizeof(scalar_t));
+            std::memcpy(xf, x_trial, n * sizeof(scalar_t));
+            if (have_grad_trial) {
+                std::memcpy(g, g_trial, n * sizeof(scalar_t));
+                f = f_new;
+            } else {
+                f = eval_fg(xf, g);
+            }
+            have_prev = true;
+            gmap = compute_gmap_raw<scalar_t>(n, xf, g, has_lo, lo_ptr, false, nullptr, false, nullptr);
+            if (gmap <= tol) {
+                std::memcpy(Y_out_ptr, xf, n * sizeof(scalar_t));
+                return {f, n_grad, n_fun, it, "grad_map", gmap};
+            }
+        }
+    }
+
+    while (n_grad < max_grad) {
+        it += 1;
+        if (gmap <= tol) {
+            stop = "grad_map";
+            break;
+        }
+
+        double a_max = 1.0;
+        if (m_hist > 0) {
+            std::memcpy(tl.ws_dir.W_buf.data(), Y_hist, m_hist * n * sizeof(scalar_t));
+            scalar_t th_s = static_cast<scalar_t>(theta);
+            scalar_t* w_dst = &tl.ws_dir.W_buf[m_hist * n];
+            for (int64_t i = 0; i < m_hist * n; ++i) {
+                w_dst[i] = th_s * S_hist[i];
+            }
+        }
+
+        lbfgsb_direction_core<scalar_t>(
+            n, xf, g, has_lo, lo_ptr, false, nullptr,
+            m_hist, theta, (m_hist > 0) ? M_buf : nullptr,
+            (m_hist > 0) ? tl.ws_dir.W_buf.data() : nullptr,
+            512, tl.ws_dir, d, a_max, fixed, xcp);
+
+        double g0_dir = 0.0;
+        for (int64_t i = 0; i < n; ++i) g0_dir += static_cast<double>(d[i]) * static_cast<double>(g[i]);
+
+        if (g0_dir >= 0.0) {
+            m_hist = 0;
+            theta = 1.0;
+            lbfgsb_direction_core<scalar_t>(
+                n, xf, g, has_lo, lo_ptr, false, nullptr,
+                0, 1.0, nullptr, nullptr, 512, tl.ws_dir, d, a_max, fixed, xcp);
+            if (has_lo) {
+                for (int64_t i = 0; i < n; ++i) {
+                    if (xcp[i] < static_cast<scalar_t>(0)) xcp[i] = static_cast<scalar_t>(0);
+                }
+            }
+            double dg_reset = 0.0;
+            for (int64_t i = 0; i < n; ++i) {
+                d[i] = xcp[i] - xf[i];
+                dg_reset += static_cast<double>(d[i]) * static_cast<double>(g[i]);
+            }
+            if (dg_reset >= 0.0) {
+                double g_norm2 = 0.0;
+                for (int64_t i = 0; i < n; ++i) g_norm2 += static_cast<double>(g[i]) * static_cast<double>(g[i]);
+                scalar_t denom_g = static_cast<scalar_t>(std::max(std::sqrt(g_norm2), static_cast<double>(std::numeric_limits<scalar_t>::min())));
+                for (int64_t i = 0; i < n; ++i) d[i] = -g[i] / denom_g;
+            }
+            a_max = compute_a_max_raw<scalar_t>(n, d, xf, has_lo, lo_ptr, false, nullptr);
+            g0_dir = 0.0;
+            for (int64_t i = 0; i < n; ++i) g0_dir += static_cast<double>(d[i]) * static_cast<double>(g[i]);
+        }
+
+        auto phi = [&](double a, double& fa_out, double& ga_d_out) {
+            scalar_t a_s = static_cast<scalar_t>(a);
+            if (has_lo) {
+                for (int64_t i = 0; i < n; ++i) {
+                    scalar_t val = xf[i] + a_s * d[i];
+                    x_trial[i] = (val > static_cast<scalar_t>(0)) ? val : static_cast<scalar_t>(0);
+                }
+            } else {
+                for (int64_t i = 0; i < n; ++i) {
+                    x_trial[i] = xf[i] + a_s * d[i];
+                }
+            }
+            fa_out = eval_fg(x_trial, g_trial);
+            double res_d = 0.0;
+            for (int64_t i = 0; i < n; ++i) {
+                res_d += static_cast<double>(g_trial[i]) * static_cast<double>(d[i]);
+            }
+            ga_d_out = res_d;
+        };
+
+        if (std::isnan(a_max)) {
+            a_max = compute_a_max_raw<scalar_t>(n, d, xf, has_lo, lo_ptr, false, nullptr);
+        }
+
+        int64_t remaining = std::max<int64_t>(max_grad - n_grad - 1, 1);
+        int64_t max_eval = std::min<int64_t>(20, remaining);
+        int64_t ls_eval = 0;
+        double a_prev = 0.0, f_prev = f, d_prev = g0_dir;
+        double a_i = std::min(1.0, a_max);
+        double a_lo_val = 0.0, a_hi_val = 0.0, f_lo_val = f, f_hi_val = 0.0, d_lo_val = g0_dir, d_hi_val = 0.0;
+        bool has_bracket = false, has_f_hi = false, wolfe_success = false;
+        double accepted_f = f;
+        const double c1 = 1e-4, c2 = 0.9;
+
+        while (ls_eval < max_eval) {
+            double f_i = 0.0, d_i = 0.0;
+            phi(a_i, f_i, d_i);
+            ls_eval += 1;
+            if (!std::isfinite(f_i) || !std::isfinite(d_i)) {
+                a_lo_val = a_prev; f_lo_val = f_prev; d_lo_val = d_prev; a_hi_val = a_i;
+                std::memcpy(x_lo, (ls_eval == 1) ? xf : x_prev, n * sizeof(scalar_t));
+                std::memcpy(g_lo, (ls_eval == 1) ? g : g_prev, n * sizeof(scalar_t));
+                has_bracket = true; has_f_hi = false;
+                break;
+            }
+            if (f_i > f + c1 * a_i * g0_dir || (ls_eval > 1 && f_i >= f_prev)) {
+                a_lo_val = a_prev; f_lo_val = f_prev; d_lo_val = d_prev; a_hi_val = a_i;
+                std::memcpy(x_lo, (ls_eval == 1) ? xf : x_prev, n * sizeof(scalar_t));
+                std::memcpy(g_lo, (ls_eval == 1) ? g : g_prev, n * sizeof(scalar_t));
+                has_bracket = true; has_f_hi = false;
+                break;
+            }
+            if (std::abs(d_i) <= -c2 * g0_dir) {
+                wolfe_success = true;
+                accepted_f = f_i;
+                std::memcpy(x_new, x_trial, n * sizeof(scalar_t));
+                std::memcpy(g_new, g_trial, n * sizeof(scalar_t));
+                break;
+            }
+            if (d_i >= 0.0) {
+                a_lo_val = a_i; f_lo_val = f_i; d_lo_val = d_i; a_hi_val = a_prev;
+                std::memcpy(x_lo, x_trial, n * sizeof(scalar_t));
+                std::memcpy(g_lo, g_trial, n * sizeof(scalar_t));
+                has_bracket = true; has_f_hi = false;
+                break;
+            }
+            a_prev = a_i; f_prev = f_i; d_prev = d_i;
+            std::memcpy(x_prev, x_trial, n * sizeof(scalar_t));
+            std::memcpy(g_prev, g_trial, n * sizeof(scalar_t));
+            if (a_i >= a_max - 1e-16) {
+                wolfe_success = true;
+                accepted_f = f_i;
+                std::memcpy(x_new, x_trial, n * sizeof(scalar_t));
+                std::memcpy(g_new, g_trial, n * sizeof(scalar_t));
+                break;
+            }
+            a_i = std::min(2.0 * a_i, a_max);
+        }
+
+        if (!wolfe_success && has_bracket) {
+            while (ls_eval < max_eval && std::abs(a_hi_val - a_lo_val) > 1e-16) {
+                double a_j = std::numeric_limits<double>::quiet_NaN();
+                if (has_f_hi) {
+                    a_j = cubic_min_scalar(a_lo_val, f_lo_val, d_lo_val, a_hi_val, f_hi_val, d_hi_val);
+                }
+                if (std::isnan(a_j)) a_j = 0.5 * (a_lo_val + a_hi_val);
+                double f_j = 0.0, d_j = 0.0;
+                phi(a_j, f_j, d_j);
+                ls_eval += 1;
+                if (!std::isfinite(f_j) || !std::isfinite(d_j)) {
+                    a_hi_val = a_j; has_f_hi = false;
+                    continue;
+                }
+                if (f_j > f + c1 * a_j * g0_dir || f_j >= f_lo_val) {
+                    a_hi_val = a_j; f_hi_val = f_j; d_hi_val = d_j; has_f_hi = true;
+                } else {
+                    if (std::abs(d_j) <= -c2 * g0_dir) {
+                        wolfe_success = true;
+                        accepted_f = f_j;
+                        std::memcpy(x_new, x_trial, n * sizeof(scalar_t));
+                        std::memcpy(g_new, g_trial, n * sizeof(scalar_t));
+                        break;
+                    }
+                    if (d_j * (a_hi_val - a_lo_val) >= 0.0) {
+                        a_hi_val = a_lo_val; f_hi_val = f_lo_val; d_hi_val = d_lo_val; has_f_hi = true;
+                    }
+                    a_lo_val = a_j; f_lo_val = f_j; d_lo_val = d_j;
+                    std::memcpy(x_lo, x_trial, n * sizeof(scalar_t));
+                }
+            }
+        }
+
+        double f_try = std::numeric_limits<double>::infinity();
+        if (!wolfe_success) {
+            double step = 1.0;
+            bool accepted = false;
+            for (int64_t ls = 0; ls < 30; ++ls) {
+                double dn2 = 0.0;
+                scalar_t step_s = static_cast<scalar_t>(step);
+                for (int64_t i = 0; i < n; ++i) {
+                    scalar_t val = xf[i] + step_s * d[i];
+                    if (has_lo && val < static_cast<scalar_t>(0)) val = static_cast<scalar_t>(0);
+                    x_trial[i] = val;
+                    double diff = static_cast<double>(val - xf[i]);
+                    dn2 += diff * diff;
+                }
+                if (dn2 == 0.0 || (sizeof(scalar_t) == sizeof(float) && dn2 <= 1e-16)) break;
+                double fb = eval_f(x_trial);
+                if (!std::isfinite(fb)) { step *= 0.5; continue; }
+                f_try = std::min(f_try, fb);
+                if (fb <= f - sigma * dn2 / step) {
+                    accepted = true;
+                    std::memcpy(x_new, x_trial, n * sizeof(scalar_t));
+                    break;
+                }
+                step *= 0.5;
+            }
+            if (!accepted) {
+                stop = classify_stall(f_try);
+                break;
+            }
+            if (n_grad >= max_grad) {
+                stop = "max_iter";
+                break;
+            }
+            accepted_f = eval_fg(x_new, g_new);
+        }
+
+        bool g_finite = true;
+        for (int64_t i = 0; i < n; ++i) {
+            if (!std::isfinite(g_new[i])) { g_finite = false; break; }
+        }
+        if (!std::isfinite(accepted_f) || !g_finite) {
+            stop = "line_search";
+            break;
+        }
+
+        double sy = 0.0, yy = 0.0;
+        for (int64_t i = 0; i < n; ++i) {
+            scalar_t si = x_new[i] - xf[i];
+            scalar_t yi = g_new[i] - g[i];
+            s_temp[i] = si;
+            y_temp[i] = yi;
+            sy += static_cast<double>(si) * static_cast<double>(yi);
+            yy += static_cast<double>(yi) * static_cast<double>(yi);
+        }
+        if (yy > 0.0 && sy > 2.2e-16 * yy) {
+            if (m_hist < mem_cap) {
+                std::memcpy(&S_hist[m_hist * n], s_temp, n * sizeof(scalar_t));
+                std::memcpy(&Y_hist[m_hist * n], y_temp, n * sizeof(scalar_t));
+                m_hist += 1;
+            } else {
+                std::memmove(&S_hist[0], &S_hist[n], (mem_cap - 1) * n * sizeof(scalar_t));
+                std::memmove(&Y_hist[0], &Y_hist[n], (mem_cap - 1) * n * sizeof(scalar_t));
+                std::memcpy(&S_hist[(mem_cap - 1) * n], s_temp, n * sizeof(scalar_t));
+                std::memcpy(&Y_hist[(mem_cap - 1) * n], y_temp, n * sizeof(scalar_t));
+            }
+            theta = yy / sy;
+            if (!lbfgsb_build_M_contiguous<scalar_t>(n, m_hist, S_hist, Y_hist, theta, M_buf)) {
+                m_hist = 0;
+                theta = 1.0;
+            }
+        }
+
+        std::memcpy(xf, x_new, n * sizeof(scalar_t));
+        std::memcpy(g, g_new, n * sizeof(scalar_t));
+        f = accepted_f;
+        gmap = compute_gmap_raw<scalar_t>(n, xf, g, has_lo, lo_ptr, false, nullptr, false, nullptr);
+
+        if (gmap <= tol) {
+            stop = "grad_map";
+            break;
+        }
+
+        tl.E_win.push_back(f);
+        tl.g_win.push_back(gmap);
+        if (static_cast<int64_t>(tl.E_win.size()) > patience) {
+            tl.E_win.erase(tl.E_win.begin());
+            tl.g_win.erase(tl.g_win.begin());
+        }
+        if (static_cast<int64_t>(tl.E_win.size()) == patience) {
+            bool all_nan = true;
+            for (double val : tl.E_win) {
+                if (std::isfinite(val)) { all_nan = false; break; }
+            }
+            if (!all_nan) {
+                double min_E = *std::min_element(tl.E_win.begin(), tl.E_win.end());
+                double max_E = *std::max_element(tl.E_win.begin(), tl.E_win.end());
+                if ((max_E - min_E) / (1.0 + std::abs(min_E)) < rtol && stalled()) {
+                    stop = "plateau";
+                    break;
+                }
+            }
+        }
+    }
+
+    if (stop == "max_iter" && std::isfinite(gmap) && gmap <= std::max(stall_slack * std::max(tol, 0.0), noise_floor) && stalled()) {
+        stop = "plateau";
+    }
+
+    std::memcpy(Y_out_ptr, xf, n * sizeof(scalar_t));
+    return {f, n_grad, n_fun, it, stop, gmap};
+}
+
+std::tuple<at::Tensor, double, int64_t, int64_t, int64_t, std::string, double>
+retract_anchored_cpu(
+    const at::Tensor& target_in,
+    const c10::optional<at::Tensor>& init_opt,
+    double w, bool nonneg, const std::string& orth,
+    double tol, int64_t max_grad, int64_t memory) {
+
+    auto target = target_in.contiguous();
+    int64_t p = target.size(0);
+    int64_t k = target.size(1);
+    at::Tensor init_t;
+    bool has_init = init_opt.has_value() && init_opt->defined() && init_opt->numel() > 0;
+    if (has_init) init_t = init_opt->contiguous();
+    bool is_orth_cg = (orth == "Cg");
+    at::Tensor Y_out = at::empty({p, k}, target.options());
+
+    RetractStats stats;
+    {
+        py::gil_scoped_release release;
+        AT_DISPATCH_FLOATING_TYPES(target.scalar_type(), "retract_anchored_cpu", ([&] {
+            const scalar_t* init_ptr = has_init ? init_t.data_ptr<scalar_t>() : nullptr;
+            stats = solve_anchored_raw<scalar_t>(
+                p, k, target.data_ptr<scalar_t>(), init_ptr,
+                w, nonneg, is_orth_cg, tol, max_grad, memory,
+                1e-4, 50, 1e-12, 1e3, Y_out.data_ptr<scalar_t>());
+        }));
+    }
+    return std::make_tuple(Y_out, stats.energy, stats.n_grad, stats.n_fun, stats.iters, stats.stop, stats.grad_map);
+}
+
+std::tuple<at::Tensor, std::vector<double>, std::vector<int64_t>, std::vector<int64_t>, std::vector<std::string>, std::vector<double>>
+retract_anchored_batched_cpu(
+    const at::Tensor& target_in,
+    const c10::optional<at::Tensor>& init_opt,
+    const std::vector<double>& ws,
+    bool nonneg, const std::string& orth,
+    double tol, int64_t max_grad, int64_t memory) {
+
+    auto target = target_in.contiguous();
+    int64_t B = target.size(0);
+    int64_t p = target.size(1);
+    int64_t k = target.size(2);
+    int64_t stride = p * k;
+    at::Tensor init_t;
+    bool has_init = init_opt.has_value() && init_opt->defined() && init_opt->numel() > 0;
+    if (has_init) init_t = init_opt->contiguous();
+    bool is_orth_cg = (orth == "Cg");
+    at::Tensor Y_out = at::empty({B, p, k}, target.options());
+
+    std::vector<double> energies(B, 0.0);
+    std::vector<int64_t> n_grads(B, 0);
+    std::vector<int64_t> iters_v(B, 0);
+    std::vector<std::string> stops(B);
+    std::vector<double> gmaps(B, 0.0);
+
+    {
+        py::gil_scoped_release release;
+        AT_DISPATCH_FLOATING_TYPES(target.scalar_type(), "retract_anchored_batched_cpu", ([&] {
+            const scalar_t* X_base = target.data_ptr<scalar_t>();
+            const scalar_t* I_base = has_init ? init_t.data_ptr<scalar_t>() : nullptr;
+            scalar_t* Y_base = Y_out.data_ptr<scalar_t>();
+            auto run_range = [&](int64_t begin, int64_t end) {
+                for (int64_t b = begin; b < end; ++b) {
+                    double wb = (ws.size() == 1) ? ws[0] : ws[b];
+                    const scalar_t* init_b = has_init ? (I_base + b * stride) : nullptr;
+                    auto st = solve_anchored_raw<scalar_t>(
+                        p, k, X_base + b * stride, init_b,
+                        wb, nonneg, is_orth_cg, tol, max_grad, memory,
+                        1e-4, 50, 1e-12, 1e3, Y_base + b * stride);
+                    energies[b] = st.energy;
+                    n_grads[b] = st.n_grad;
+                    iters_v[b] = st.iters;
+                    stops[b] = std::move(st.stop);
+                    gmaps[b] = st.grad_map;
+                }
+            };
+            int64_t hw = static_cast<int64_t>(std::thread::hardware_concurrency());
+            int64_t max_t = std::max<int64_t>(1, std::min<int64_t>(hw > 0 ? hw : 1, at::get_num_threads()));
+            int64_t n_threads = (B >= 4 && B * stride >= 512) ? std::min<int64_t>(B, max_t) : 1;
+            if (n_threads <= 1) {
+                run_range(0, B);
+            } else {
+                std::vector<std::thread> pool;
+                pool.reserve(n_threads - 1);
+                int64_t chunk = (B + n_threads - 1) / n_threads;
+                for (int64_t t_idx = 1; t_idx < n_threads; ++t_idx) {
+                    int64_t b0 = t_idx * chunk;
+                    int64_t b1 = std::min<int64_t>(B, b0 + chunk);
+                    if (b0 < b1) {
+                        pool.emplace_back(run_range, b0, b1);
+                    }
+                }
+                run_range(0, std::min<int64_t>(B, chunk));
+                for (auto& th : pool) th.join();
+            }
+        }));
+    }
+    return std::make_tuple(Y_out, energies, n_grads, iters_v, stops, gmaps);
+}
+
 } // namespace nsa_flow
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -2118,4 +2876,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("max_grad") = 2000, py::arg("tol") = 1e-9, py::arg("memory") = 10,
           py::arg("sigma") = 1e-4, py::arg("patience") = 50, py::arg("rtol") = 1e-12,
           py::arg("stall_slack") = 1e3, py::arg("callback") = py::none());
+    m.def("retract_anchored_cpu", &nsa_flow::retract_anchored_cpu,
+          "Zero-overhead pure-C++ anchored L-BFGS-B retraction",
+          py::arg("target"), py::arg("init") = py::none(), py::arg("w") = 0.5,
+          py::arg("nonneg") = true, py::arg("orth") = "D",
+          py::arg("tol") = 1e-6, py::arg("max_grad") = 2000, py::arg("memory") = 10);
+    m.def("retract_anchored_batched_cpu", &nsa_flow::retract_anchored_batched_cpu,
+          "Parallel batched [B, p, k] pure-C++ anchored L-BFGS-B retraction",
+          py::arg("target"), py::arg("init") = py::none(), py::arg("ws") = std::vector<double>{0.5},
+          py::arg("nonneg") = true, py::arg("orth") = "D",
+          py::arg("tol") = 1e-6, py::arg("max_grad") = 2000, py::arg("memory") = 10);
 }

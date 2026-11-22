@@ -322,3 +322,40 @@ def test_varimax_preserves_subspace_and_eliminates_perron_frobenius_mean_mode():
     assert max_block_share(E) < 0.60
     assert max_block_share(V_rot) > 0.95
 
+
+def test_no_global_rng_mutation():
+    """No nsa_flow entry point may mutate global torch or numpy RNG state (N4)."""
+    from nsa_flow import retract_anchored
+
+    torch.manual_seed(12345)
+    np.random.seed(12345)
+    X_pos = torch.rand(40, 12, dtype=F64)
+    X_sgn = torch.randn(40, 12, dtype=F64)
+    T = torch.rand(25, 3, dtype=F64)
+    Tb = torch.rand(4, 25, 3, dtype=F64)
+
+    t_state = torch.get_rng_state()
+    np_state = np.random.get_state()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        nsa_flow(T, w=0.5, mode="anchored", fidelity="anchor", max_iter=50)
+        nsa_flow(X_pos, k=3, w=0.5, mode="data", max_iter=50)
+        nsa_flow(X_sgn, k=3, w=0.5, mode="signed", max_iter=50)
+        nsa_flow_data(X_pos, k=3, w=0.5, init="random", max_iter=50)
+        nsa_flow_data(X_pos, k=3, w=0.5, init="relax", max_iter=50)
+        retract_anchored(T, w=0.5, max_iter=50)
+        retract_anchored(Tb, w=0.5, max_iter=50)
+
+    assert torch.equal(t_state, torch.get_rng_state()), "global torch RNG state mutated!"
+    assert np.array_equal(np_state[1], np.random.get_state()[1]), "global numpy RNG state mutated!"
+
+    # Explicit local generator produces reproducible distinct initialisations
+    g1 = torch.Generator(device="cpu").manual_seed(7)
+    g2 = torch.Generator(device="cpu").manual_seed(7)
+    r1 = nsa_flow_data(X_pos, k=3, w=0.5, init="random", max_iter=10, generator=g1)
+    r2 = nsa_flow_data(X_pos, k=3, w=0.5, init="random", max_iter=10, generator=g2)
+    assert torch.equal(r1.Y, r2.Y)
+    assert torch.equal(t_state, torch.get_rng_state())
+
+

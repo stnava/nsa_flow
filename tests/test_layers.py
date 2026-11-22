@@ -472,3 +472,33 @@ def test_softplus_vs_hard_solver_mode_differ():
     assert not torch.allclose(eff_hard, eff_soft)
     eff_soft.sum().backward()
     assert torch.allclose(l_soft.weight.grad, torch.sigmoid(W0), atol=1e-6)
+
+
+@pytest.mark.parametrize("nonneg", [None, "hard", "softplus"])
+@pytest.mark.parametrize("operator", ["auto", "flow", "solver"])
+def test_layers_skip_k1_without_modifying_input(nonneg, operator):
+    """When k=1 (out_features/out_channels/last dim == 1), layers skip and leave input unchanged."""
+    torch.manual_seed(0)
+    W_lin = torch.randn(1, 20)
+    lin = NSAFlowLinear(20, 1, bias=False, w=0.5, nonneg=nonneg, operator=operator)
+    with torch.no_grad():
+        lin.weight.copy_(W_lin)
+    eff_lin = lin.effective_weight()
+    assert torch.equal(eff_lin, W_lin)
+    eff_lin.sum().backward()
+    assert torch.equal(lin.weight.grad, torch.ones_like(W_lin))
+    res = lin.project_()
+    assert res.stop_reason == "skipped" and res.iters == 0
+    assert torch.equal(lin.weight.detach(), W_lin)
+
+    conv = NSAFlowConv2d(3, 1, 3, bias=False, w=0.5, nonneg=nonneg, operator=operator)
+    W_conv = conv.weight.detach().clone()
+    assert torch.equal(conv.effective_weight(), W_conv)
+
+    layer = NSAFlowLayer(w=0.5, nonneg=nonneg, operator=operator)
+    Y = torch.randn(3, 15, 1, requires_grad=True)
+    out = layer(Y)
+    assert torch.equal(out, Y)
+    out.sum().backward()
+    assert torch.equal(Y.grad, torch.ones_like(Y))
+

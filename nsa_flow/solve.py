@@ -43,7 +43,7 @@ from .project import project_nonneg, simlr_sparseness
 from .subspace import (SubspaceAnchor, negative_mass, subspace_fidelity,
                        grad_subspace_fidelity)
 
-__all__ = ["nsa_flow", "NSAResult", "_nsa_flow_anchored"]
+__all__ = ["nsa_flow", "NSAResult", "_nsa_flow_anchored", "retract_anchored"]
 
 _COMPILED = None
 
@@ -155,6 +155,289 @@ def _subspace_vg(anchor, inv_k):
             g = g + (w * inv_k) * grad_stiefel_defect(Y)
         return E, F, Dn, g
     return vg
+
+
+def _retract_anchored_batched_torch(X0, w_vec, *, nonneg=True, init=None,
+                                    tol=None, max_iter=2000, orth="D",
+                                    sigma=1e-4):
+    """Batched ``[B, p, k]`` Spectral Projected Gradient in pure PyTorch (CUDA/MPS/CPU).
+
+    Runs all ``B`` anchored problems simultaneously in one vectorized kernel
+    stream with per-batch step sizes and active masks.
+    """
+    B, p, k = X0.shape
+    dtype, device = X0.dtype, X0.device
+    tol = default_tol(dtype) if tol is None else float(tol)
+    if k <= 1:
+        Y = X0.clone()
+        return Y, [0.0] * B, [0] * B, [0] * B, ["skipped"] * B, [0.0] * B
+
+    w_t = torch.as_tensor(w_vec, dtype=dtype, device=device).reshape(B)
+    w_3 = w_t.reshape(B, 1, 1)
+    denom = X0.pow(2).sum((-2, -1))
+    tiny = float(torch.finfo(dtype).tiny)
+    denom_safe = denom.clamp_min(tiny)
+    inv_k = 1.0 / (1.0 - 1.0 / k)
+    eye_k = torch.eye(k, dtype=dtype, device=device)
+
+    Y = (X0.clone() if init is None else init.to(dtype=dtype, device=device).detach().clone())
+    if nonneg:
+        Y = Y.clamp_min(0.0)
+
+    is_cg = (orth == "Cg")
+    if is_cg:
+        from .angle import gram_offdiag_defect, grad_gram_offdiag_defect
+
+    def _vg(Yv):
+        if is_cg:
+            R = Yv - X0
+            F = R.pow(2).sum((-2, -1)) / denom_safe
+            D = gram_offdiag_defect(Yv)
+            E = (1.0 - w_t) * F + w_t * D
+            g = (1.0 - w_3) * (2.0 * R / denom_safe.reshape(B, 1, 1)) + w_3 * grad_gram_offdiag_defect(Yv)
+            return E, g
+        E, _, _, g = value_and_grad(Yv, X0, w=w_t, denom=denom_safe, inv_k=inv_k, eye_k=eye_k)
+        return E, g
+
+    def _gmap(Yv, gv):
+        nY2 = Yv.pow(2).sum((-2, -1))
+        nY = nY2.sqrt()
+        step = Yv - nY2.reshape(B, 1, 1) * gv
+        if nonneg:
+            step = step.clamp_min(0.0)
+        return (step - Yv).pow(2).sum((-2, -1)).sqrt() / nY.clamp_min(tiny)
+
+    E, g = _vg(Y)
+    gmap = _gmap(Y, g)
+    n_grad = torch.ones(B, dtype=torch.int64, device=device)
+    iters = torch.zeros(B, dtype=torch.int64, device=device)
+    active = (gmap > tol) & (denom > 0)
+    stops = ["grad_map" if not bool(active[b]) else "max_iter" for b in range(B)]
+
+    gn = g.pow(2).sum((-2, -1)).sqrt().clamp_min(tiny)
+    t_bb = (1.0 / gn).clamp(1e-12, 1e12)
+    Y_prev = None
+    g_prev = None
+
+    for it in range(1, max_iter + 1):
+        if not bool(active.any()):
+            break
+        if Y_prev is not None:
+            s_ = Y - Y_prev
+            r_ = g - g_prev
+            sr = (s_ * r_).sum((-2, -1))
+            ss = (s_ * s_).sum((-2, -1))
+            rr = (r_ * r_).sum((-2, -1))
+            t_new = (ss / sr.clamp_min(tiny)) if (it % 2 == 1) else (sr / rr.clamp_min(tiny))
+            t_bb = torch.where(sr > 0, t_new, torch.full_like(t_bb, 1.0)).clamp(1e-12, 1e12)
+
+        t_cur = t_bb.clone()
+        accepted = ~active
+        Y_acc = Y.clone()
+        E_acc = E.clone()
+        for _ in range(30):
+            need = active & (~accepted)
+            if not bool(need.any()):
+                break
+            Y_try = Y - t_cur.reshape(B, 1, 1) * g
+            if nonneg:
+                Y_try = Y_try.clamp_min(0.0)
+            d2 = (Y_try - Y).pow(2).sum((-2, -1))
+            E_try, _ = _vg(Y_try)
+            ok = need & torch.isfinite(E_try) & (E_try <= E - sigma * d2 / t_cur)
+            if bool(ok.any()):
+                ok3 = ok.reshape(B, 1, 1)
+                Y_acc = torch.where(ok3, Y_try, Y_acc)
+                E_acc = torch.where(ok, E_try, E_acc)
+                accepted = accepted | ok
+            t_cur = torch.where(active & (~accepted), t_cur * 0.5, t_cur)
+
+        stalled = active & (~accepted)
+        if bool(stalled.any()):
+            for b in torch.nonzero(stalled, as_tuple=False).flatten().tolist():
+                stops[b] = "plateau" if float(gmap[b]) <= 1e3 * tol else "line_search"
+            active = active & (~stalled)
+        if not bool(active.any()):
+            break
+
+        Y_prev = Y
+        g_prev = g
+        act3 = active.reshape(B, 1, 1)
+        Y = torch.where(act3, Y_acc, Y)
+        E_new, g_new = _vg(Y)
+        E = torch.where(active, E_new, E)
+        g = torch.where(act3, g_new, g)
+        gmap = torch.where(active, _gmap(Y, g), gmap)
+        n_grad = n_grad + active.to(torch.int64)
+        iters = iters + active.to(torch.int64)
+
+        conv = active & (gmap <= tol)
+        if bool(conv.any()):
+            for b in torch.nonzero(conv, as_tuple=False).flatten().tolist():
+                stops[b] = "grad_map"
+            active = active & (~conv)
+
+    return (Y, E.tolist(), n_grad.tolist(), iters.tolist(), stops, gmap.tolist())
+
+
+def retract_anchored(target, w=0.5, *, nonneg=True, init=None, tol=None,
+                     max_iter=2000, orth="D", fidelity="anchor",
+                     return_info=False):
+    """Zero-overhead anchored NSA-Flow retraction for 2-D ``[p, k]`` or 3-D ``[B, p, k]``.
+
+    Designed for inner-loop proximal callers (e.g. ``pysimlr``) and batched
+    neural layers.  Bypasses ``make_result`` / ``basis_report`` completely on
+    the CPU native C++ L-BFGS-B path and returns the retracted tensor ``Y``
+    directly (or ``(Y, info)`` when ``return_info=True``).
+
+    When ``k <= 1``, skips optimisation immediately and returns ``target.clone()``
+    unchanged with ``stop_reason="skipped"`` and ``iters=0``.
+    """
+    if fidelity == "entrywise":
+        fidelity = "anchor"
+    if fidelity not in ("anchor", "subspace"):
+        raise ValueError(f"fidelity must be 'anchor' or 'subspace'; got {fidelity!r}")
+    if orth not in ("D", "Cg", "C", "Coff"):
+        orth_terms(orth)  # raises ValueError with valid names
+
+    X0 = target if isinstance(target, torch.Tensor) and torch.is_floating_point(target) else coerce_tensor(target, stacklevel=3)
+    if X0.ndim not in (2, 3):
+        raise ValueError(f"target must be 2-D [p, k] or 3-D [B, p, k]; got shape {tuple(X0.shape)}")
+
+    k = X0.shape[-1]
+    if tol is None:
+        tol = default_tol(X0.dtype)
+    else:
+        tol = float(tol)
+
+    if X0.ndim == 2:
+        wf = float(w)
+        if not (0.0 <= wf <= 1.0):
+            raise ValueError(f"w must lie in [0, 1]; got {w}")
+        if (fidelity == "anchor" and orth in ("D", "Cg")
+                and X0.is_cpu and X0.dtype in (torch.float32, torch.float64)):
+            from .lbfgsb import _native
+            if _native is not None and hasattr(_native, "retract_anchored_cpu"):
+                if k <= 1:
+                    if not torch.isfinite(X0).all():
+                        raise ValueError("target contains non-finite values")
+                    Y = X0.clone()
+                    if return_info:
+                        return Y, {"converged": True, "stop_reason": "skipped", "certificate": "trivial",
+                                   "grad_map": 0.0, "n_grad": 0, "iters": 0}
+                    return Y
+                init_t = None
+                if init is not None:
+                    init_t = (init if isinstance(init, torch.Tensor)
+                              else torch.as_tensor(init)).to(dtype=X0.dtype, device=X0.device).detach()
+                    if init_t.shape != X0.shape:
+                        raise ValueError(f"init shape {tuple(init_t.shape)} != target shape {tuple(X0.shape)}")
+                Y, _f, n_grad, _n_fun, iters, stop, gmap = _native.retract_anchored_cpu(
+                    X0.detach(), init_t, wf, bool(nonneg), orth, tol, int(max_iter), 10)
+                if not return_info:
+                    return Y
+                cert = ("stationary" if (stop == "grad_map" and gmap <= tol)
+                        else ("numerical_floor" if stop == "plateau"
+                              else ("trivial" if stop == "skipped" else "none")))
+                return Y, {"converged": cert != "none", "stop_reason": stop,
+                           "certificate": cert, "grad_map": float(gmap),
+                           "n_grad": int(n_grad), "iters": int(iters)}
+
+        if not torch.isfinite(X0).all():
+            raise ValueError("target contains non-finite values")
+        if k <= 1:
+            Y = X0.clone()
+            if return_info:
+                return Y, {"converged": True, "stop_reason": "skipped", "certificate": "trivial",
+                           "grad_map": 0.0, "n_grad": 0, "iters": 0}
+            return Y
+
+        res = _nsa_flow_anchored(X0, w=wf, init=init, nonneg=nonneg, max_iter=max_iter,
+                                 tol=tol, fidelity=fidelity, orth=orth)
+        if not return_info:
+            return res.Y
+        return res.Y, {"converged": bool(res.converged), "stop_reason": res.stop_reason,
+                       "certificate": res.certificate, "grad_map": float(res.grad_map),
+                       "n_grad": int(res.n_grad), "iters": int(res.iters)}
+
+    # 3-D batched [B, p, k]
+    if not torch.isfinite(X0).all():
+        raise ValueError("target contains non-finite values")
+    B = X0.shape[0]
+    if torch.is_tensor(w):
+        ws_list = w.detach().cpu().double().flatten().tolist()
+    elif isinstance(w, (list, tuple)):
+        ws_list = [float(x) for x in w]
+    else:
+        ws_list = [float(w)]
+    if len(ws_list) not in (1, B):
+        raise ValueError(f"w must be scalar or length B={B}; got length {len(ws_list)}")
+    for wf in ws_list:
+        if not (0.0 <= wf <= 1.0):
+            raise ValueError(f"w must lie in [0, 1]; got {wf}")
+
+    if k <= 1:
+        Y = X0.clone()
+        if return_info:
+            return Y, {"converged": True, "stop_reason": "skipped", "certificate": "trivial",
+                       "grad_map": 0.0, "n_grad": 0, "iters": 0}
+        return Y
+
+    init_t = None
+    if init is not None:
+        init_t = (init if isinstance(init, torch.Tensor)
+                  else torch.as_tensor(init)).to(dtype=X0.dtype, device=X0.device).detach()
+        if init_t.shape != X0.shape:
+            raise ValueError(f"init shape {tuple(init_t.shape)} != target shape {tuple(X0.shape)}")
+
+    if (fidelity == "anchor" and orth in ("D", "Cg")
+            and X0.is_cpu and X0.dtype in (torch.float32, torch.float64)):
+        from .lbfgsb import _native
+        if _native is not None and hasattr(_native, "retract_anchored_batched_cpu"):
+            Y, _es, n_grads, iters_v, stops, gmaps = _native.retract_anchored_batched_cpu(
+                X0.detach(), init_t, ws_list, bool(nonneg), orth, tol, int(max_iter), 10)
+            if not return_info:
+                return Y
+            all_conv = all(s in ("grad_map", "plateau", "skipped") for s in stops)
+            worst_gm = max(gmaps) if gmaps else 0.0
+            return Y, {"converged": all_conv, "stop_reasons": stops,
+                       "stop_reason": stops[0] if len(set(stops)) == 1 else "mixed",
+                       "grad_map": float(worst_gm), "grad_maps": gmaps,
+                       "n_grad": int(sum(n_grads)), "iters": int(max(iters_v) if iters_v else 0)}
+
+    if fidelity == "anchor" and orth in ("D", "Cg"):
+        ws_full = ws_list * B if len(ws_list) == 1 else ws_list
+        Y, _es, n_grads, iters_v, stops, gmaps = _retract_anchored_batched_torch(
+            X0.detach(), ws_full, nonneg=nonneg, init=init_t, tol=tol,
+            max_iter=int(max_iter), orth=orth)
+        if not return_info:
+            return Y
+        all_conv = all(s in ("grad_map", "plateau", "skipped") for s in stops)
+        return Y, {"converged": all_conv, "stop_reasons": stops,
+                   "stop_reason": stops[0] if len(set(stops)) == 1 else "mixed",
+                   "grad_map": float(max(gmaps) if gmaps else 0.0), "grad_maps": gmaps,
+                   "n_grad": int(sum(n_grads)), "iters": int(max(iters_v) if iters_v else 0)}
+
+    # Generic fallback (subspace / C / Coff): per-item loop
+    ys, stops, gmaps, n_grads, iters_v = [], [], [], [], []
+    for b in range(B):
+        wb = ws_list[0] if len(ws_list) == 1 else ws_list[b]
+        ib = None if init_t is None else init_t[b]
+        rb = _nsa_flow_anchored(X0[b], w=wb, init=ib, nonneg=nonneg, max_iter=max_iter,
+                                tol=tol, fidelity=fidelity, orth=orth)
+        ys.append(rb.Y)
+        stops.append(rb.stop_reason)
+        gmaps.append(float(rb.grad_map))
+        n_grads.append(int(rb.n_grad))
+        iters_v.append(int(rb.iters))
+    Y = torch.stack(ys, dim=0)
+    if not return_info:
+        return Y
+    all_conv = all(s in ("grad_map", "plateau", "skipped") for s in stops)
+    return Y, {"converged": all_conv, "stop_reasons": stops,
+               "stop_reason": stops[0] if len(set(stops)) == 1 else "mixed",
+               "grad_map": float(max(gmaps) if gmaps else 0.0), "grad_maps": gmaps,
+               "n_grad": int(sum(n_grads)), "iters": int(max(iters_v) if iters_v else 0)}
 
 
 def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, tol=None,
@@ -275,8 +558,46 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
     NSAResult
     """
     X0 = coerce_tensor(target, dtype=dtype, device=device, stacklevel=3)
+    if X0.ndim == 3:
+        if not torch.isfinite(X0).all():
+            raise ValueError("target contains non-finite values")
+        if fidelity == "entrywise":
+            fidelity = "anchor"
+        if fidelity not in ("auto", "anchor", "subspace"):
+            raise ValueError("fidelity must be 'auto', 'anchor' or 'subspace'; "
+                             f"got {fidelity!r}")
+        t0 = time.time()
+        fmode = "anchor" if fidelity == "auto" else fidelity
+        max_it = DEFAULT_MAX_GRAD_EVALS if max_iter is None else int(max_iter)
+        tol_v = default_tol(X0.dtype) if tol is None else float(tol)
+        Y_b, info = retract_anchored(
+            X0, w=w, nonneg=bool(nonneg), init=init, tol=tol_v,
+            max_iter=max_it, orth=orth, fidelity=fmode, return_info=True)
+        stop_b = info.get("stop_reason", "grad_map")
+        if stop_b == "mixed":
+            stop_b = "grad_map" if info.get("converged") else "max_iter"
+        res = NSAResult(
+            Y=Y_b, w=(float(w) if not (torch.is_tensor(w) or isinstance(w, (list, tuple))) else w),
+            orth=str(orth), mode="anchored",
+            optimizer=DEFAULT_OPTIMIZER if optimizer is None else str(optimizer),
+            energy=float("nan"), fidelity=float("nan"), defect=float("nan"),
+            iters=int(info.get("iters", 0)), stop_reason=str(stop_b),
+            grad_map=float(info.get("grad_map", 0.0)), tol=tol_v,
+            converged=bool(info.get("converged", False)),
+            certificate=("trivial" if stop_b == "skipped"
+                         else ("stationary" if info.get("converged") else "none")),
+            seconds=time.time() - t0,
+            n_grad=int(info.get("n_grad", 0)), n_energy=0,
+            fidelity_mode=fmode, fidelity_requested=fidelity,
+            nonneg=bool(nonneg), align=bool(align), target=X0,
+            batched=True,
+        )
+        if "stop_reasons" in info:
+            res["stop_reasons"] = info["stop_reasons"]
+            res["grad_maps"] = info["grad_maps"]
+        return res
     if X0.ndim != 2:
-        raise ValueError(f"target must be 2-D [p, k]; got shape {tuple(X0.shape)}")
+        raise ValueError(f"target must be 2-D [p, k] or 3-D [B, p, k]; got shape {tuple(X0.shape)}")
     if not (0.0 <= float(w) <= 1.0):
         raise ValueError(f"w must lie in [0, 1]; got {w}")
     if align:
@@ -287,17 +608,8 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
             "nsa_flow.angle module docstring.  The parameter remains functional "
             "for now so existing experiments continue to run.",
             DeprecationWarning, stacklevel=2)
-    if float(w) == 1.0:
-        warnings.warn(
-            "w=1 drops the fidelity term, and D is scale-invariant, so the scale "
-            "of the returned Y is unconstrained and arbitrary (observed "
-            "||Y||/||X0|| up to ~1e4). Every scaled Stiefel matrix is optimal, so "
-            "nothing selects among clusterings either. Use w slightly below 1, or "
-            "rescale the result yourself; result['scale_ratio'] reports the drift.",
-            RuntimeWarning, stacklevel=2)
     if not torch.isfinite(X0).all():
         raise ValueError("target contains non-finite values")
-
 
     if tol is None:
         tol = default_tol(X0.dtype)
@@ -310,6 +622,48 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
         raise ValueError("fidelity must be 'auto', 'anchor' or 'subspace'; "
                          f"got {fidelity!r}")
     requested = fidelity
+    orth_terms(orth)
+
+    p, k = X0.shape
+    denom = X0.pow(2).sum()
+    if float(denom) <= 0:
+        raise ValueError("target is all zeros; fidelity is undefined")
+
+    if k <= 1:
+        # Orthogonality between columns is vacuous for a single column (k == 1):
+        # skip optimisation and return the input unchanged without wasting work.
+        t0 = time.time()
+        Y = X0.clone()
+        ws = ([float(w)] if continuation <= 0 else
+              torch.linspace(float(w_start), float(w), continuation + 1).tolist())
+        nm = float(negative_mass(X0))
+        clamp_ref = X0.clamp_min(0.0)
+        clamp_dist = float((Y - clamp_ref).norm() / clamp_ref.norm().clamp_min(torch.finfo(Y.dtype).tiny))
+        fmode = "anchor" if fidelity == "auto" else fidelity
+        return make_result(
+            NSAResult, Y=Y, w=w, orth=orth, mode="anchored",
+            optimizer=optimizer, energy=0.0, fidelity=0.0,
+            defect=0.0, iters=0, stop="skipped", grad_map=0.0, tol=tol,
+            seconds=time.time() - t0,
+            energy_start=0.0,
+            grad_map_start=0.0,
+            target=X0, align=bool(align), nonneg=bool(nonneg),
+            fidelity_mode=fmode, fidelity_requested=requested,
+            target_negative_mass=nm, clamp_distance=clamp_dist,
+            scale_ratio=1.0,
+            n_grad=0, n_energy=0, w_schedule=ws,
+            trace=([] if keep_trace else None),
+        )
+
+    if float(w) == 1.0:
+        warnings.warn(
+            "w=1 drops the fidelity term, and D is scale-invariant, so the scale "
+            "of the returned Y is unconstrained and arbitrary (observed "
+            "||Y||/||X0|| up to ~1e4). Every scaled Stiefel matrix is optimal, so "
+            "nothing selects among clusterings either. Use w slightly below 1, or "
+            "rescale the result yourself; result['scale_ratio'] reports the drift.",
+            RuntimeWarning, stacklevel=2)
+
     neg_mass = None
     if fidelity == "auto":
         neg_mass = float(negative_mass(X0))
@@ -334,11 +688,6 @@ def _nsa_flow_anchored(target, w=0.5, *, init=None, nonneg=True, max_iter=None, 
                 "nsa_flow_data if you have the data itself. The choice is "
                 "reported in result['fidelity_mode'].",
                 RuntimeWarning, stacklevel=2)
-
-    p, k = X0.shape
-    denom = X0.pow(2).sum()
-    if float(denom) <= 0:
-        raise ValueError("target is all zeros; fidelity is undefined")
 
     if init is None:
         if fidelity == "subspace" and max_iter > 0 and float(w) > 0.0 and k > 1:
@@ -562,8 +911,16 @@ def nsa_flow(data_or_target, k=None, w=0.5, *, mode="auto", nonneg=None,
         `.iters`, `.stop_reason`, `.converged`, and metadata.
     """
     X = coerce_tensor(data_or_target, dtype=dtype, device=device, stacklevel=3)
+    if X.ndim == 3:
+        if mode in ("auto", "anchored", "target") and k is None:
+            return _nsa_flow_anchored(X, w=w, nonneg=(True if nonneg is None else nonneg),
+                                      init=init, fidelity=fidelity,
+                                      max_iter=(DEFAULT_MAX_GRAD_EVALS if max_iter is None else int(max_iter)),
+                                      tol=tol, optimizer=(DEFAULT_OPTIMIZER if optimizer is None else optimizer),
+                                      sparseness=sparseness, dtype=dtype, device=device, **kwargs)
+        raise ValueError(f"3-D [B, p, k] input is supported in anchored mode only; got mode={mode!r}, k={k!r}")
     if X.ndim != 2:
-        raise ValueError(f"Input must be 2-D [n, p] or [p, k]; got shape {tuple(X.shape)}")
+        raise ValueError(f"Input must be 2-D [n, p] or [p, k] (or 3-D [B, p, k] for anchored mode); got shape {tuple(X.shape)}")
 
     optimizer = DEFAULT_OPTIMIZER if optimizer is None else optimizer
 

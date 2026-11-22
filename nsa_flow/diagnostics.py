@@ -69,8 +69,9 @@ __all__ = [
 ]
 
 #: Stop reasons any loop may return.  ``grad_map`` is the only positive claim of
-#: stationarity; the others describe why iteration ceased.
-STOP_REASONS = ("grad_map", "plateau", "line_search", "max_iter")
+#: stationarity; ``skipped`` indicates a trivial no-op (e.g. ``k <= 1`` where
+#: orthogonality is vacuous); the others describe why iteration ceased.
+STOP_REASONS = ("grad_map", "plateau", "line_search", "max_iter", "skipped")
 
 #: Stop reasons that are permitted to set ``converged``, and the certificate
 #: each one carries.  Everything else leaves ``converged`` False.
@@ -85,7 +86,10 @@ STOP_REASONS = ("grad_map", "plateau", "line_search", "max_iter")
 #:     precision.  Earlier versions set ``converged`` on an energy plateau
 #:     alone, which certified points 3 to 7 orders from stationarity whose
 #:     supports were still moving.
-CERTIFICATES = {"grad_map": "stationary", "plateau": "numerical_floor"}
+#: ``"skipped"`` -> ``"trivial"``
+#:     The problem had nothing to optimise (e.g. ``k <= 1`` in anchored mode),
+#:     so the input was returned unchanged with zero iterations.
+CERTIFICATES = {"grad_map": "stationary", "plateau": "numerical_floor", "skipped": "trivial"}
 CONVERGED_STOPS = tuple(CERTIFICATES)
 
 
@@ -329,6 +333,8 @@ def make_result(cls, *, Y, w, orth, energy, fidelity, defect, iters, stop,
         certificate = "stationary"
     elif stop == "plateau" and math.isfinite(gm):
         certificate = "numerical_floor"
+    elif stop == "skipped":
+        certificate = "trivial"
     else:
         certificate = "none"
     res = cls(

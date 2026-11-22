@@ -278,7 +278,7 @@ def relax_into_nonneg(S, c, k, w, mus=None, max_iter=600, tol=1e-10, sigma=1e-4,
 def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="D", max_iter=None,
                   tol=None, sigma=1e-4, dtype=None, device=None, verbose=False,
                   keep_trace=False, matrix_free=None, optimizer=None,
-                  sparseness=None):
+                  sparseness=None, generator=None):
     """Fit a non-negative, near-orthonormal basis ``V`` reconstructing ``X``.
 
     Parameters
@@ -392,8 +392,8 @@ def nsa_flow_data(X, k=None, w=0.5, *, init="clamp", orth="D", max_iter=None,
             # overflowed to NaN.  Every other init is O(1)-normalised; so is this.
             V = V / V.norm(dim=0, keepdim=True).clamp_min(torch.finfo(V.dtype).tiny)
         elif init == "random":
-            gen = torch.Generator(device="cpu").manual_seed(0)
-            V = torch.rand(p, k, generator=gen, dtype=Xt.dtype).to(Xt.device)
+            gen = generator if generator is not None else torch.Generator(device="cpu").manual_seed(0)
+            V = torch.rand(p, k, generator=gen, dtype=Xt.dtype, device=gen.device).to(Xt.device)
         else:
             raise ValueError(
                 f"unknown init strategy {init!r}; "

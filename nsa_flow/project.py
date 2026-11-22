@@ -271,6 +271,8 @@ def project_scaled_stiefel(Y, eps=1e-30):
     preserve the Frobenius norm is a different, non-optimal map.
     """
     k = Y.shape[-1]
+    if k <= 1:
+        return Y
     U = polar_factor(Y, eps=eps)
     c = (U * Y).sum((-2, -1)) / k
     return c.reshape(*c.shape, 1, 1) * U

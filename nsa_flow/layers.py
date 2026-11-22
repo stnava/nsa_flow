@@ -226,6 +226,8 @@ class _NSAMixin:
     def _effective(self, W):
         if self.nonneg not in (None, False, "none", True, "hard", "softplus", "soft"):
             raise ValueError(f"nonneg must be one of None/'none', 'softplus', 'hard'/True; got {self.nonneg!r}")
+        if self._pk_view(W).shape[-1] <= 1:
+            return W
         is_nonneg = self.nonneg not in (None, False, "none")
         if self.w == 0.0:
             if is_nonneg:
@@ -278,7 +280,8 @@ class _NSAMixin:
         M = self._pk_view(self.weight.detach())
         res = nsa_flow(M.double(), w=w, mode="anchored", fidelity="anchor",
                        nonneg=is_nonneg, **kwargs)
-        self.weight.copy_(self._pk_unview(res.Y.to(self.weight.dtype), self.weight))
+        if res.stop_reason != "skipped":
+            self.weight.copy_(self._pk_unview(res.Y.to(self.weight.dtype), self.weight))
         return res
 
     def _effective_cached(self, W):
@@ -500,17 +503,18 @@ class NSAFlowLayer(nn.Module):
             )
         if self.nonneg not in (None, False, "none", True, "hard", "softplus", "soft"):
             raise ValueError(f"nonneg must be one of None/'none', 'softplus', 'hard'/True; got {self.nonneg!r}")
+        if Y.shape[-1] <= 1:
+            return Y
         op = getattr(self, "operator", "auto")
         is_nonneg = self.nonneg not in (None, False, "none")
         use_solver = (op == "solver") or (op == "auto" and is_nonneg)
 
         if use_solver:
-            from .solve import nsa_flow
+            from .solve import retract_anchored
             Y_base = F.softplus(Y) if self.nonneg in ("softplus", "soft") else Y
-            res = [nsa_flow(Y_base[i].detach().double(), w=self.w, mode="anchored",
-                            fidelity="anchor", nonneg=is_nonneg).Y.to(Y.dtype)
-                   for i in range(Y.shape[0])]
-            Y_eff = torch.stack(res, dim=0)
+            Y_eff = retract_anchored(
+                Y_base.detach().double(), w=self.w, nonneg=is_nonneg,
+            ).to(Y.dtype)
             if self.training:
                 return Y_base + (Y_eff - Y_base).detach()
             return Y_eff

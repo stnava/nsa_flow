@@ -85,6 +85,8 @@ def grad_stiefel_defect(Y, eps=0.0):
     Satisfies ``<grad D, Y> = 0`` (Euler, ``D`` is degree-0 homogeneous), so the
     defect term cannot alter ``||Y||_F``; and ``||grad D||_F <= 8 / ||Y||_F``.
     """
+    if Y.shape[-1] <= 1:
+        return torch.zeros_like(Y)
     S = gram(Y)
     t = _trace(S)
     if eps:
@@ -219,6 +221,18 @@ def value_and_grad(Y, X0, w=0.5, denom=None, inv_k=None, eye_k=None, align=False
     caller to hoist per-call allocations out of a loop.
     """
     k = Y.shape[-1]
+    d = _trace(gram(X0)) if denom is None else denom
+    d_ = d.reshape(*d.shape, 1, 1) if torch.is_tensor(d) else d
+    R = Y - (aligned_target(X0, Y) if align else X0)
+    F = R.pow(2).sum((-2, -1)) / d
+
+    w_ = w.reshape(*w.shape, 1, 1) if torch.is_tensor(w) else w
+    if k == 1:
+        Dn = torch.zeros_like(F)
+        Etot = (1.0 - w) * F
+        grad = (1.0 - w_) * (2.0 * R / d_)
+        return Etot, F, Dn, grad
+
     S = gram(Y)
     t = _trace(S)
     t_ = t.reshape(*t.shape, 1, 1)
@@ -228,21 +242,10 @@ def value_and_grad(Y, X0, w=0.5, denom=None, inv_k=None, eye_k=None, align=False
     Gc = G - eye_k / k
     D = Gc.pow(2).sum((-2, -1))
 
-    d = _trace(gram(X0)) if denom is None else denom
-    d_ = d.reshape(*d.shape, 1, 1) if torch.is_tensor(d) else d
-    R = Y - (aligned_target(X0, Y) if align else X0)
-    F = R.pow(2).sum((-2, -1)) / d
-
-    if k == 1:
-        Dn = torch.zeros_like(F)
-        Etot = (1.0 - w) * F
-        grad = (1.0 - w) * (2.0 * R / d_)
-        return Etot, F, Dn, grad
-
     scale = 1.0 / (1.0 - 1.0 / k) if inv_k is None else inv_k
     Dn = D * scale
     Etot = (1.0 - w) * F + w * Dn
     # grad D = (4/t^2)[Y S - (N/t) Y] = (4/t)[Y G - (||G||_F^2) Y]
     N2 = (G * G).sum((-2, -1)).reshape(*t.shape, 1, 1)
-    grad = (1.0 - w) * (2.0 * R / d_) + (w * scale) * (4.0 / t_) * (Y @ G - N2 * Y)
+    grad = (1.0 - w_) * (2.0 * R / d_) + (w_ * scale) * (4.0 / t_) * (Y @ G - N2 * Y)
     return Etot, F, Dn, grad
