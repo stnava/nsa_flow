@@ -16,7 +16,7 @@ try:
     ext_modules = [
         CppExtension(
             name="nsa_flow._native._lbfgsb_cpu",
-            sources=["nsa_flow/_native/lbfgsb_cpu.cpp"],
+            sources=["src/nsa_flow/_native/lbfgsb_cpu.cpp"],
             extra_compile_args=extra_compile_args,
             extra_link_args=extra_link_args,
             optional=True,

@@ -29,16 +29,16 @@ install:
 	pip install -e ".[experiments,test]"
 
 test:
-	PYTHONPATH=. pytest tests/
+	PYTHONPATH=src:. pytest tests/
 
 theory:
-	PYTHONPATH=. pytest tests/test_theory.py -v
+	PYTHONPATH=src:. pytest tests/test_theory.py -v
 
 experiments:
-	PYTHONPATH=. python experiments/run_all.py
+	PYTHONPATH=src:. python experiments/run_all.py
 
 tables:
-	PYTHONPATH=. python experiments/build_tables.py
+	PYTHONPATH=src:. python experiments/build_tables.py
 
 bench:
 	python -m nsa_flow.bench run --suite standard-fast --profile fast --jobs 5 --out bench_results
@@ -56,16 +56,16 @@ bench-report:
 	python -m nsa_flow.bench report standard-fast
 
 speed:
-	PYTHONPATH=. python experiments/speed_vs_pca.py
+	PYTHONPATH=src:. python experiments/speed_vs_pca.py
 
 new-benchmarks:
-	PYTHONPATH=. python experiments/benchmark_new_public_data.py
-	PYTHONPATH=. python experiments/sweep_new_public_data.py
-	PYTHONPATH=. python experiments/plot_new_public_benchmarks.py
-	PYTHONPATH=. python experiments/build_new_public_tables.py
+	PYTHONPATH=src:. python experiments/benchmark_new_public_data.py
+	PYTHONPATH=src:. python experiments/sweep_new_public_data.py
+	PYTHONPATH=src:. python experiments/plot_new_public_benchmarks.py
+	PYTHONPATH=src:. python experiments/build_new_public_tables.py
 
 docs:
-	PYTHONPATH=. sphinx-build -b html docs/source docs/_build/html
+	PYTHONPATH=src sphinx-build -b html docs/source docs/_build/html
 
 docs-clean:
 	rm -rf docs/_build
@@ -78,7 +78,7 @@ rmd-paper:
 	@echo "Use 'make paper' to compile paper/nsaflow.pdf."
 
 dist:
-	rm -rf dist/ build/ *.egg-info
+	rm -rf dist/ build/ *.egg-info src/*.egg-info
 	python -m build
 	twine check dist/*
 
@@ -88,6 +88,6 @@ release: dist
 all: experiments paper
 
 clean:
-	rm -rf build/ dist/ *.egg-info/ .pytest_cache/
+	rm -rf build/ dist/ *.egg-info/ src/*.egg-info/ .pytest_cache/
 	cd paper && latexmk -C >/dev/null 2>&1 || true
 	find . -name "__pycache__" -type d -prune -exec rm -rf {} +

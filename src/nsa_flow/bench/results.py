@@ -17,7 +17,7 @@ COLUMNS = ["suite", "dataset", "protocol", "split", "method", "variant", "model"
 
 def git_sha() -> str:
     try:
-        root = Path(__file__).resolve().parents[2]
+        root = Path(__file__).resolve().parents[3]
         return subprocess.run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"], capture_output=True,
                               text=True, timeout=5).stdout.strip() or "unknown"
     except Exception:

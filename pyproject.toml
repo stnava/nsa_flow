@@ -31,12 +31,14 @@ Homepage = "https://github.com/stnava/nsa_flow"
 Repository = "https://github.com/stnava/nsa_flow"
 
 [tool.setuptools.packages.find]
+where = ["src"]
 include = ["nsa_flow*"]
 
 [tool.setuptools.package-data]
 "nsa_flow.bench" = ["baseline_smoke.json"]
 
 [tool.pytest.ini_options]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 addopts = "-q"
 filterwarnings = ["ignore::DeprecationWarning", "ignore::FutureWarning"]

@@ -4,7 +4,7 @@
 * Always run with the local project on the path, so a globally installed
   `nsa_flow` is not picked up instead:
   ```bash
-  PYTHONPATH=. pytest
+  PYTHONPATH=src pytest
   ```
 * `make test` (133 assertions), `make theory` (the 70-assertion property
   battery), `make experiments`, `make paper`.
@@ -14,7 +14,7 @@
 ## The invariant that matters
 `tests/test_theory.py` is the executable statement of the paper's propositions.
 Every claim the paper makes about the energy is asserted there. If you change
-`nsa_flow/energy.py`, the battery is the thing that says whether the theory still
+`src/nsa_flow/energy.py`, the battery is the thing that says whether the theory still
 holds. Do not weaken an assertion to make a change pass — if a property has to
 go, the paper has to change too.
 

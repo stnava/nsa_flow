@@ -28,7 +28,7 @@ def search_paths() -> list[Path]:
     if os.environ.get("NSA_BENCH_DATA"):
         paths.append(Path(os.environ["NSA_BENCH_DATA"]))
     paths.append(Path.home() / ".cache" / "nsa_flow_bench")
-    repo_cache = Path(__file__).resolve().parents[3] / "experiments" / "cache"
+    repo_cache = Path(__file__).resolve().parents[4] / "experiments" / "cache"
     if repo_cache.exists():
         paths.append(repo_cache)
     return paths
