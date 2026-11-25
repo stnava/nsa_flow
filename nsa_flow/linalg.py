@@ -78,14 +78,16 @@ def _round_robin(n):
 def jacobi_eigh(A, sweeps=12, tol=None):
     r"""Symmetric eigendecomposition ``A = V diag(w) V'``, entirely in ``torch``.
 
-    Returns ``(w, V)`` with ``w`` ascending, matching ``torch.linalg.eigh``'s
+    Supports 2-D ``[n, n]`` and arbitrary leading batch dimensions ``[..., n, n]``.
+    Returns ``(w, V)`` with ``w`` ascending (shape ``[..., n]``) and ``V``
+    orthogonal (shape ``[..., n, n]``), matching ``torch.linalg.eigh``'s
     convention so the two are drop-in interchangeable.
 
     Each round annihilates ``n/2`` disjoint off-diagonal pairs simultaneously.
     For the pair ``(p, q)`` the rotation angle is the classical::
 
         theta = (a_qq - a_pp) / (2 a_pq),
-        t = sign(theta) / (|theta| + sqrt(theta^2 + 1)),
+        t = sign_non_zero(theta) / (|theta| + sqrt(theta^2 + 1)),
         c = 1 / sqrt(t^2 + 1),   s = t c,
 
     which is the numerically stable branch (it picks the smaller rotation and
@@ -93,71 +95,103 @@ def jacobi_eigh(A, sweeps=12, tol=None):
     are disjoint, the rotations commute and compose into one orthogonal matrix.
 
     Stops early once the off-diagonal Frobenius mass falls below ``tol`` times
-    the total, which on the matrices here is typically 4-6 sweeps.
+    the total across all batch elements, which on the matrices here is
+    typically 4-6 sweeps.
     """
-    A = A.clone()
+    if A.ndim < 2 or A.shape[-2] != A.shape[-1]:
+        raise ValueError(
+            f"jacobi_eigh expects symmetric [..., n, n] input; got shape {tuple(A.shape)}"
+        )
     n = A.shape[-1]
+    batch_shape = A.shape[:-2]
     dtype, device = A.dtype, A.device
+    if n == 0 or A.numel() == 0:
+        w_empty = torch.empty((*batch_shape, n), dtype=dtype, device=device)
+        V_empty = torch.eye(n, dtype=dtype, device=device)
+        if batch_shape:
+            V_empty = V_empty.expand(*batch_shape, n, n).clone()
+        return w_empty, V_empty
+
+    A = 0.5 * (A + A.transpose(-2, -1))
     V = torch.eye(n, dtype=dtype, device=device)
+    if batch_shape:
+        V = V.expand(*batch_shape, n, n).clone()
     if n == 1:
-        return A.reshape(1), V
+        return A.reshape(*batch_shape, 1).contiguous(), V
     if tol is None:
         tol = torch.finfo(dtype).eps * 10.0
 
+    tiny = torch.finfo(dtype).tiny
+    tol_sq = tol * tol
     rounds = _round_robin(n)
-    for _ in range(sweeps):
-        off_t = (A - torch.diag(torch.diagonal(A))).pow(2).sum()
-        total_t = A.pow(2).sum()
-        if device.type != "cpu":
-            off, total = torch.stack([off_t, total_t]).tolist()
-        else:
-            off, total = float(off_t), float(total_t)
-        if total == 0.0 or off <= (tol * tol) * total:
-            break
-        for pairs in rounds:
-            if not pairs:
-                continue
-            P = torch.tensor([p for p, _ in pairs], device=device)
-            Q = torch.tensor([q for _, q in pairs], device=device)
-            apq = A[P, Q]
-            app, aqq = A[P, P], A[Q, Q]
+    round_indices = [
+        (torch.tensor([p for p, _ in pairs], dtype=torch.long, device=device),
+         torch.tensor([q for _, q in pairs], dtype=torch.long, device=device))
+        for pairs in rounds if pairs
+    ]
+    for sw in range(sweeps):
+        # On accelerators a D2H sync costs ~50x a small-matrix Jacobi sweep;
+        # n==2 converges in 1 sweep and n>=3 typically in 4-6 sweeps, so defer
+        # the sync on non-CPU devices until convergence is expected.
+        check_conv = (
+            device.type == "cpu"
+            or (n <= 2 and sw >= 1)
+            or (n > 2 and (sw >= 4 and sw % 2 == 0))
+        )
+        if check_conv:
+            diag_A = torch.diagonal(A, dim1=-2, dim2=-1)
+            off_t = (A - torch.diag_embed(diag_A)).pow(2).sum(dim=(-2, -1))
+            total_t = A.pow(2).sum(dim=(-2, -1))
+            need = (off_t > tol_sq * total_t).any()
+            if not (need.tolist() if device.type != "cpu" else bool(need)):
+                break
+        for P, Q in round_indices:
+            apq = A[..., P, Q]
+            app, aqq = A[..., P, P], A[..., Q, Q]
 
-            theta = (aqq - app) / (2.0 * apq)
-            t = torch.sign(theta) / (theta.abs() + torch.sqrt(theta * theta + 1.0))
-            t = torch.where(apq.abs() <= torch.finfo(dtype).tiny,
-                            torch.zeros_like(t), t)
+            safe_apq = torch.where(apq.abs() <= tiny, torch.ones_like(apq), apq)
+            theta = (aqq - app) / (2.0 * safe_apq)
+            sgn = torch.where(theta >= 0.0, torch.ones_like(theta), -torch.ones_like(theta))
+            t = sgn / (theta.abs() + torch.sqrt(theta * theta + 1.0))
+            t = torch.where(apq.abs() <= tiny, torch.zeros_like(t), t)
             c = 1.0 / torch.sqrt(t * t + 1.0)
             s = t * c
 
             # Apply the disjoint rotations by updating only the rows and
-            # columns they touch.  Composing them into a dense [n, n] matrix and
-            # doing two full matmuls costs O(n^3) per ROUND, i.e. O(n^4) per
-            # sweep, which is unusable past n ~ 100; this is O(n) per rotation,
-            # so O(n^2) per round and O(n^3) per sweep.
-            c_ = c.unsqueeze(1)
-            s_ = s.unsqueeze(1)
-            Ap, Aq = A[P, :], A[Q, :]                  # rows
-            A[P, :] = c_ * Ap - s_ * Aq
-            A[Q, :] = s_ * Ap + c_ * Aq
-            Ap, Aq = A[:, P], A[:, Q]                  # columns
-            A[:, P] = c.unsqueeze(0) * Ap - s.unsqueeze(0) * Aq
-            A[:, Q] = s.unsqueeze(0) * Ap + c.unsqueeze(0) * Aq
-            Vp, Vq = V[:, P], V[:, Q]                  # accumulate eigenvectors
-            V[:, P] = c.unsqueeze(0) * Vp - s.unsqueeze(0) * Vq
-            V[:, Q] = s.unsqueeze(0) * Vp + c.unsqueeze(0) * Vq
+            # columns they touch across all leading batch dimensions at once.
+            c_row = c.unsqueeze(-1)
+            s_row = s.unsqueeze(-1)
+            Ap, Aq = A[..., P, :], A[..., Q, :]
+            A[..., P, :] = c_row * Ap - s_row * Aq
+            A[..., Q, :] = s_row * Ap + c_row * Aq
+
+            c_col = c.unsqueeze(-2)
+            s_col = s.unsqueeze(-2)
+            Ap, Aq = A[..., :, P], A[..., :, Q]
+            A[..., :, P] = c_col * Ap - s_col * Aq
+            A[..., :, Q] = s_col * Ap + c_col * Aq
+
+            Vp, Vq = V[..., :, P], V[..., :, Q]
+            V[..., :, P] = c_col * Vp - s_col * Vq
+            V[..., :, Q] = s_col * Vp + c_col * Vq
         # keep it exactly symmetric against accumulated rounding
         A = 0.5 * (A + A.transpose(-2, -1))
 
-    w = torch.diagonal(A)
-    order = torch.argsort(w)
-    return w[order].contiguous(), V[:, order].contiguous()
+    w = torch.diagonal(A, dim1=-2, dim2=-1)
+    order = torch.argsort(w, dim=-1)
+    w_sorted = torch.gather(w, -1, order).contiguous()
+    V_sorted = torch.gather(V, -1, order.unsqueeze(-2).expand_as(V)).contiguous()
+    return w_sorted, V_sorted
 
 
 def safe_eigh(A):
     """``torch.linalg.eigh``, or :func:`jacobi_eigh` where it is unavailable.
 
+    Supports 2-D ``[n, n]`` and arbitrary leading batch dimensions ``[..., n, n]``.
     No host fallback: the replacement runs on whatever device ``A`` is on.
     """
+    if A.device.type == "mps" or not _has_native_eigh(A):
+        return jacobi_eigh(A)
     try:
         return torch.linalg.eigh(A)
     except (NotImplementedError, RuntimeError):
